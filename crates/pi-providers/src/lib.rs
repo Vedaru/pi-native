@@ -10,6 +10,7 @@
 
 pub mod anthropic;
 pub mod convert;
+pub mod openai_responses;
 
 pub use anthropic::{
     apply_conversation_cache_breakpoint, build_anthropic_params, build_system, convert_tools,
@@ -17,3 +18,7 @@ pub use anthropic::{
     AnthropicSystemBlock, AnthropicTool, ContentBlock, MessageContent, ThinkingOptions, ToolSpec,
 };
 pub use convert::{convert_messages, AssistantBlock, ContentPart, TranscriptMessage};
+pub use openai_responses::{
+    build_openai_responses_params, convert_responses_input, convert_responses_tools,
+    OpenAiResponsesBuildOptions, OpenAiResponsesParams,
+};
