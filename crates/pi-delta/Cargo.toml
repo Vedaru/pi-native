@@ -1,0 +1,10 @@
+[package]
+name = "pi-delta"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "JSON revision diffing and operation batches (chord delta port)"
+
+[dependencies]
+serde_json = { workspace = true }
