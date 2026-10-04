@@ -1,0 +1,11 @@
+[package]
+name = "pi-plugins"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Native plugin host: embedded QuickJS + pi extension API bridge"
+
+[dependencies]
+rquickjs = { version = "0.14", features = ["loader"] }
+serde_json = { workspace = true }

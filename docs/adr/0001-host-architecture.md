@@ -43,7 +43,7 @@ A reference native port (`Dicklesworthstone/pi_agent_rust`) was measured at
    TypeScript-to-JavaScript transpilation (replacing `jiti`). JS/TS extension
    entrypoints load unchanged.
 3. **Hostcall bridge.** Extensions call the host through a Promise-based
-   `pi.tool/pi.exec/pi.http/pi.ui/pi.events` bridge; the host enforces a
+   `pi.tool/pi.exec/pi.http/pi.ui/pi.events/pi.log` bridge; the host enforces a
    capability policy per request.
 4. **Native providers and HTTP.** SSE streaming implemented natively (no
    `undici`, no provider SDKs).
@@ -53,6 +53,26 @@ A reference native port (`Dicklesworthstone/pi_agent_rust`) was measured at
 
 The provider request path is ported from pi and gated by byte-level parity
 before it is considered done.
+
+### Extension runtime model (decided: follow the reference port)
+
+We adopt the same model as `Dicklesworthstone/pi_agent_rust`:
+
+- **Node built-ins are shimmed in Rust.** A module resolver maps Node
+  specifiers (`fs`, `fs/promises`, `path`, `os`, `child_process`, `crypto`,
+  `http`, `https`, `stream`, `buffer`, `events`, `url`, `util`, `readline`,
+  `module`, `assert`, `zlib`, ...) to virtual modules backed by Rust.
+- **`@earendil-works/*` and `typebox`** resolve to internal virtual modules.
+- **npm bare specifiers are NOT executed.** They resolve to minimal proxy stubs
+  so an extension loads and registers, but the library behavior is absent. This
+  is the accepted cost of "no Node", and it is documented rather than hidden.
+- **TypeScript/TSX/JSX** is transpiled with `swc`.
+- **Capability policy** replaces Node's ambient authority: every side effect
+  goes through an audited hostcall.
+
+A Node sidecar is explicitly **not** part of the design. If a plugin needs real
+Node/npm behavior that the shim layer cannot provide, it is out of scope until
+the shim is extended.
 
 ## Rationale
 
