@@ -43,6 +43,31 @@ scripts/package.sh x86_64-unknown-linux-musl   # static build (needs musl-tools)
 
 `pi-native --version` reports the version, git revision, and target triple.
 
+## Headless host
+
+`pi-native` runs the agent loop over the JSON-lines protocol
+(`docs/rpc-protocol.md`). One generic path: pick a provider, the loop and tools
+are the same.
+
+```bash
+# one-shot
+ANTHROPIC_API_KEY=… pi-native -p "summarize README.md"
+
+# a unit: protocol on stdio (deny approval-required tools unless --yolo)
+ANTHROPIC_API_KEY=… pi-native --serve --provider anthropic
+
+# drive a local unit from the terminal
+pi-native --client
+
+# openai / google
+OPENAI_API_KEY=…  pi-native --serve --provider openai-responses --model gpt-4o
+GEMINI_API_KEY=…  pi-native --serve --provider google       --model gemini-2.0-flash
+```
+
+Flags: `--provider anthropic|openai-responses|google`, `--model`, `--session
+<path>` (seed the transcript), `--context-window <tokens>` (compaction; 0
+disables), `--yolo`. Events stream as the turn produces them.
+
 ## Prompt-cache primitives (`pi-cache`)
 
 The provider-parity gate (VED-315) requires exact cache behavior. `pi-cache`

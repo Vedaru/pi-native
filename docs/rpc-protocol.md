@@ -54,7 +54,11 @@ message.
 
 ## Notes
 
-- `serve` in `pi-rpc` reads requests line by line and writes one or more events
-  per request, flushing after each.
+- `serve` / `serve_with` in `pi-rpc` read requests line by line and **stream**
+  events as the turn produces them (no whole-turn buffering); `serve_with` runs
+  a hook after each prompt (e.g. session persistence).
 - The memory benchmark's `pi-native --rpc` idle mode is separate from this
-  protocol; serving an agent is wired in the client milestone (VED-325).
+  protocol.
+- Status: `ui_request` / `ui_response` and session **persistence** are defined
+  but not yet emitted/wired by the server. Approvals are currently agent-level
+  (`--yolo` allows; otherwise approval-required tools are denied).

@@ -112,10 +112,22 @@ fn from_agent_event(event: AgentEvent) -> Event {
 /// Serve a unit over any reader/writer pair, one JSON request per line.
 ///
 /// Writes `ready`, then one or more events per request, each as a JSON line.
+/// Events are streamed as the turn produces them (no whole-turn buffering).
 pub fn serve<R: std::io::BufRead, W: std::io::Write>(
     agent: &mut Agent,
     reader: R,
+    writer: W,
+) -> Result<(), AgentError> {
+    serve_with(agent, reader, writer, |_| {})
+}
+
+/// Like [`serve`], but calls `after_turn` once a prompt finishes (e.g. to
+/// persist the session). Events are streamed, not collected.
+pub fn serve_with<R: std::io::BufRead, W: std::io::Write, F: FnMut(&Agent)>(
+    agent: &mut Agent,
+    reader: R,
     mut writer: W,
+    mut after_turn: F,
 ) -> Result<(), AgentError> {
     let mut write = |event: &Event| {
         if let Ok(line) = serde_json::to_string(event) {
@@ -136,11 +148,20 @@ pub fn serve<R: std::io::BufRead, W: std::io::Write>(
             continue;
         }
         match serde_json::from_str::<Request>(&line) {
-            Ok(request) => {
-                for event in handle(agent, request) {
-                    write(&event);
+            Ok(Request::Prompt { text }) => {
+                agent.push_user(text);
+                match agent.run_with(|event| write(&from_agent_event(event.clone()))) {
+                    Ok(()) => after_turn(agent),
+                    Err(error) => write(&Event::Error {
+                        message: error.to_string(),
+                    }),
                 }
             }
+            Ok(Request::GetState) => write(&Event::State {
+                messages: agent.messages().len(),
+            }),
+            // The bridge stores responses; the host decides what to do with them.
+            Ok(Request::UiResponse { .. }) => {}
             Err(error) => write(&Event::Error {
                 message: format!("invalid request: {error}"),
             }),

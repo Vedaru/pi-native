@@ -299,6 +299,14 @@ impl Agent {
         self.push(TranscriptMessage::UserText(text.into()));
     }
 
+    /// Seed the transcript from existing messages (e.g. a loaded session),
+    /// without running a turn or counting tokens against a provider request.
+    pub fn extend_messages(&mut self, messages: impl IntoIterator<Item = TranscriptMessage>) {
+        for message in messages {
+            self.push(message);
+        }
+    }
+
     pub fn messages(&self) -> &[TranscriptMessage] {
         &self.messages
     }

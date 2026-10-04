@@ -75,3 +75,20 @@ fn invalid_request_yields_an_error_event() {
     let text = String::from_utf8(output).unwrap();
     assert!(text.contains("\"type\":\"error\""), "{text}");
 }
+
+#[test]
+fn serve_with_runs_the_hook_after_each_prompt() {
+    let mut agent = agent_with(vec![AssistantTurn {
+        text: "hi".into(),
+        ..Default::default()
+    }]);
+    let input = "{\"type\":\"prompt\",\"text\":\"go\"}\n";
+    let mut output = Vec::new();
+    let mut counts = Vec::new();
+    serve_with(&mut agent, input.as_bytes(), &mut output, |agent| {
+        counts.push(agent.messages().len());
+    })
+    .expect("serves");
+    // The hook sees the finished transcript: the user prompt and the reply.
+    assert_eq!(counts, vec![2]);
+}

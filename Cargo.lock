@@ -1094,6 +1094,7 @@ dependencies = [
  "pi-agent",
  "pi-cache",
  "pi-rpc",
+ "pi-session",
  "pi-tools",
  "serde_json",
 ]

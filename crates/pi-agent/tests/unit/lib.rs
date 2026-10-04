@@ -426,3 +426,19 @@ fn compaction_does_not_churn_when_reserve_is_large() {
         "compaction churned: {compactions} over 60 turns"
     );
 }
+
+#[test]
+fn extend_messages_seeds_the_transcript() {
+    let mut agent = Agent::new(
+        Box::new(FauxProvider::new(Vec::new())),
+        Vec::new(),
+        "system",
+        ToolContext::new(std::env::temp_dir()),
+    );
+    agent.extend_messages([
+        TranscriptMessage::UserText("hello".into()),
+        TranscriptMessage::Assistant(vec![AssistantBlock::Text { text: "hi".into() }]),
+    ]);
+    assert_eq!(agent.messages().len(), 2);
+    assert!(agent.retained_bytes() > 0);
+}

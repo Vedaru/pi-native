@@ -6,8 +6,9 @@
 
 use clap::{Parser, Subcommand, ValueEnum};
 use pi_agent::{
-    anthropic_provider, Agent, AgentEvent, AllowAll, Approval, Approver, AssistantTurn, DenyAll,
-    FnProvider, ToolCall, DEFAULT_RESERVE_TOKENS,
+    anthropic_provider, google_provider, messages_from_session, openai_responses_provider, Agent,
+    AgentEvent, AllowAll, Approval, Approver, AssistantTurn, DenyAll, FnProvider, ModelProvider,
+    ToolCall, DEFAULT_RESERVE_TOKENS,
 };
 use pi_cache::{
     clamp_openai_prompt_cache_key, get_cache_control, openai_completions_prompt_cache_key,
@@ -15,6 +16,7 @@ use pi_cache::{
 };
 use pi_tools::{default_tools, ToolContext};
 use std::io::{BufRead, BufReader, Write};
+use std::path::PathBuf;
 use std::process::{Command as ProcessCommand, Stdio};
 use std::sync::Arc;
 
@@ -47,11 +49,20 @@ struct Cli {
     /// Non-interactive: run one prompt through the agent and print the result.
     #[arg(short = 'p', long = "print")]
     print: Option<String>,
-    /// Model id for `--print` (defaults to an Anthropic Claude model).
+    /// Model id (defaults to an Anthropic Claude model).
     #[arg(long, default_value = "claude-sonnet-4-5")]
     model: String,
+    /// Provider protocol: anthropic, openai-responses, or google.
+    #[arg(long, default_value = "anthropic")]
+    provider: String,
+    /// Token context window for compaction; 0 disables (reserve is 16,384).
+    #[arg(long, default_value_t = 200000)]
+    context_window: usize,
+    /// Load an existing session file to seed the transcript.
+    #[arg(long)]
+    session: Option<PathBuf>,
     /// Accepted for parity with pi's benchmark invocation; sessions are not
-    /// implemented yet, so this is a no-op.
+    /// persisted yet, so this is a no-op.
     #[arg(long = "no-session")]
     no_session: bool,
     /// Allow approval-required tools (bash/write/edit) without asking.
@@ -134,11 +145,23 @@ fn main() {
         return;
     }
     if cli.serve {
-        run_serve(&cli.model, cli.yolo);
+        run_serve(
+            &cli.model,
+            &cli.provider,
+            cli.yolo,
+            cli.context_window,
+            cli.session.as_deref(),
+        );
         return;
     }
     if cli.client {
-        run_client(cli.yolo);
+        run_client(
+            &cli.model,
+            &cli.provider,
+            cli.yolo,
+            cli.context_window,
+            cli.session.as_deref(),
+        );
         return;
     }
     if let Some(turns) = cli.stress {
@@ -155,7 +178,14 @@ fn main() {
         return;
     }
     if let Some(prompt) = cli.print {
-        run_print(&prompt, &cli.model, cli.yolo);
+        run_print(
+            &prompt,
+            &cli.model,
+            &cli.provider,
+            cli.yolo,
+            cli.context_window,
+            cli.session.as_deref(),
+        );
         return;
     }
     match cli.command {
@@ -200,28 +230,17 @@ fn run_rpc() {
 }
 
 /// Run one prompt through the agent and print the result.
-fn run_print(prompt: &str, model: &str, yolo: bool) {
-    let api_key = std::env::var("ANTHROPIC_API_KEY").unwrap_or_default();
-    if api_key.is_empty() {
-        eprintln!("pi-native --print: ANTHROPIC_API_KEY is not set");
-        std::process::exit(2);
-    }
-    let base_url = std::env::var("ANTHROPIC_BASE_URL")
-        .unwrap_or_else(|_| "https://api.anthropic.com".to_string());
-    let provider = anthropic_provider(base_url, api_key, model);
-    let cwd = std::env::current_dir().unwrap_or_default();
-    let approver: Arc<dyn Approver> = if yolo {
-        Arc::new(AllowAll)
-    } else {
-        Arc::new(TerminalApprover)
-    };
-    let mut agent = Agent::new(
-        Box::new(provider),
-        default_tools(),
-        "You are pi, a coding agent. Be concise.",
-        ToolContext::new(cwd),
-    )
-    .with_approver(approver);
+fn run_print(
+    prompt: &str,
+    model: &str,
+    provider: &str,
+    yolo: bool,
+    context_window: usize,
+    session: Option<&std::path::Path>,
+) {
+    let system = "You are pi, a coding agent. Be concise.";
+    let mut agent = resolve_agent(model, provider, yolo, true, context_window, system);
+    seed_session(&mut agent, session);
     agent.push_user(prompt);
     match agent.run() {
         Ok(events) => {
@@ -442,41 +461,132 @@ fn peak_rss_mb() -> Option<f64> {
 
 const SYSTEM_PROMPT: &str = "You are pi, a coding agent. Be concise.";
 
-/// Serve the RPC protocol over stdio with a real Anthropic provider.
-fn run_serve(model: &str, yolo: bool) {
-    let api_key = std::env::var("ANTHROPIC_API_KEY").unwrap_or_default();
-    if api_key.is_empty() {
-        eprintln!("pi-native --serve: ANTHROPIC_API_KEY is not set");
-        std::process::exit(2);
-    }
-    let base_url = std::env::var("ANTHROPIC_BASE_URL")
-        .unwrap_or_else(|_| "https://api.anthropic.com".to_string());
-    let provider = anthropic_provider(base_url, api_key, model);
-    let cwd = std::env::current_dir().unwrap_or_default();
+/// Build an agent for the selected provider, with compaction when enabled.
+///
+/// One generic path: the provider is chosen here, the loop/tools are the same.
+fn resolve_agent(
+    model: &str,
+    provider: &str,
+    yolo: bool,
+    interactive: bool,
+    context_window: usize,
+    system: &str,
+) -> Agent {
+    let boxed: Box<dyn ModelProvider> = match provider {
+        "anthropic" => {
+            let base = std::env::var("ANTHROPIC_BASE_URL")
+                .unwrap_or_else(|_| "https://api.anthropic.com".to_string());
+            Box::new(anthropic_provider(
+                base,
+                env_key(&["ANTHROPIC_API_KEY"]),
+                model,
+            ))
+        }
+        "openai-responses" | "openai" => {
+            let base = std::env::var("OPENAI_BASE_URL")
+                .unwrap_or_else(|_| "https://api.openai.com/v1".to_string());
+            Box::new(openai_responses_provider(
+                base,
+                env_key(&["OPENAI_API_KEY"]),
+                model,
+            ))
+        }
+        "google" => {
+            let base = std::env::var("GOOGLE_BASE_URL")
+                .unwrap_or_else(|_| "https://generativelanguage.googleapis.com".to_string());
+            Box::new(google_provider(
+                base,
+                env_key(&["GEMINI_API_KEY", "GOOGLE_API_KEY"]),
+                model,
+            ))
+        }
+        other => {
+            eprintln!(
+                "pi-native: unknown provider `{other}` (anthropic, openai-responses, google)"
+            );
+            std::process::exit(2);
+        }
+    };
     let approver: Arc<dyn Approver> = if yolo {
         Arc::new(AllowAll)
+    } else if interactive {
+        Arc::new(TerminalApprover)
     } else {
         Arc::new(DenyAll)
     };
-    let mut agent = Agent::new(
-        Box::new(provider),
-        default_tools(),
-        SYSTEM_PROMPT,
-        ToolContext::new(cwd),
-    )
-    .with_approver(approver);
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let mut agent =
+        Agent::new(boxed, default_tools(), system, ToolContext::new(cwd)).with_approver(approver);
+    if context_window > 0 {
+        agent = agent.with_compaction(context_window, DEFAULT_RESERVE_TOKENS);
+    }
+    agent
+}
+
+/// First set, non-empty env var, or exit with a helpful message.
+fn env_key(names: &[&str]) -> String {
+    for name in names {
+        if let Ok(value) = std::env::var(name) {
+            if !value.is_empty() {
+                return value;
+            }
+        }
+    }
+    eprintln!("pi-native: set {}", names.join(" or "));
+    std::process::exit(2);
+}
+
+/// Seed the transcript from a session file, if one was given.
+fn seed_session(agent: &mut Agent, session: Option<&std::path::Path>) {
+    if let Some(path) = session {
+        match pi_session::SessionFile::read(path) {
+            Ok(file) => agent.extend_messages(messages_from_session(&file)),
+            Err(error) => {
+                eprintln!("pi-native: cannot read session {}: {error}", path.display());
+                std::process::exit(2);
+            }
+        }
+    }
+}
+
+/// Serve the RPC protocol over stdio with the selected provider.
+fn run_serve(
+    model: &str,
+    provider: &str,
+    yolo: bool,
+    context_window: usize,
+    session: Option<&std::path::Path>,
+) {
+    let mut agent = resolve_agent(model, provider, yolo, false, context_window, SYSTEM_PROMPT);
+    seed_session(&mut agent, session);
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
     let _ = pi_rpc::serve(&mut agent, stdin.lock(), stdout.lock());
 }
 
 /// A minimal terminal client: spawn a unit serving the protocol and drive it.
-fn run_client(yolo: bool) {
+fn run_client(
+    model: &str,
+    provider: &str,
+    yolo: bool,
+    context_window: usize,
+    session: Option<&std::path::Path>,
+) {
     let exe = std::env::current_exe().expect("current executable");
     let mut command = ProcessCommand::new(exe);
-    command.arg("--serve");
+    command
+        .arg("--serve")
+        .arg("--model")
+        .arg(model)
+        .arg("--provider")
+        .arg(provider)
+        .arg("--context-window")
+        .arg(context_window.to_string());
     if yolo {
         command.arg("--yolo");
+    }
+    if let Some(path) = session {
+        command.arg("--session").arg(path);
     }
     let mut child = match command.stdin(Stdio::piped()).stdout(Stdio::piped()).spawn() {
         Ok(child) => child,
