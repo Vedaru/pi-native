@@ -69,10 +69,7 @@ fn tool_specs_serialize_for_the_provider() {
     let tools = default_tools();
     let specs = tool_specs(&tools);
     let names: Vec<&str> = specs.iter().map(|spec| spec.name.as_str()).collect();
-    assert_eq!(
-        names,
-        vec!["read", "bash", "edit", "write", "grep", "find", "ls"]
-    );
+    assert_eq!(names, vec!["read", "bash", "edit", "write"]);
     assert_eq!(
         specs[0].input_schema["required"],
         serde_json::json!(["path"])
@@ -169,7 +166,7 @@ fn grep_streams_a_large_file() {
 /// (captured from `createAllToolDefinitions`, pi 1.0.2).
 #[test]
 fn default_tool_specs_match_pi() {
-    let specs: Vec<serde_json::Value> = default_tools()
+    let specs: Vec<serde_json::Value> = all_tools()
         .iter()
         .map(|tool| {
             serde_json::json!({

@@ -31,6 +31,7 @@ fn tools() -> Vec<ToolSpec> {
                 "properties": {"path": {"type": "string"}},
                 "required": ["path"]
             }),
+            strict: false,
         },
         ToolSpec {
             name: "bash".into(),
@@ -40,6 +41,7 @@ fn tools() -> Vec<ToolSpec> {
                 "properties": {"command": {"type": "string"}},
                 "required": ["command"]
             }),
+            strict: false,
         },
     ]
 }

@@ -125,12 +125,19 @@ pub trait Tool {
         false
     }
 
+    /// Whether the tool prefers constrained (strict) JSON-schema sampling,
+    /// matching pi's `constrainedSampling` (`read`/`bash`/`edit`/`write`).
+    fn strict(&self) -> bool {
+        false
+    }
+
     /// The provider-facing tool definition.
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: self.name().to_string(),
             description: self.description().to_string(),
             input_schema: self.input_schema(),
+            strict: self.strict(),
         }
     }
 }
@@ -141,6 +148,10 @@ pub struct ReadTool;
 impl Tool for ReadTool {
     fn name(&self) -> &'static str {
         "read"
+    }
+
+    fn strict(&self) -> bool {
+        true
     }
 
     fn description(&self) -> &'static str {
@@ -235,6 +246,10 @@ pub struct BashTool;
 impl Tool for BashTool {
     fn name(&self) -> &'static str {
         "bash"
+    }
+
+    fn strict(&self) -> bool {
+        true
     }
 
     fn requires_approval(&self) -> bool {
@@ -382,6 +397,10 @@ impl Tool for WriteTool {
         "write"
     }
 
+    fn strict(&self) -> bool {
+        true
+    }
+
     fn requires_approval(&self) -> bool {
         true
     }
@@ -427,6 +446,10 @@ pub struct EditTool;
 impl Tool for EditTool {
     fn name(&self) -> &'static str {
         "edit"
+    }
+
+    fn strict(&self) -> bool {
+        true
     }
 
     fn requires_approval(&self) -> bool {
@@ -782,10 +805,22 @@ impl Tool for FindTool {
     }
 }
 
-/// The default tool set.
+/// pi's default enabled tools (`read`, `bash`, `edit`, `write`).
+///
+/// pi enables only these by default; `grep`/`find`/`ls` are available but not
+/// declared unless selected. Keeping the default identical keeps the system
+/// prompt and the provider `tools` array byte-identical to pi.
 pub fn default_tools() -> Vec<Box<dyn Tool>> {
-    // Order matches pi's tool registry: the system prompt lists tools in this
-    // order and the provider's `tools` array is sent in it.
+    vec![
+        Box::new(ReadTool),
+        Box::new(BashTool),
+        Box::new(EditTool),
+        Box::new(WriteTool),
+    ]
+}
+
+/// Every built-in tool pi ships, in pi's registry order.
+pub fn all_tools() -> Vec<Box<dyn Tool>> {
     vec![
         Box::new(ReadTool),
         Box::new(BashTool),

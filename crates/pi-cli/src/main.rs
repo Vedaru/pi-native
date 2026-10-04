@@ -16,7 +16,7 @@ use pi_cache::{
     openai_responses_prompt_cache_key, resolve_cache_retention, CacheRetention,
 };
 use pi_plugins::{PluginInstance, PluginPolicy};
-use pi_tools::{default_tools, Tool, ToolContext, ToolResult};
+use pi_tools::{all_tools, default_tools, Tool, ToolContext, ToolResult};
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Command as ProcessCommand, Stdio};
@@ -362,7 +362,7 @@ fn stress_args(tool: &str, index: usize) -> serde_json::Value {
 fn run_stress_tool(turns: usize, tool: &str) {
     let dir = stress_workspace(tool);
     let ctx = ToolContext::new(&dir);
-    let tools = default_tools();
+    let tools = all_tools();
     let Some(selected) = tools.iter().find(|candidate| candidate.name() == tool) else {
         eprintln!("pi-native --stress: unknown tool `{tool}`");
         std::process::exit(2);
@@ -426,7 +426,7 @@ fn run_stress_session(turns: usize, tool: &str, byte_limit_mb: usize, context_to
 
     let agent = Agent::new(
         Box::new(provider),
-        default_tools(),
+        all_tools(),
         "You are pi, a coding agent. Be concise.",
         ToolContext::new(&dir),
     )

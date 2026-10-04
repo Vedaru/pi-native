@@ -25,6 +25,7 @@ fn tool(name: &str) -> ToolSpec {
         name: name.to_string(),
         description: format!("{name} tool"),
         input_schema: json!({"type": "object", "properties": {}, "required": []}),
+        strict: false,
     }
 }
 
@@ -237,6 +238,7 @@ fn parity_tools() -> Vec<ToolSpec> {
                 "properties": {"path": {"type": "string"}},
                 "required": ["path"]
             }),
+            strict: false,
         },
         ToolSpec {
             name: "bash".into(),
@@ -246,6 +248,7 @@ fn parity_tools() -> Vec<ToolSpec> {
                 "properties": {"command": {"type": "string"}},
                 "required": ["command"]
             }),
+            strict: false,
         },
     ]
 }

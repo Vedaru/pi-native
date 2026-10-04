@@ -88,6 +88,8 @@ pub struct ToolSpec {
     pub description: String,
     /// Full JSON schema (object with `type`, `properties`, `required`).
     pub input_schema: Value,
+    /// Whether the tool prefers constrained (strict) JSON-schema sampling.
+    pub strict: bool,
 }
 
 /// Assembled Anthropic Messages params.

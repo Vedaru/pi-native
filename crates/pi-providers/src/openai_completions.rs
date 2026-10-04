@@ -63,16 +63,131 @@ fn convert_tools(tools: &[ToolSpec], supports_strict_mode: bool) -> Vec<Value> {
     tools
         .iter()
         .map(|tool| {
+            // pi applies strict-mode schema expansion only to tools that prefer
+            // it (`constrainedSampling: json_schema`), and only when the model
+            // supports strict mode.
+            let (parameters, strict) = if supports_strict_mode && tool.strict {
+                match make_strict_schema(&tool.input_schema) {
+                    Ok(schema) => (schema, true),
+                    Err(_) => (tool.input_schema.clone(), false),
+                }
+            } else {
+                (tool.input_schema.clone(), false)
+            };
             let mut function = Map::new();
             function.insert("name".into(), json!(tool.name));
             function.insert("description".into(), json!(tool.description));
-            function.insert("parameters".into(), tool.input_schema.clone());
+            function.insert("parameters".into(), parameters);
             if supports_strict_mode {
-                function.insert("strict".into(), json!(false));
+                function.insert("strict".into(), json!(strict));
             }
             json!({ "type": "function", "function": Value::Object(function) })
         })
         .collect()
+}
+
+/// Keys pi rejects in strict schemas.
+const UNSUPPORTED_STRICT_KEYS: &[&str] = &[
+    "$ref",
+    "$defs",
+    "definitions",
+    "allOf",
+    "oneOf",
+    "patternProperties",
+];
+
+/// Convert a tool schema to the strict subset pi sends with `strict: true`.
+///
+/// Mirrors `makeStrictJsonSchema`: every object gets `additionalProperties:
+/// false`, all properties become required, and optional non-null properties are
+/// wrapped in `anyOf: [schema, {"type": "null"}]`.
+pub fn make_strict_schema(schema: &Value) -> Result<Value, String> {
+    let mut cloned = schema.clone();
+    make_node_strict(&mut cloned)?;
+    if cloned.get("type").and_then(Value::as_str) != Some("object") {
+        return Err("root schema must have type object".to_string());
+    }
+    Ok(cloned)
+}
+
+fn make_node_strict(node: &mut Value) -> Result<(), String> {
+    let Some(object) = node.as_object_mut() else {
+        return Err("boolean schemas are unsupported".to_string());
+    };
+    for key in UNSUPPORTED_STRICT_KEYS {
+        if object.contains_key(*key) {
+            return Err(format!("{key} schemas are unsupported"));
+        }
+    }
+    if let Some(items) = object.get_mut("items") {
+        if items.is_array() {
+            return Err("tuple schemas are unsupported".to_string());
+        }
+        make_node_strict(items)?;
+    }
+    if let Some(variants) = object.get_mut("anyOf").and_then(Value::as_array_mut) {
+        for variant in variants.iter_mut() {
+            make_node_strict(variant)?;
+        }
+    }
+    let is_object = object.get("type").and_then(Value::as_str) == Some("object");
+    if object.contains_key("properties") && !is_object {
+        return Err("properties require type object".to_string());
+    }
+    if !is_object {
+        return Ok(());
+    }
+    if let Some(additional) = object.get("additionalProperties") {
+        if additional != &Value::Bool(false) {
+            return Err("schema-valued additionalProperties is unsupported".to_string());
+        }
+    }
+    let property_names: Vec<String> = object
+        .get("properties")
+        .and_then(Value::as_object)
+        .map(|properties| properties.keys().cloned().collect())
+        .unwrap_or_default();
+    let required: Vec<String> = object
+        .get("required")
+        .and_then(Value::as_array)
+        .map(|required| {
+            required
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    if let Some(properties) = object.get_mut("properties").and_then(Value::as_object_mut) {
+        for (key, property) in properties.iter_mut() {
+            make_node_strict(property)?;
+            if !required.contains(key) && !schema_allows_null(property) {
+                let original = property.clone();
+                *property = json!({ "anyOf": [original, { "type": "null" }] });
+            }
+        }
+    }
+    object.insert("required".into(), json!(property_names));
+    object.insert("additionalProperties".into(), Value::Bool(false));
+    Ok(())
+}
+
+fn schema_allows_null(schema: &Value) -> bool {
+    if let Some(kind) = schema.get("type") {
+        if kind == "null" {
+            return true;
+        }
+        if let Some(types) = kind.as_array() {
+            if types.iter().any(|kind| kind == "null") {
+                return true;
+            }
+        }
+    }
+    schema
+        .get("anyOf")
+        .and_then(Value::as_array)
+        .map(|variants| variants.iter().any(schema_allows_null))
+        .unwrap_or(false)
 }
 
 fn convert_messages(
