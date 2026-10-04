@@ -160,3 +160,59 @@ fn serve_unit_asks_the_client_before_approval_required_tools() {
     assert!(text.contains("\"type\":\"tool_end\""), "{text}");
     assert!(!text.contains("\"is_error\":true"), "{text}");
 }
+
+#[derive(Clone)]
+struct SessionBuf(std::rc::Rc<std::cell::RefCell<Vec<u8>>>);
+impl std::io::Write for SessionBuf {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.borrow_mut().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn serve_session_answers_tree_messages_and_resume() {
+    let dir = std::env::temp_dir().join(format!("pi-rpc-session-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("dir");
+    let path = dir.join("s.jsonl");
+    let lines = concat!(
+        "{\"type\":\"header\",\"id\":\"h\",\"timestamp\":\"2024-01-01T00:00:00Z\",\"cwd\":\"/tmp\",\"version\":1}\n",
+        "{\"type\":\"message\",\"id\":\"m1\",\"parentId\":null,\"timestamp\":\"2024-01-01T00:00:01Z\",\"message\":{\"role\":\"user\",\"content\":\"hello\"}}\n",
+        "{\"type\":\"message\",\"id\":\"m2\",\"parentId\":\"m1\",\"timestamp\":\"2024-01-01T00:00:02Z\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"hi\"}]}}\n",
+    );
+    std::fs::write(&path, lines).expect("write session");
+
+    // The unit seeds from the session and answers navigation commands.
+    let mut agent = agent_with(vec![AssistantTurn::default()]);
+    let input = concat!(
+        "{\"type\":\"get_tree\"}\n",
+        "{\"type\":\"get_messages\"}\n",
+        "{\"type\":\"get_last_assistant_text\"}\n",
+    );
+    let buf = SessionBuf(std::rc::Rc::new(std::cell::RefCell::new(Vec::new())));
+    serve_unit_session(
+        &mut agent,
+        Some(path.clone()),
+        "/tmp",
+        std::io::Cursor::new(input.as_bytes().to_vec()),
+        buf.clone(),
+        |_| {},
+    )
+    .expect("serves");
+    let text = String::from_utf8(buf.0.borrow().clone()).unwrap();
+    assert!(text.contains("\"command\":\"get_tree\""), "{text}");
+    assert!(text.contains("\"parentId\":\"m1\""), "{text}");
+    assert!(
+        text.contains("\"command\":\"get_last_assistant_text\""),
+        "{text}"
+    );
+    assert!(text.contains("\"text\":\"hi\""), "{text}");
+    // The seeded transcript is 2 messages.
+    assert_eq!(agent.messages().len(), 2);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

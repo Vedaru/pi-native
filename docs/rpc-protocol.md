@@ -10,15 +10,31 @@ Protocol version: `1` (reported in the `ready` event).
 
 ```json
 {"type": "prompt", "text": "run the tests"}
-{"type": "get_state"}
+{"type": "get_messages"}
+{"type": "get_tree"}
+{"type": "switch_session", "sessionPath": "/path/to/session.jsonl"}
 {"type": "ui_response", "id": "ui-1", "value": true}
 ```
 
+Commands reply with pi's envelope: `{"type":"response","id":?,"command":?,
+"success":?,"data":{...}}`.
+
 | Type | Fields | Meaning |
 | --- | --- | --- |
-| `prompt` | `text` | Run a prompt through the agent |
-| `get_state` | — | Report current state |
+| `prompt` | `text` (alias `message`) | Run a prompt through the agent |
+| `get_state` | — | System prompt + transcript + message count |
+| `get_messages` | — | The resolved transcript (pi message shape) |
+| `get_entries` | `since`? | Session entries, optionally after `since` |
+| `get_tree` | — | Session as `{tree, leafId}` nodes |
+| `get_last_assistant_text` | — | Most recent assistant text |
+| `get_session_stats` | — | Session counts and file/name |
+| `new_session` | `parentSession`? | Start an empty session (new file) |
+| `switch_session` | `sessionPath` | Load a session file and continue (resume) |
+| `set_session_name` | `name` | Name the current session |
 | `ui_response` | `id`, `value` | Answer a `ui_request` |
+
+The rest of pi's RPC command surface (steering, abort, model/thinking control,
+compaction, fork/clone, `export_html`, `bash`) is not implemented yet.
 
 ## Events (unit to client)
 

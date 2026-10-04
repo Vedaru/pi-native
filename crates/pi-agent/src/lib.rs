@@ -353,6 +353,14 @@ impl Agent {
         }
     }
 
+    /// Replace the whole transcript (e.g. after switching sessions).
+    pub fn replace_messages(&mut self, messages: Vec<TranscriptMessage>) {
+        self.messages.clear();
+        self.retained_bytes = 0;
+        self.retained_tokens = 0;
+        self.extend_messages(messages);
+    }
+
     pub fn messages(&self) -> &[TranscriptMessage] {
         &self.messages
     }

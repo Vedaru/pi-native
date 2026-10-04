@@ -636,20 +636,17 @@ fn run_serve(
     let cwd = std::env::current_dir().unwrap_or_default();
     let system = system_prompt_for(&cwd);
     let mut agent = resolve_agent(model, provider, yolo, false, context_window, &system);
-    let mut journal = open_session(&mut agent, session, &cwd);
+    let path = session.map(|path| path.to_path_buf());
+    let cwd_string = cwd.to_string_lossy().into_owned();
     // Without `--yolo`, approval-required tools ask the connected client over
-    // the protocol (`ui_request` / `ui_response`).
+    // the protocol (`ui_request` / `ui_response`). Session navigation commands
+    // (`get_tree`, `switch_session`, …) work on `--session`.
     let reader = std::io::BufReader::new(std::io::stdin());
     let writer = std::io::stdout();
-    let persist = |agent: &Agent| {
-        if let Some(journal) = journal.as_mut() {
-            let _ = journal.persist(agent.messages());
-        }
-    };
     let result = if yolo {
-        pi_rpc::serve_with(&mut agent, reader, writer, persist)
+        pi_rpc::serve_session(&mut agent, path, &cwd_string, reader, writer, |_| {})
     } else {
-        pi_rpc::serve_unit_with(&mut agent, reader, writer, persist)
+        pi_rpc::serve_unit_session(&mut agent, path, &cwd_string, reader, writer, |_| {})
     };
     let _ = result;
 }

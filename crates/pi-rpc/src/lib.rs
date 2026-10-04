@@ -1,14 +1,22 @@
 //! Headless RPC protocol and generic UI events.
 //!
-//! A unit is driven by JSON lines. Requests are commands (`prompt`,
-//! `get_state`, `ui_response`); responses are events (`ready`, `assistant_text`,
-//! `tool_start`, `tool_end`, `done`, `state`, `error`) plus **generic UI
-//! requests**. The host does not assume a terminal: any client (a small
-//! terminal client, a web page, a test harness) can render a `ui_request` and
-//! send back a `ui_response`.
+//! A unit is driven by JSON lines. Requests are commands; responses are events
+//! (`ready`, `assistant_text`, `tool_start`, `tool_end`, `done`, `state`,
+//! `response`, `error`) plus **generic UI requests**. The host does not assume a
+//! terminal: any client (a small terminal client, a web page, a test harness, or
+//! a separate UI service) can drive it.
+//!
+//! Command responses follow pi's envelope: `{type:"response", id?, command,
+//! success, data}`. Session navigation commands (`get_messages`, `get_entries`,
+//! `get_tree`, `switch_session`, `new_session`, `set_session_name`) operate on
+//! the unit's session file.
 
-use pi_agent::{transcript_values, Agent, AgentError, AgentEvent, Approval, Approver};
+use pi_agent::{
+    transcript_values, Agent, AgentError, AgentEvent, Approval, Approver, SessionJournal,
+};
+use pi_session::SessionFile;
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
 /// A protocol version, so clients can detect incompatible changes.
 pub const PROTOCOL_VERSION: u32 = 1;
@@ -18,9 +26,37 @@ pub const PROTOCOL_VERSION: u32 = 1;
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Request {
     /// Run a prompt through the agent.
-    Prompt { text: String },
+    Prompt {
+        #[serde(alias = "message")]
+        text: String,
+    },
     /// Report current state.
     GetState,
+    /// The resolved transcript in pi's message shape.
+    GetMessages,
+    /// Session entries, optionally only those after `since`.
+    GetEntries {
+        #[serde(default)]
+        since: Option<String>,
+    },
+    /// The session as a tree of entries.
+    GetTree,
+    /// The most recent assistant text.
+    GetLastAssistantText,
+    /// Counts for the current session.
+    GetSessionStats,
+    /// Start an empty session (a new file when the unit has a session dir).
+    NewSession {
+        #[serde(default, rename = "parentSession")]
+        parent_session: Option<String>,
+    },
+    /// Load a session file and continue from it.
+    SwitchSession {
+        #[serde(rename = "sessionPath")]
+        session_path: String,
+    },
+    /// Give the current session a display name.
+    SetSessionName { name: String },
     /// Answer a `ui_request` emitted earlier.
     UiResponse {
         id: String,
@@ -34,6 +70,14 @@ pub enum Request {
 pub enum Event {
     Ready {
         version: u32,
+    },
+    /// The reply to a command, using pi's envelope.
+    Response {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        command: String,
+        success: bool,
+        data: serde_json::Value,
     },
     AssistantText {
         text: String,
@@ -75,8 +119,9 @@ pub enum Event {
     },
 }
 
-/// Apply one request to an agent, returning the events it produced.
+/// Apply one request to an agent with no session file (tests/embedding).
 pub fn handle(agent: &mut Agent, request: Request) -> Vec<Event> {
+    let mut session = SessionState::empty();
     match request {
         Request::Prompt { text } => {
             agent.push_user(text);
@@ -87,9 +132,94 @@ pub fn handle(agent: &mut Agent, request: Request) -> Vec<Event> {
                 }],
             }
         }
-        Request::GetState => vec![state_event(agent)],
-        // The bridge stores responses; the host decides what to do with them.
         Request::UiResponse { .. } => Vec::new(),
+        other => apply_command(agent, &mut session, ".", None, other)
+            .into_iter()
+            .collect(),
+    }
+}
+
+/// Handle a non-prompt command. Returns the reply, if the command has one.
+fn apply_command(
+    agent: &mut Agent,
+    session: &mut SessionState,
+    cwd: &str,
+    id: Option<String>,
+    request: Request,
+) -> Option<Event> {
+    match request {
+        Request::Prompt { .. } | Request::UiResponse { .. } => None,
+        Request::GetState => Some(state_event(agent)),
+        Request::GetMessages => Some(response(
+            id,
+            "get_messages",
+            serde_json::json!({ "messages": transcript_values(agent.messages()) }),
+        )),
+        Request::GetEntries { since } => Some(response(
+            id,
+            "get_entries",
+            serde_json::json!({ "entries": session.entries(since.as_deref()) }),
+        )),
+        Request::GetTree => {
+            let (tree, leaf_id) = session.tree();
+            Some(response(
+                id,
+                "get_tree",
+                serde_json::json!({ "tree": tree, "leafId": leaf_id }),
+            ))
+        }
+        Request::GetLastAssistantText => Some(response(
+            id,
+            "get_last_assistant_text",
+            serde_json::json!({ "text": last_assistant_text(agent) }),
+        )),
+        Request::GetSessionStats => Some(response(id, "get_session_stats", session.stats(agent))),
+        Request::SetSessionName { name } => {
+            session.set_name(name.clone());
+            Some(response(
+                id,
+                "set_session_name",
+                serde_json::json!({ "name": name }),
+            ))
+        }
+        Request::NewSession { parent_session } => {
+            match session.start_new(cwd, agent, parent_session) {
+                Ok(()) => Some(response(
+                    id,
+                    "new_session",
+                    serde_json::json!({ "sessionFile": session.path_string() }),
+                )),
+                Err(error) => Some(failure(id, "new_session", &error.to_string())),
+            }
+        }
+        Request::SwitchSession { session_path } => {
+            match session.switch(&session_path, cwd, agent) {
+                Ok(()) => Some(response(
+                    id,
+                    "switch_session",
+                    serde_json::json!({ "cancelled": false }),
+                )),
+                Err(error) => Some(failure(id, "switch_session", &error.to_string())),
+            }
+        }
+    }
+}
+
+fn response(id: Option<String>, command: &str, data: serde_json::Value) -> Event {
+    Event::Response {
+        id,
+        command: command.to_string(),
+        success: true,
+        data,
+    }
+}
+
+fn failure(id: Option<String>, command: &str, message: &str) -> Event {
+    Event::Response {
+        id,
+        command: command.to_string(),
+        success: false,
+        data: serde_json::json!({ "error": message }),
     }
 }
 
@@ -99,6 +229,31 @@ fn state_event(agent: &Agent) -> Event {
         system: agent.system().to_string(),
         transcript: transcript_values(agent.messages()),
     }
+}
+
+fn last_assistant_text(agent: &Agent) -> Option<String> {
+    transcript_values(agent.messages())
+        .into_iter()
+        .rev()
+        .find_map(|message| {
+            if message.get("role").and_then(serde_json::Value::as_str) != Some("assistant") {
+                return None;
+            }
+            message
+                .get("content")?
+                .as_array()?
+                .iter()
+                .find_map(|block| {
+                    if block.get("type").and_then(serde_json::Value::as_str) == Some("text") {
+                        block
+                            .get("text")
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_string)
+                    } else {
+                        None
+                    }
+                })
+        })
 }
 
 fn from_agent_event(event: AgentEvent) -> Event {
@@ -119,6 +274,179 @@ fn from_agent_event(event: AgentEvent) -> Event {
     }
 }
 
+/// A unit's session file and journal, when it has one.
+struct SessionState {
+    path: Option<PathBuf>,
+    journal: Option<SessionJournal>,
+    name: Option<String>,
+}
+
+impl SessionState {
+    fn empty() -> Self {
+        Self {
+            path: None,
+            journal: None,
+            name: None,
+        }
+    }
+
+    fn from_path(path: Option<PathBuf>, cwd: &str, agent: &mut Agent) -> Self {
+        let mut state = Self::empty();
+        if let Some(path) = path {
+            if let Ok((journal, transcript)) = SessionJournal::open(path.clone(), cwd) {
+                agent.replace_messages(transcript);
+                state.journal = Some(journal);
+            }
+            state.path = Some(path);
+        }
+        state
+    }
+
+    fn path_string(&self) -> Option<String> {
+        self.path
+            .as_ref()
+            .map(|path| path.to_string_lossy().into_owned())
+    }
+
+    fn persist(&mut self, agent: &Agent) {
+        if let Some(journal) = self.journal.as_mut() {
+            let _ = journal.persist(agent.messages());
+        }
+    }
+
+    fn set_name(&mut self, name: String) {
+        self.name = Some(name);
+    }
+
+    fn entries(&self, since: Option<&str>) -> Vec<serde_json::Value> {
+        let Some(path) = &self.path else {
+            return Vec::new();
+        };
+        let Ok(session) = SessionFile::read(path) else {
+            return Vec::new();
+        };
+        let values: Vec<serde_json::Value> = session
+            .entries
+            .iter()
+            .map(|entry| serde_json::to_value(entry).unwrap_or(serde_json::Value::Null))
+            .collect();
+        match since {
+            Some(since) => match values.iter().position(|value| {
+                value.get("id").and_then(serde_json::Value::as_str) == Some(since)
+            }) {
+                Some(index) => values.into_iter().skip(index + 1).collect(),
+                None => values,
+            },
+            None => values,
+        }
+    }
+
+    fn tree(&self) -> (Vec<serde_json::Value>, Option<String>) {
+        build_tree(&self.entries(None))
+    }
+
+    fn stats(&self, agent: &Agent) -> serde_json::Value {
+        serde_json::json!({
+            "sessionFile": self.path_string(),
+            "sessionName": self.name,
+            "messageCount": agent.messages().len(),
+            "entryCount": self.entries(None).len(),
+        })
+    }
+
+    fn switch(&mut self, path: &str, cwd: &str, agent: &mut Agent) -> std::io::Result<()> {
+        let path = PathBuf::from(path);
+        let (journal, transcript) = SessionJournal::open(path.clone(), cwd)?;
+        agent.replace_messages(transcript);
+        self.journal = Some(journal);
+        self.path = Some(path);
+        Ok(())
+    }
+
+    fn start_new(
+        &mut self,
+        cwd: &str,
+        agent: &mut Agent,
+        _parent_session: Option<String>,
+    ) -> std::io::Result<()> {
+        agent.replace_messages(Vec::new());
+        self.name = None;
+        // Start a new file next to the current one, or under the working dir.
+        let dir = self
+            .path
+            .as_ref()
+            .and_then(|path| path.parent().map(PathBuf::from))
+            .unwrap_or_else(|| PathBuf::from(cwd));
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0);
+        let path = dir.join(format!("{nanos:x}.jsonl"));
+        let (journal, _) = SessionJournal::open(path.clone(), cwd)?;
+        self.journal = Some(journal);
+        self.path = Some(path);
+        Ok(())
+    }
+}
+
+/// Build pi's `SessionTreeNode[]` from flat entries (roots first).
+fn build_tree(entries: &[serde_json::Value]) -> (Vec<serde_json::Value>, Option<String>) {
+    use std::collections::{HashMap, HashSet};
+    let ids: HashSet<String> = entries
+        .iter()
+        .filter_map(|entry| {
+            entry
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        })
+        .collect();
+    let mut children: HashMap<String, Vec<usize>> = HashMap::new();
+    let mut roots: Vec<usize> = Vec::new();
+    for (index, entry) in entries.iter().enumerate() {
+        let parent = entry
+            .get("parentId")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string);
+        if let Some(parent) = parent.filter(|parent| ids.contains(parent)) {
+            children.entry(parent).or_default().push(index);
+        } else {
+            roots.push(index);
+        }
+    }
+
+    fn node(
+        index: usize,
+        entries: &[serde_json::Value],
+        children: &HashMap<String, Vec<usize>>,
+    ) -> serde_json::Value {
+        let entry = &entries[index];
+        let id = entry
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        let kids: Vec<serde_json::Value> = children
+            .get(id)
+            .map(|list| {
+                list.iter()
+                    .map(|&child| node(child, entries, children))
+                    .collect()
+            })
+            .unwrap_or_default();
+        serde_json::json!({ "entry": entry, "children": kids })
+    }
+
+    let tree = roots
+        .iter()
+        .map(|&index| node(index, entries, &children))
+        .collect();
+    let leaf_id = entries
+        .last()
+        .and_then(|entry| entry.get("id").and_then(serde_json::Value::as_str))
+        .map(str::to_string);
+    (tree, leaf_id)
+}
+
 /// A reader/writer pair shared between the serve loop and the approval hook.
 struct SharedIo<R, W> {
     reader: std::cell::RefCell<R>,
@@ -134,9 +462,9 @@ impl<R: std::io::BufRead, W: std::io::Write> SharedIo<R, W> {
         }
     }
 
-    /// The next valid request, or `None` at end of input. Invalid lines emit an
-    /// `error` event and are skipped.
-    fn next_request(&self) -> Option<Request> {
+    /// The next valid request with its optional correlation id, or `None` at end
+    /// of input. Invalid lines emit an `error` event and are skipped.
+    fn next_request(&self) -> Option<(Option<String>, Request)> {
         loop {
             let mut line = String::new();
             match self.reader.borrow_mut().read_line(&mut line) {
@@ -146,8 +474,29 @@ impl<R: std::io::BufRead, W: std::io::Write> SharedIo<R, W> {
             if line.trim().is_empty() {
                 continue;
             }
-            match serde_json::from_str::<Request>(&line) {
-                Ok(request) => return Some(request),
+            // Parse the value first: `ui_response` owns `id`, while other
+            // commands use it only for correlation.
+            let value: serde_json::Value = match serde_json::from_str(&line) {
+                Ok(value) => value,
+                Err(error) => {
+                    self.write(&Event::Error {
+                        message: format!("invalid request: {error}"),
+                    });
+                    continue;
+                }
+            };
+            match serde_json::from_value::<Request>(value.clone()) {
+                Ok(request) => {
+                    let id = if matches!(request, Request::UiResponse { .. }) {
+                        None
+                    } else {
+                        value
+                            .get("id")
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_string)
+                    };
+                    return Some((id, request));
+                }
                 Err(error) => self.write(&Event::Error {
                     message: format!("invalid request: {error}"),
                 }),
@@ -159,33 +508,45 @@ impl<R: std::io::BufRead, W: std::io::Write> SharedIo<R, W> {
 fn drive<R: std::io::BufRead, W: std::io::Write, F: FnMut(&Agent)>(
     agent: &mut Agent,
     io: &std::rc::Rc<SharedIo<R, W>>,
+    session: &mut SessionState,
+    cwd: &str,
     mut after_turn: F,
 ) {
     io.write(&Event::Ready {
         version: PROTOCOL_VERSION,
     });
-    while let Some(request) = io.next_request() {
+    while let Some((id, request)) = io.next_request() {
         match request {
             Request::Prompt { text } => {
+                // pi acknowledges immediately, then streams events.
+                io.write(&response(
+                    id,
+                    "prompt",
+                    serde_json::json!({ "disposition": "started" }),
+                ));
                 agent.push_user(text);
                 match agent.run_with(|event| io.write(&from_agent_event(event.clone()))) {
-                    Ok(()) => after_turn(agent),
+                    Ok(()) => {
+                        session.persist(agent);
+                        after_turn(agent);
+                    }
                     Err(error) => io.write(&Event::Error {
                         message: error.to_string(),
                     }),
                 }
             }
-            Request::GetState => io.write(&state_event(agent)),
             // Answered by the approval hook while a turn is running.
             Request::UiResponse { .. } => {}
+            other => {
+                if let Some(event) = apply_command(agent, session, cwd, id, other) {
+                    io.write(&event);
+                }
+            }
         }
     }
 }
 
 /// Serve a unit over any reader/writer pair, one JSON request per line.
-///
-/// Writes `ready`, then one or more events per request, each as a JSON line.
-/// Events are streamed as the turn produces them (no whole-turn buffering).
 pub fn serve<R: std::io::BufRead, W: std::io::Write>(
     agent: &mut Agent,
     reader: R,
@@ -194,8 +555,7 @@ pub fn serve<R: std::io::BufRead, W: std::io::Write>(
     serve_with(agent, reader, writer, |_| {})
 }
 
-/// Like [`serve`], but calls `after_turn` once a prompt finishes (e.g. to
-/// persist the session). Events are streamed, not collected.
+/// Like [`serve`], but calls `after_turn` once a prompt finishes.
 pub fn serve_with<R: std::io::BufRead, W: std::io::Write, F: FnMut(&Agent)>(
     agent: &mut Agent,
     reader: R,
@@ -206,15 +566,12 @@ pub fn serve_with<R: std::io::BufRead, W: std::io::Write, F: FnMut(&Agent)>(
         reader: std::cell::RefCell::new(reader),
         writer: std::cell::RefCell::new(writer),
     });
-    drive(agent, &io, after_turn);
+    let mut session = SessionState::empty();
+    drive(agent, &io, &mut session, ".", after_turn);
     Ok(())
 }
 
 /// Serve a unit whose approval-required tools ask the client.
-///
-/// Emits `ui_request { kind: "confirm" }` and blocks the turn until the matching
-/// `ui_response` arrives, so the UI is a separate service on the other end of
-/// the protocol. Requires `'static` I/O because the hook is stored on the agent.
 pub fn serve_unit<R: std::io::BufRead + 'static, W: std::io::Write + 'static>(
     agent: &mut Agent,
     reader: R,
@@ -234,15 +591,70 @@ pub fn serve_unit_with<
     writer: W,
     after_turn: F,
 ) -> Result<(), AgentError> {
+    serve_unit_session(agent, None, ".", reader, writer, after_turn)
+}
+
+/// Serve a unit with protocol approvals and a session file.
+///
+/// Seeds the transcript from `session_path` when given, persists each turn, and
+/// answers the session navigation commands (`get_tree`, `switch_session`, …).
+pub fn serve_unit_session<
+    R: std::io::BufRead + 'static,
+    W: std::io::Write + 'static,
+    F: FnMut(&Agent),
+>(
+    agent: &mut Agent,
+    session_path: Option<PathBuf>,
+    cwd: &str,
+    reader: R,
+    writer: W,
+    after_turn: F,
+) -> Result<(), AgentError> {
+    serve_session_inner(agent, session_path, cwd, true, reader, writer, after_turn)
+}
+
+/// Like [`serve_unit_session`] but keeps the agent's approver (e.g. allow-all).
+pub fn serve_session<
+    R: std::io::BufRead + 'static,
+    W: std::io::Write + 'static,
+    F: FnMut(&Agent),
+>(
+    agent: &mut Agent,
+    session_path: Option<PathBuf>,
+    cwd: &str,
+    reader: R,
+    writer: W,
+    after_turn: F,
+) -> Result<(), AgentError> {
+    serve_session_inner(agent, session_path, cwd, false, reader, writer, after_turn)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn serve_session_inner<
+    R: std::io::BufRead + 'static,
+    W: std::io::Write + 'static,
+    F: FnMut(&Agent),
+>(
+    agent: &mut Agent,
+    session_path: Option<PathBuf>,
+    cwd: &str,
+    approvals: bool,
+    reader: R,
+    writer: W,
+    after_turn: F,
+) -> Result<(), AgentError> {
     let io = std::rc::Rc::new(SharedIo {
         reader: std::cell::RefCell::new(reader),
         writer: std::cell::RefCell::new(writer),
     });
-    agent.set_approver(std::rc::Rc::new(ProtocolApprover {
-        io: io.clone(),
-        counter: std::cell::Cell::new(0),
-    }));
-    drive(agent, &io, after_turn);
+    if approvals {
+        agent.set_approver(std::rc::Rc::new(ProtocolApprover {
+            io: io.clone(),
+            counter: std::cell::Cell::new(0),
+        }));
+    }
+    let mut session = SessionState::from_path(session_path, cwd, agent);
+    drive(agent, &io, &mut session, cwd, after_turn);
     Ok(())
 }
 
@@ -262,7 +674,7 @@ impl<R: std::io::BufRead, W: std::io::Write> Approver for ProtocolApprover<R, W>
             prompt: format!("Run {tool} with {input}?"),
             options: vec!["allow".to_string(), "deny".to_string()],
         });
-        while let Some(request) = self.io.next_request() {
+        while let Some((_, request)) = self.io.next_request() {
             if let Request::UiResponse {
                 id: response_id,
                 value,
