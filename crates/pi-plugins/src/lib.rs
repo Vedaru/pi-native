@@ -227,6 +227,125 @@ impl PluginHost {
         )?;
         pi.set("tool", tool_fn)?;
 
+        // pi.registerTool(spec) / registerCommand / registerProvider
+        let (calls, denials, policy) = (
+            self.calls.clone(),
+            self.denials.clone(),
+            self.policy.clone(),
+        );
+        pi.set(
+            "registerTool",
+            Function::new(ctx.clone(), move |spec: rquickjs::Value<'_>| {
+                record(
+                    &policy,
+                    &calls,
+                    &denials,
+                    Capability::Events,
+                    "registerTool",
+                    json_from_js(&spec),
+                );
+            }),
+        )?;
+
+        let (calls, denials, policy) = (
+            self.calls.clone(),
+            self.denials.clone(),
+            self.policy.clone(),
+        );
+        pi.set(
+            "registerCommand",
+            Function::new(
+                ctx.clone(),
+                move |name: String, spec: rquickjs::Value<'_>| {
+                    record(
+                        &policy,
+                        &calls,
+                        &denials,
+                        Capability::Events,
+                        "registerCommand",
+                        serde_json::json!({ "name": name, "spec": json_from_js(&spec) }),
+                    );
+                },
+            ),
+        )?;
+
+        let (calls, denials, policy) = (
+            self.calls.clone(),
+            self.denials.clone(),
+            self.policy.clone(),
+        );
+        pi.set(
+            "registerProvider",
+            Function::new(ctx.clone(), move |spec: rquickjs::Value<'_>| {
+                record(
+                    &policy,
+                    &calls,
+                    &denials,
+                    Capability::Events,
+                    "registerProvider",
+                    json_from_js(&spec),
+                );
+            }),
+        )?;
+
+        // pi.session(op, args) / pi.ui(op, args) / pi.events(op, args)
+        let (calls, denials, policy) = (
+            self.calls.clone(),
+            self.denials.clone(),
+            self.policy.clone(),
+        );
+        pi.set(
+            "session",
+            Function::new(ctx.clone(), move |op: String, args: rquickjs::Value<'_>| {
+                record(
+                    &policy,
+                    &calls,
+                    &denials,
+                    Capability::Session,
+                    "session",
+                    serde_json::json!({ "op": op, "args": json_from_js(&args) }),
+                );
+            }),
+        )?;
+
+        let (calls, denials, policy) = (
+            self.calls.clone(),
+            self.denials.clone(),
+            self.policy.clone(),
+        );
+        pi.set(
+            "ui",
+            Function::new(ctx.clone(), move |op: String, args: rquickjs::Value<'_>| {
+                record(
+                    &policy,
+                    &calls,
+                    &denials,
+                    Capability::Ui,
+                    "ui",
+                    serde_json::json!({ "op": op, "args": json_from_js(&args) }),
+                );
+            }),
+        )?;
+
+        let (calls, denials, policy) = (
+            self.calls.clone(),
+            self.denials.clone(),
+            self.policy.clone(),
+        );
+        pi.set(
+            "events",
+            Function::new(ctx.clone(), move |op: String, args: rquickjs::Value<'_>| {
+                record(
+                    &policy,
+                    &calls,
+                    &denials,
+                    Capability::Events,
+                    "events",
+                    serde_json::json!({ "op": op, "args": json_from_js(&args) }),
+                );
+            }),
+        )?;
+
         ctx.globals().set("pi", pi)?;
         Ok(())
     }
@@ -420,8 +539,14 @@ fn install_env(ctx: &Ctx<'_>) -> Result<(), PluginError> {
 }
 
 fn json_from_js(value: &rquickjs::Value<'_>) -> serde_json::Value {
-    // Minimal scalar bridge; structured values arrive with the loader stage.
-    if value.is_undefined() || value.is_null() {
+    js_to_json(value, 0)
+}
+
+/// Convert a JS value to JSON. Functions are skipped at object keys and become
+/// `null` elsewhere, so `registerTool({ execute })` keeps its metadata without
+/// trying to serialize the handler.
+fn js_to_json(value: &rquickjs::Value<'_>, depth: usize) -> serde_json::Value {
+    if depth > 8 || value.is_undefined() || value.is_null() || value.is_function() {
         return serde_json::Value::Null;
     }
     if let Some(b) = value.as_bool() {
@@ -435,6 +560,26 @@ fn json_from_js(value: &rquickjs::Value<'_>) -> serde_json::Value {
     }
     if let Some(s) = value.as_string() {
         return serde_json::Value::String(s.to_string().unwrap_or_default());
+    }
+    if let Some(array) = value.as_array() {
+        let mut out = Vec::new();
+        for item in array.iter::<rquickjs::Value<'_>>().flatten() {
+            out.push(js_to_json(&item, depth + 1));
+        }
+        return serde_json::Value::Array(out);
+    }
+    if let Some(object) = value.as_object() {
+        let mut map = serde_json::Map::new();
+        for key in object.keys::<String>().flatten() {
+            let Ok(item) = object.get::<_, rquickjs::Value<'_>>(&key) else {
+                continue;
+            };
+            if item.is_function() || item.is_undefined() {
+                continue;
+            }
+            map.insert(key, js_to_json(&item, depth + 1));
+        }
+        return serde_json::Value::Object(map);
     }
     serde_json::Value::Null
 }
@@ -576,5 +721,53 @@ mod tests {
             Err(PluginError::Denied { capability, .. }) => assert_eq!(capability, Capability::Read),
             other => panic!("expected read denial, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn records_a_tool_registration_without_the_handler() {
+        let host = PluginHost::new(PluginPolicy::permissive());
+        let calls = host
+            .run(
+                r#"pi.registerTool({ name: "greet", description: "Say hi", parameters: { type: "object" }, execute: () => 1 });"#,
+            )
+            .expect("runs");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].method, "registerTool");
+        assert_eq!(calls[0].args["name"], serde_json::json!("greet"));
+        assert_eq!(calls[0].args["description"], serde_json::json!("Say hi"));
+        assert_eq!(
+            calls[0].args["parameters"]["type"],
+            serde_json::json!("object")
+        );
+        assert!(
+            calls[0].args.get("execute").is_none(),
+            "handler should be omitted"
+        );
+    }
+
+    #[test]
+    fn records_command_registration() {
+        let host = PluginHost::new(PluginPolicy::permissive());
+        let calls = host
+            .run(r#"pi.registerCommand("hello", { description: "Greet" });"#)
+            .expect("runs");
+        assert_eq!(calls[0].method, "registerCommand");
+        assert_eq!(calls[0].args["name"], serde_json::json!("hello"));
+        assert_eq!(
+            calls[0].args["spec"]["description"],
+            serde_json::json!("Greet")
+        );
+    }
+
+    #[test]
+    fn records_session_and_ui_hostcalls() {
+        let host = PluginHost::new(PluginPolicy::permissive());
+        let calls = host
+            .run(r#"pi.session("getState", {}); pi.ui("notify", "hello");"#)
+            .expect("runs");
+        assert_eq!(calls[0].capability, Capability::Session);
+        assert_eq!(calls[0].args["op"], serde_json::json!("getState"));
+        assert_eq!(calls[1].capability, Capability::Ui);
+        assert_eq!(calls[1].args["args"], serde_json::json!("hello"));
     }
 }
