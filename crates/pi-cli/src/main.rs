@@ -46,6 +46,9 @@ struct Cli {
     /// Run a deterministic in-process stress workload of N tool-call turns.
     #[arg(long)]
     stress: Option<usize>,
+    /// Tool used by --stress: ls (default), grep, find, or edit.
+    #[arg(long, default_value = "ls")]
+    stress_tool: String,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -114,7 +117,7 @@ fn main() {
         return;
     }
     if let Some(turns) = cli.stress {
-        run_stress(turns);
+        run_stress(turns, &cli.stress_tool);
         return;
     }
     if let Some(prompt) = cli.print {
@@ -229,21 +232,41 @@ impl Approver for TerminalApprover {
 /// tiny output, then a final message. No network, no subprocesses, and a
 /// constant per-tool-result size, so the measured memory is the harness
 /// overhead rather than the size of a directory listing.
-fn run_stress(turns: usize) {
-    // A directory with a single small file so `ls` (no arguments) returns a
-    // tiny, constant output. This measures harness overhead, not payload size.
-    let dir = std::env::temp_dir().join(format!("pi-stress-{}", std::process::id()));
+fn run_stress(turns: usize, tool: &str) {
+    // A small workspace is created per run so each tool has a deterministic input.
+    let dir = std::env::temp_dir().join(format!("pi-stress-{}-{tool}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::create_dir_all(&dir);
     let _ = std::fs::write(dir.join("f.txt"), "x\n");
+    if tool == "grep" {
+        let _ = std::fs::write(dir.join("g.txt"), "needle\nother\nneedle\n");
+    }
+    if tool == "edit" {
+        let _ = std::fs::write(dir.join("e.txt"), "A\n");
+    }
 
-    // Generate turns on demand so a long run does not pre-allocate every turn.
+    let tool_name = tool.to_string();
     let provider = FnProvider::new(move |index| {
         if index < turns {
+            let arguments = match tool_name.as_str() {
+                "grep" => serde_json::json!({ "pattern": "needle" }),
+                "find" => serde_json::json!({ "pattern": "*.txt" }),
+                "edit" => {
+                    // Alternate A<->B so every edit targets unique text.
+                    let (old, new) = if index % 2 == 0 {
+                        ("A", "B")
+                    } else {
+                        ("B", "A")
+                    };
+                    serde_json::json!({ "path": "e.txt", "oldText": old, "newText": new })
+                }
+                _ => serde_json::json!({}),
+            };
             AssistantTurn {
                 tool_calls: vec![ToolCall {
                     id: format!("stress-{index}"),
-                    name: "ls".to_string(),
-                    arguments: serde_json::json!({}),
+                    name: tool_name.clone(),
+                    arguments,
                 }],
                 stop_reason: Some("tool_use".to_string()),
                 ..Default::default()
@@ -256,6 +279,7 @@ fn run_stress(turns: usize) {
             }
         }
     });
+
     let mut agent = Agent::new(
         Box::new(provider),
         default_tools(),
@@ -269,22 +293,39 @@ fn run_stress(turns: usize) {
     // Stream events instead of collecting them, so a long run does not retain
     // every event (which would duplicate tool output for the whole turn).
     let mut tool_results = 0usize;
+    let mut tool_errors = 0usize;
     let result = agent.run_with(|event| {
-        if matches!(event, AgentEvent::ToolEnd { .. }) {
+        if let AgentEvent::ToolEnd { is_error, .. } = event {
             tool_results += 1;
+            if *is_error {
+                tool_errors += 1;
+            }
         }
     });
     match result {
-        Ok(()) => println!(
-            "stress: {turns} turns, {} messages, {tool_results} tool results",
-            agent.messages().len()
-        ),
+        Ok(()) => {
+            println!(
+                "stress[{tool}]: {turns} turns, {} messages, {tool_results} tool results, {tool_errors} errors",
+                agent.messages().len()
+            );
+            if let Some(peak_mb) = peak_rss_mb() {
+                println!("peak RSS: {peak_mb:.1} MB");
+            }
+        }
         Err(error) => {
             eprintln!("pi-native --stress: {error}");
             std::process::exit(1);
         }
     }
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Peak resident set size of this process in MB, from `/proc` when available.
+fn peak_rss_mb() -> Option<f64> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    let line = status.lines().find(|line| line.starts_with("VmHWM:"))?;
+    let kb: f64 = line.split_whitespace().nth(1)?.parse().ok()?;
+    Some(kb / 1024.0)
 }
 
 const SYSTEM_PROMPT: &str = "You are pi, a coding agent. Be concise.";

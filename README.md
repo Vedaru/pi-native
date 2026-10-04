@@ -159,10 +159,18 @@ Comparison on a 6000x4000 PNG (`harness/compare-image-resize.mjs` vs
 `ls` tool call, no network, no subprocesses). `scripts/stress_gate.py` fails CI
 if peak RSS exceeds a ceiling or the run does not finish in time.
 
-| Turns | Wall | Peak RSS |
+`--stress-tool <ls|grep|find|edit>` selects the tool (20,000 turns, 4096-message
+window):
+
+| Tool | Wall | Peak RSS |
 | --- | --- | --- |
-| 10,000 | 0.09 s | 12.3 MB |
-| 50,000 | 2.9 s | 45.2 MB |
+| `ls` | 0.15 s | 5.4 MB |
+| `grep` | 0.50 s | 8.5 MB |
+| `find` | 0.56 s | 8.5 MB |
+| `edit` | 0.17 s | 6.9 MB |
+
+Without the window, 50,000 `ls` turns: 0.08 s / 39 MB (and 1M turns stay flat
+at ~5 MB with the window).
 
 Growth is proportional to the retained transcript (~900 B/turn), with no leak.
 Two fixes came out of pressure testing:
