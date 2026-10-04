@@ -19,3 +19,11 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Test
         run: cargo test --workspace
+
+  memory-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Skips cleanly when no benchmark target (pi) is installed.
+      - name: Memory regression gate
+        run: python3 scripts/mem_gate.py --threshold 0.10
