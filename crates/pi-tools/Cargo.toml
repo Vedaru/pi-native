@@ -1,0 +1,11 @@
+[package]
+name = "pi-tools"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Core coding-agent tools (read, bash, ls, ...)"
+
+[dependencies]
+serde_json = { workspace = true }
+pi-providers = { path = "../pi-providers" }

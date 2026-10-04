@@ -1,6 +1,6 @@
 {
   "schema": "pi.native.mem_bench.v1",
-  "generated_at": "2026-10-04T11:20:10.949315+00:00",
+  "generated_at": "2026-10-04T11:25:55.770873+00:00",
   "host": {
     "platform": "Linux-7.1.8-aw88399-x86_64-with-glibc2.43",
     "machine": "x86_64",
@@ -16,70 +16,26 @@
   ],
   "results": [
     {
-      "target": "pi-node",
-      "kind": "node",
-      "command": "/usr/local/bin/pi --mode rpc --no-session",
-      "binary": "/usr/local/bin/pi",
-      "binary_sha256": "e79626f2dd6f94aa45d30f3fa63cd84319a6eefcd150b353cfaf274366926774",
-      "taxonomy": "cold-idle",
-      "settle_seconds": 5.0,
-      "sample_interval_seconds": 1.0,
-      "samples_bytes": [
-        117465088,
-        117473280,
-        117473280,
-        117473280,
-        117473280
-      ],
-      "sample_count": 5,
-      "rss_bytes": 117473280,
-      "rss_min_bytes": 117465088,
-      "rss_max_bytes": 117473280,
-      "rss_spread_bytes": 8192
-    },
-    {
-      "target": "pi-rust",
-      "kind": "native",
-      "command": "/tmp/pi-rust/pi --rpc --no-session --provider anthropic --model claude-sonnet-4-5",
-      "binary": "/tmp/pi-rust/pi",
-      "binary_sha256": "980995334c6ee7e2ca70b9d3f9a4e49408b1069541ba912bf2b4d0c2b80fd027",
-      "taxonomy": "cold-idle",
-      "settle_seconds": 5.0,
-      "sample_interval_seconds": 1.0,
-      "samples_bytes": [
-        40022016,
-        40022016,
-        40022016,
-        40022016,
-        40022016
-      ],
-      "sample_count": 5,
-      "rss_bytes": 40022016,
-      "rss_min_bytes": 40022016,
-      "rss_max_bytes": 40022016,
-      "rss_spread_bytes": 0
-    },
-    {
       "target": "pi-native",
       "kind": "native",
-      "command": "/home/vedaru/Projects/pi-native/target/release/pi-native --rpc --no-session",
-      "binary": "/home/vedaru/Projects/pi-native/target/release/pi-native",
-      "binary_sha256": "ab78f4c3d4caf761756a68302df7e927d7b8ccbdf6f3b0816097db0c4dc546a1",
+      "command": "/tmp/heavy-pi --rpc --no-session",
+      "binary": "/tmp/heavy-pi",
+      "binary_sha256": "3a18958ec6909905006426a28076b858867aef5869402419158cc1b91edeb1a5",
       "taxonomy": "cold-idle",
       "settle_seconds": 5.0,
       "sample_interval_seconds": 1.0,
       "samples_bytes": [
-        2777088,
-        2777088,
-        2777088,
-        2777088,
-        2777088
+        570040320,
+        570040320,
+        570040320,
+        570040320,
+        570056704
       ],
       "sample_count": 5,
-      "rss_bytes": 2777088,
-      "rss_min_bytes": 2777088,
-      "rss_max_bytes": 2777088,
-      "rss_spread_bytes": 0
+      "rss_bytes": 570040320,
+      "rss_min_bytes": 570040320,
+      "rss_max_bytes": 570056704,
+      "rss_spread_bytes": 16384
     }
   ]
 }
