@@ -604,14 +604,16 @@ impl Tool for FindTool {
 
 /// The default tool set.
 pub fn default_tools() -> Vec<Box<dyn Tool>> {
+    // Order matches pi's tool registry: the system prompt lists tools in this
+    // order and the provider's `tools` array is sent in it.
     vec![
         Box::new(ReadTool),
         Box::new(BashTool),
-        Box::new(LsTool),
-        Box::new(WriteTool),
         Box::new(EditTool),
+        Box::new(WriteTool),
         Box::new(GrepTool),
         Box::new(FindTool),
+        Box::new(LsTool),
     ]
 }
 

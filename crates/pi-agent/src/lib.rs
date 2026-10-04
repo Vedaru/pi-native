@@ -13,6 +13,7 @@ use pi_tools::{Tool, ToolResult};
 use serde_json::Value;
 use std::sync::Arc;
 
+pub mod prompt;
 pub mod providers;
 pub mod session;
 

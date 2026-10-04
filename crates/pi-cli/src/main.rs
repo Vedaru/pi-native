@@ -5,6 +5,7 @@
 //! lands in later milestones.
 
 use clap::{Parser, Subcommand, ValueEnum};
+use pi_agent::prompt::{build_system_prompt, load_project_context_files, SystemPromptOptions};
 use pi_agent::{
     anthropic_provider, google_provider, messages_from_session, openai_responses_provider, Agent,
     AgentEvent, AllowAll, Approval, Approver, AssistantTurn, DenyAll, FnProvider, ModelProvider,
@@ -238,8 +239,9 @@ fn run_print(
     context_window: usize,
     session: Option<&std::path::Path>,
 ) {
-    let system = "You are pi, a coding agent. Be concise.";
-    let mut agent = resolve_agent(model, provider, yolo, true, context_window, system);
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let system = system_prompt_for(&cwd);
+    let mut agent = resolve_agent(model, provider, yolo, true, context_window, &system);
     seed_session(&mut agent, session);
     agent.push_user(prompt);
     match agent.run() {
@@ -390,7 +392,7 @@ fn run_stress_session(turns: usize, tool: &str, byte_limit_mb: usize, context_to
     let agent = Agent::new(
         Box::new(provider),
         default_tools(),
-        SYSTEM_PROMPT,
+        "You are pi, a coding agent. Be concise.",
         ToolContext::new(&dir),
     )
     .with_max_iterations(turns + 2)
@@ -459,7 +461,56 @@ fn peak_rss_mb() -> Option<f64> {
     Some(kb / 1024.0)
 }
 
-const SYSTEM_PROMPT: &str = "You are pi, a coding agent. Be concise.";
+/// Resolve the pi install root for the `docs` section paths. `PI_PACKAGE_DIR`
+/// wins; otherwise a well-known global install is used; otherwise paths are bare.
+fn pi_package_dir() -> String {
+    if let Ok(dir) = std::env::var("PI_PACKAGE_DIR") {
+        if !dir.is_empty() {
+            return dir;
+        }
+    }
+    let relative = "node_modules/@earendil-works/pi-coding-agent";
+    let mut candidates = vec![PathBuf::from("/usr/local/lib").join(relative)];
+    if let Ok(home) = std::env::var("HOME") {
+        candidates.push(PathBuf::from(&home).join(".npm-global/lib").join(relative));
+        candidates.push(PathBuf::from(&home).join(".local/lib").join(relative));
+    }
+    for candidate in candidates {
+        if candidate.is_dir() {
+            return candidate.to_string_lossy().into_owned();
+        }
+    }
+    String::new()
+}
+
+/// pi's agent config dir (`~/.pi`), overridable with `PI_AGENT_DIR`.
+fn agent_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var("PI_AGENT_DIR") {
+        if !dir.is_empty() {
+            return PathBuf::from(dir);
+        }
+    }
+    match std::env::var("HOME") {
+        Ok(home) => PathBuf::from(home).join(".pi"),
+        Err(_) => PathBuf::new(),
+    }
+}
+
+/// Build pi's system prompt for the current environment (parity with pi's default).
+fn system_prompt_for(cwd: &std::path::Path) -> String {
+    let selected_tools = default_tools()
+        .iter()
+        .map(|tool| tool.name().to_string())
+        .collect();
+    let options = SystemPromptOptions {
+        selected_tools,
+        package_dir: pi_package_dir(),
+        cwd: cwd.to_string_lossy().into_owned(),
+        context_files: load_project_context_files(cwd, &agent_dir()),
+        ..Default::default()
+    };
+    build_system_prompt(&options)
+}
 
 /// Build an agent for the selected provider, with compaction when enabled.
 ///
@@ -557,7 +608,9 @@ fn run_serve(
     context_window: usize,
     session: Option<&std::path::Path>,
 ) {
-    let mut agent = resolve_agent(model, provider, yolo, false, context_window, SYSTEM_PROMPT);
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let system = system_prompt_for(&cwd);
+    let mut agent = resolve_agent(model, provider, yolo, false, context_window, &system);
     seed_session(&mut agent, session);
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();

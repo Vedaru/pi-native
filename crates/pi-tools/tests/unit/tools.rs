@@ -70,7 +70,7 @@ fn tool_specs_serialize_for_the_provider() {
     let names: Vec<&str> = specs.iter().map(|spec| spec.name.as_str()).collect();
     assert_eq!(
         names,
-        vec!["read", "bash", "ls", "write", "edit", "grep", "find"]
+        vec!["read", "bash", "edit", "write", "grep", "find", "ls"]
     );
     assert_eq!(
         specs[0].input_schema["required"],
