@@ -9,12 +9,13 @@
 //! reported as assistant text, and each tool call emits start/end.
 
 use pi_providers::{AssistantBlock, ContentPart, ToolSpec, TranscriptMessage, Usage};
-use pi_tools::{Tool, ToolContext, ToolResult};
+use pi_tools::{Tool, ToolResult};
 use serde_json::Value;
 
 pub mod anthropic;
 
 pub use anthropic::{turn_from_stream, AnthropicProvider};
+pub use pi_tools::ToolContext;
 
 /// A tool call requested by the model.
 #[derive(Debug, Clone, PartialEq)]
@@ -72,6 +73,40 @@ pub enum AgentEvent {
     Done {
         stop_reason: Option<String>,
     },
+}
+
+/// A provider that returns pre-scripted turns; for tests and embedding.
+pub struct FauxProvider {
+    turns: std::sync::Mutex<Vec<AssistantTurn>>,
+}
+
+impl FauxProvider {
+    pub fn new(turns: Vec<AssistantTurn>) -> Self {
+        Self {
+            turns: std::sync::Mutex::new(turns),
+        }
+    }
+
+    pub fn push(&self, turn: AssistantTurn) {
+        self.turns.lock().expect("faux lock").push(turn);
+    }
+}
+
+impl Default for FauxProvider {
+    fn default() -> Self {
+        Self::new(Vec::new())
+    }
+}
+
+impl ModelProvider for FauxProvider {
+    fn complete(&self, _request: &CompletionRequest) -> Result<AssistantTurn, AgentError> {
+        let mut turns = self.turns.lock().expect("faux lock");
+        if turns.is_empty() {
+            Ok(AssistantTurn::default())
+        } else {
+            Ok(turns.remove(0))
+        }
+    }
 }
 
 /// A model backend. Returns a full turn; streaming is a provider concern.

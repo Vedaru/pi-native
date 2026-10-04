@@ -1131,6 +1131,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "pi-rpc"
+version = "0.0.1"
+dependencies = [
+ "pi-agent",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "pi-session"
 version = "0.0.1"
 dependencies = [
