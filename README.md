@@ -53,7 +53,7 @@ are the same.
 # one-shot
 ANTHROPIC_API_KEY=… pi-native -p "summarize README.md"
 
-# a unit: protocol on stdio (deny approval-required tools unless --yolo)
+# a unit: protocol on stdio (approval-required tools ask the client; --yolo allows all)
 ANTHROPIC_API_KEY=… pi-native --serve --provider anthropic
 
 # drive a local unit from the terminal

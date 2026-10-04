@@ -19,7 +19,7 @@ use pi_tools::{default_tools, ToolContext};
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Command as ProcessCommand, Stdio};
-use std::sync::Arc;
+use std::rc::Rc;
 
 const LONG_VERSION: &str = concat!(
     env!("CARGO_PKG_VERSION"),
@@ -558,12 +558,12 @@ fn resolve_agent(
             std::process::exit(2);
         }
     };
-    let approver: Arc<dyn Approver> = if yolo {
-        Arc::new(AllowAll)
+    let approver: Rc<dyn Approver> = if yolo {
+        Rc::new(AllowAll)
     } else if interactive {
-        Arc::new(TerminalApprover)
+        Rc::new(TerminalApprover)
     } else {
-        Arc::new(DenyAll)
+        Rc::new(DenyAll)
     };
     let cwd = std::env::current_dir().unwrap_or_default();
     let mut agent =
@@ -612,9 +612,16 @@ fn run_serve(
     let system = system_prompt_for(&cwd);
     let mut agent = resolve_agent(model, provider, yolo, false, context_window, &system);
     seed_session(&mut agent, session);
-    let stdin = std::io::stdin();
-    let stdout = std::io::stdout();
-    let _ = pi_rpc::serve(&mut agent, stdin.lock(), stdout.lock());
+    // Without `--yolo`, approval-required tools ask the connected client over
+    // the protocol (`ui_request` / `ui_response`).
+    let reader = std::io::BufReader::new(std::io::stdin());
+    let writer = std::io::stdout();
+    let result = if yolo {
+        pi_rpc::serve(&mut agent, reader, writer)
+    } else {
+        pi_rpc::serve_unit(&mut agent, reader, writer)
+    };
+    let _ = result;
 }
 
 /// A minimal terminal client: spawn a unit serving the protocol and drive it.

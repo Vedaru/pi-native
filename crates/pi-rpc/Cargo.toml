@@ -10,3 +10,6 @@ description = "JSON-lines RPC protocol and generic UI events"
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 pi-agent = { path = "../pi-agent" }
+
+[dev-dependencies]
+pi-tools = { path = "../pi-tools" }

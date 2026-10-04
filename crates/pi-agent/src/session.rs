@@ -143,7 +143,8 @@ fn parts_value(parts: &[ContentPart]) -> Value {
     )
 }
 
-fn message_value(message: &TranscriptMessage) -> Value {
+/// pi's session message shape (`{role, content, ...}`) for one transcript message.
+pub fn message_value(message: &TranscriptMessage) -> Value {
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis() as u64)
@@ -186,6 +187,12 @@ fn message_value(message: &TranscriptMessage) -> Value {
             "timestamp": timestamp,
         }),
     }
+}
+
+/// Serialize a whole transcript to pi's message shape, for a UI service that
+/// wants to render the resolved context.
+pub fn transcript_values(messages: &[TranscriptMessage]) -> Vec<Value> {
+    messages.iter().map(message_value).collect()
 }
 
 /// Append a `compaction` entry (pi's shape: `summary`, `firstKeptEntryId`,

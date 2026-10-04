@@ -1139,6 +1139,7 @@ name = "pi-rpc"
 version = "0.0.1"
 dependencies = [
  "pi-agent",
+ "pi-tools",
  "serde",
  "serde_json",
 ]

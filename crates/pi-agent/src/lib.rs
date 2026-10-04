@@ -11,6 +11,7 @@
 use pi_providers::{AssistantBlock, ContentPart, ToolSpec, TranscriptMessage, Usage};
 use pi_tools::{Tool, ToolResult};
 use serde_json::Value;
+use std::rc::Rc;
 use std::sync::Arc;
 
 pub mod prompt;
@@ -21,7 +22,9 @@ pub use pi_tools::ToolContext;
 pub use providers::{
     anthropic_provider, google_provider, openai_responses_provider, turn_from_stream, HttpProvider,
 };
-pub use session::{append_compaction, append_messages, messages_from_session};
+pub use session::{
+    append_compaction, append_messages, message_value, messages_from_session, transcript_values,
+};
 
 /// A tool call requested by the model.
 #[derive(Debug, Clone, PartialEq)]
@@ -171,8 +174,9 @@ pub enum Approval {
 }
 
 /// Decides whether approval-required tools may run. One generic hook — no
-/// per-tool branching in the loop.
-pub trait Approver: Send + Sync {
+/// per-tool branching in the loop. Not `Send`/`Sync`: a unit runs the agent on
+/// one thread, and the hook may hold protocol I/O.
+pub trait Approver {
     fn approve(&self, tool: &str, input: &Value) -> Approval;
 }
 
@@ -201,7 +205,7 @@ pub struct Agent {
     system: String,
     messages: Vec<TranscriptMessage>,
     tool_context: ToolContext,
-    approver: Arc<dyn Approver>,
+    approver: Rc<dyn Approver>,
     max_iterations: usize,
     context_window: Option<usize>,
     context_bytes: Option<usize>,
@@ -224,7 +228,7 @@ impl Agent {
             system: system.into(),
             messages: Vec::new(),
             tool_context,
-            approver: Arc::new(AllowAll),
+            approver: Rc::new(AllowAll),
             max_iterations: 16,
             context_window: None,
             context_bytes: None,
@@ -241,9 +245,14 @@ impl Agent {
     }
 
     /// Set the approval policy for tools that require approval.
-    pub fn with_approver(mut self, approver: Arc<dyn Approver>) -> Self {
+    pub fn with_approver(mut self, approver: Rc<dyn Approver>) -> Self {
         self.approver = approver;
         self
+    }
+
+    /// Replace the approval hook (e.g. after a protocol client connects).
+    pub fn set_approver(&mut self, approver: Rc<dyn Approver>) {
+        self.approver = approver;
     }
 
     /// Bound retained context to the most recent `max_messages` entries.
@@ -310,6 +319,11 @@ impl Agent {
 
     pub fn messages(&self) -> &[TranscriptMessage] {
         &self.messages
+    }
+
+    /// The system prompt this agent was built with.
+    pub fn system(&self) -> &str {
+        &self.system
     }
 
     /// Approximate retained transcript size in bytes (for the byte budget).

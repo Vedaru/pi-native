@@ -57,8 +57,11 @@ message.
 - `serve` / `serve_with` in `pi-rpc` read requests line by line and **stream**
   events as the turn produces them (no whole-turn buffering); `serve_with` runs
   a hook after each prompt (e.g. session persistence).
+- `serve_unit` backs approvals with the protocol: an approval-required tool
+  emits `ui_request { kind: "confirm" }` and blocks the turn until the matching
+  `ui_response` arrives. `--serve` uses it unless `--yolo`.
+- `get_state` returns the unit's resolved context (`system` + `transcript` in
+  pi's message shape), so a UI service can render it without owning the session.
 - The memory benchmark's `pi-native --rpc` idle mode is separate from this
   protocol.
-- Status: `ui_request` / `ui_response` and session **persistence** are defined
-  but not yet emitted/wired by the server. Approvals are currently agent-level
-  (`--yolo` allows; otherwise approval-required tools are denied).
+- Not yet wired: persisting turns back to a session file.

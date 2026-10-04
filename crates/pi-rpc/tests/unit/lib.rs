@@ -33,10 +33,22 @@ fn prompt_runs_the_agent_and_reports_events() {
 }
 
 #[test]
-fn get_state_reports_message_count() {
+fn get_state_reports_the_resolved_context() {
     let mut agent = agent_with(vec![AssistantTurn::default()]);
+    agent.push_user("hello");
     let events = handle(&mut agent, Request::GetState);
-    assert_eq!(events, vec![Event::State { messages: 0 }]);
+    let Event::State {
+        messages,
+        system,
+        transcript,
+    } = &events[0]
+    else {
+        panic!("expected state, got {events:?}");
+    };
+    assert_eq!(*messages, 1);
+    assert_eq!(system, "system");
+    assert_eq!(transcript[0]["role"], serde_json::json!("user"));
+    assert_eq!(transcript[0]["content"], serde_json::json!("hello"));
 }
 
 #[test]
@@ -91,4 +103,60 @@ fn serve_with_runs_the_hook_after_each_prompt() {
     .expect("serves");
     // The hook sees the finished transcript: the user prompt and the reply.
     assert_eq!(counts, vec![2]);
+}
+
+#[test]
+fn serve_unit_asks_the_client_before_approval_required_tools() {
+    use pi_agent::ToolCall;
+    use pi_tools::{default_tools, ToolContext};
+
+    #[derive(Clone)]
+    struct SharedBuf(std::rc::Rc<std::cell::RefCell<Vec<u8>>>);
+    impl std::io::Write for SharedBuf {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.borrow_mut().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let turns = vec![
+        AssistantTurn {
+            tool_calls: vec![ToolCall {
+                id: "call-1".into(),
+                name: "bash".into(),
+                arguments: json!({ "command": "echo hi" }),
+            }],
+            stop_reason: Some("tool_use".into()),
+            ..Default::default()
+        },
+        AssistantTurn {
+            text: "done".into(),
+            stop_reason: Some("end_turn".into()),
+            ..Default::default()
+        },
+    ];
+    let mut agent = Agent::new(
+        Box::new(FauxProvider::new(turns)),
+        default_tools(),
+        "system",
+        ToolContext::new(std::env::temp_dir()),
+    );
+    let input = concat!(
+        "{\"type\":\"prompt\",\"text\":\"go\"}\n",
+        "{\"type\":\"ui_response\",\"id\":\"ui-0\",\"value\":\"allow\"}\n",
+    );
+    let buf = SharedBuf(std::rc::Rc::new(std::cell::RefCell::new(Vec::new())));
+    serve_unit(
+        &mut agent,
+        std::io::Cursor::new(input.as_bytes().to_vec()),
+        buf.clone(),
+    )
+    .expect("serves");
+    let text = String::from_utf8(buf.0.borrow().clone()).unwrap();
+    assert!(text.contains("\"type\":\"ui_request\""), "{text}");
+    assert!(text.contains("\"type\":\"tool_end\""), "{text}");
+    assert!(!text.contains("\"is_error\":true"), "{text}");
 }

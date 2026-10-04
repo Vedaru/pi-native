@@ -205,7 +205,7 @@ fn denied_approval_blocks_an_approval_tool() {
         "s",
         ToolContext::new(std::env::temp_dir()),
     )
-    .with_approver(std::sync::Arc::new(DenyAll));
+    .with_approver(std::rc::Rc::new(DenyAll));
     agent.push_user("go");
 
     let events = agent.run().expect("runs");
@@ -231,7 +231,7 @@ fn allowed_approval_runs_the_tool() {
         "s",
         ToolContext::new(std::env::temp_dir()),
     )
-    .with_approver(std::sync::Arc::new(AllowAll));
+    .with_approver(std::rc::Rc::new(AllowAll));
     agent.push_user("go");
 
     let events = agent.run().expect("runs");
