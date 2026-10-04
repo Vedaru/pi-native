@@ -200,10 +200,18 @@ impl Agent {
         &self.messages
     }
 
-    /// Run the model/tool loop until it stops or the iteration bound is hit.
+    /// Run the model/tool loop, collecting events. Convenience wrapper over
+    /// [`Agent::run_with`]; prefer `run_with` for long runs so events are not
+    /// accumulated (which would duplicate tool output for the whole turn).
     pub fn run(&mut self) -> Result<Vec<AgentEvent>, AgentError> {
-        let tools: Vec<ToolSpec> = self.tools.iter().map(|tool| tool.spec()).collect();
         let mut events = Vec::new();
+        self.run_with(|event| events.push(event.clone()))?;
+        Ok(events)
+    }
+
+    /// Run the model/tool loop, streaming each event to `on_event` as it occurs.
+    pub fn run_with<F: FnMut(&AgentEvent)>(&mut self, mut on_event: F) -> Result<(), AgentError> {
+        let tools: Vec<ToolSpec> = self.tools.iter().map(|tool| tool.spec()).collect();
 
         for _ in 0..self.max_iterations {
             let request = CompletionRequest {
@@ -214,7 +222,7 @@ impl Agent {
             let turn = self.provider.complete(&request)?;
 
             if !turn.text.is_empty() {
-                events.push(AgentEvent::AssistantText(turn.text.clone()));
+                on_event(&AgentEvent::AssistantText(turn.text.clone()));
             }
 
             let mut blocks = Vec::new();
@@ -235,19 +243,19 @@ impl Agent {
             }
 
             if turn.tool_calls.is_empty() {
-                events.push(AgentEvent::Done {
+                on_event(&AgentEvent::Done {
                     stop_reason: turn.stop_reason.clone(),
                 });
-                return Ok(events);
+                return Ok(());
             }
 
             for call in &turn.tool_calls {
-                events.push(AgentEvent::ToolStart {
+                on_event(&AgentEvent::ToolStart {
                     name: call.name.clone(),
                     input: call.arguments.clone(),
                 });
                 let result = self.run_tool(call);
-                events.push(AgentEvent::ToolEnd {
+                on_event(&AgentEvent::ToolEnd {
                     name: call.name.clone(),
                     is_error: result.is_error,
                     content: result.content.clone(),
@@ -263,10 +271,10 @@ impl Agent {
             }
         }
 
-        events.push(AgentEvent::Done {
+        on_event(&AgentEvent::Done {
             stop_reason: Some("max_iterations".to_string()),
         });
-        Ok(events)
+        Ok(())
     }
 
     fn run_tool(&self, call: &ToolCall) -> ToolResult {

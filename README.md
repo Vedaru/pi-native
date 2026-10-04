@@ -161,11 +161,18 @@ if peak RSS exceeds a ceiling or the run does not finish in time.
 
 | Turns | Wall | Peak RSS |
 | --- | --- | --- |
-| 1,000 | 0.08 s | 5.6 MB |
-| 10,000 | 0.15 s | 16.4 MB |
-| 50,000 | 3.2 s | 67.2 MB |
+| 10,000 | 0.09 s | 12.3 MB |
+| 50,000 | 2.9 s | 45.2 MB |
 
-Growth is proportional to the retained transcript (~1.3 KB/turn), with no leak.
-The first pressure run found an **O(n²) bug**: the loop cloned the whole
-transcript every iteration. It now borrows (`CompletionRequest` holds slices),
-which took 10k turns from 9.7 s to 0.15 s and 50k turns from a timeout to 3.2 s.
+Growth is proportional to the retained transcript (~900 B/turn), with no leak.
+Two fixes came out of pressure testing:
+
+- The loop **cloned the whole transcript every iteration** (O(n²)). It now
+  borrows (`CompletionRequest` holds slices): 10k turns went from 9.7 s to
+  0.09 s, and 50k from a timeout to under 3 s.
+- The loop **accumulated every event**, duplicating tool output for the whole
+  turn. `run_with` streams events to a sink; `run` collects them for callers that
+  want a `Vec`.
+
+The remaining growth is the retained transcript; bounding it needs **context
+compaction**, which is the real fix for very long sessions.

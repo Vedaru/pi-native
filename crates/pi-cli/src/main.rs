@@ -225,9 +225,17 @@ impl Approver for TerminalApprover {
     }
 }
 
-/// Deterministic in-process load: N turns of an `ls` tool call, then a final
-/// message. No network, no subprocesses, so memory growth is measured cleanly.
+/// Deterministic in-process load: N turns of a `read` tool call with a fixed,
+/// tiny output, then a final message. No network, no subprocesses, and a
+/// constant per-tool-result size, so the measured memory is the harness
+/// overhead rather than the size of a directory listing.
 fn run_stress(turns: usize) {
+    // A directory with a single small file so `ls` (no arguments) returns a
+    // tiny, constant output. This measures harness overhead, not payload size.
+    let dir = std::env::temp_dir().join(format!("pi-stress-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let _ = std::fs::write(dir.join("f.txt"), "x\n");
+
     let mut scripted = Vec::with_capacity(turns + 1);
     for index in 0..turns {
         scripted.push(AssistantTurn {
@@ -247,31 +255,34 @@ fn run_stress(turns: usize) {
     });
 
     let provider = FauxProvider::new(scripted);
-    let cwd = std::env::current_dir().unwrap_or_default();
     let mut agent = Agent::new(
         Box::new(provider),
         default_tools(),
         SYSTEM_PROMPT,
-        ToolContext::new(cwd),
+        ToolContext::new(&dir),
     )
     .with_max_iterations(turns + 2);
     agent.push_user("stress");
-    match agent.run() {
-        Ok(events) => {
-            let tool_results = events
-                .iter()
-                .filter(|event| matches!(event, AgentEvent::ToolEnd { .. }))
-                .count();
-            println!(
-                "stress: {turns} turns, {} messages, {tool_results} tool results",
-                agent.messages().len()
-            );
+
+    // Stream events instead of collecting them, so a long run does not retain
+    // every event (which would duplicate tool output for the whole turn).
+    let mut tool_results = 0usize;
+    let result = agent.run_with(|event| {
+        if matches!(event, AgentEvent::ToolEnd { .. }) {
+            tool_results += 1;
         }
+    });
+    match result {
+        Ok(()) => println!(
+            "stress: {turns} turns, {} messages, {tool_results} tool results",
+            agent.messages().len()
+        ),
         Err(error) => {
             eprintln!("pi-native --stress: {error}");
             std::process::exit(1);
         }
     }
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 const SYSTEM_PROMPT: &str = "You are pi, a coding agent. Be concise.";
