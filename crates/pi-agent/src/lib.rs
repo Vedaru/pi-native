@@ -11,6 +11,7 @@
 use pi_providers::{AssistantBlock, ContentPart, ToolSpec, TranscriptMessage, Usage};
 use pi_tools::{Tool, ToolResult};
 use serde_json::Value;
+use std::sync::Arc;
 
 pub mod providers;
 pub mod session;
@@ -118,6 +119,37 @@ pub trait ModelProvider {
     fn complete(&self, request: &CompletionRequest) -> Result<AssistantTurn, AgentError>;
 }
 
+/// Whether a tool may run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Approval {
+    Allow,
+    Deny,
+}
+
+/// Decides whether approval-required tools may run. One generic hook — no
+/// per-tool branching in the loop.
+pub trait Approver: Send + Sync {
+    fn approve(&self, tool: &str, input: &Value) -> Approval;
+}
+
+/// Trust everything (default; explicit trust is the caller's choice).
+pub struct AllowAll;
+
+impl Approver for AllowAll {
+    fn approve(&self, _tool: &str, _input: &Value) -> Approval {
+        Approval::Allow
+    }
+}
+
+/// Deny every approval-required tool (safe default for headless units).
+pub struct DenyAll;
+
+impl Approver for DenyAll {
+    fn approve(&self, _tool: &str, _input: &Value) -> Approval {
+        Approval::Deny
+    }
+}
+
 /// Runs turns over a transcript.
 pub struct Agent {
     provider: Box<dyn ModelProvider>,
@@ -125,6 +157,7 @@ pub struct Agent {
     system: String,
     messages: Vec<TranscriptMessage>,
     tool_context: ToolContext,
+    approver: Arc<dyn Approver>,
     max_iterations: usize,
 }
 
@@ -141,12 +174,19 @@ impl Agent {
             system: system.into(),
             messages: Vec::new(),
             tool_context,
+            approver: Arc::new(AllowAll),
             max_iterations: 16,
         }
     }
 
     pub fn with_max_iterations(mut self, max: usize) -> Self {
         self.max_iterations = max.max(1);
+        self
+    }
+
+    /// Set the approval policy for tools that require approval.
+    pub fn with_approver(mut self, approver: Arc<dyn Approver>) -> Self {
+        self.approver = approver;
         self
     }
 
@@ -228,10 +268,15 @@ impl Agent {
     }
 
     fn run_tool(&self, call: &ToolCall) -> ToolResult {
-        match self.tools.iter().find(|tool| tool.name() == call.name) {
-            Some(tool) => tool.run(&call.arguments, &self.tool_context),
-            None => ToolResult::error(format!("unknown tool: {}", call.name)),
+        let Some(tool) = self.tools.iter().find(|tool| tool.name() == call.name) else {
+            return ToolResult::error(format!("unknown tool: {}", call.name));
+        };
+        if tool.requires_approval()
+            && self.approver.approve(&call.name, &call.arguments) == Approval::Deny
+        {
+            return ToolResult::error(format!("{}: denied (no approval)", call.name));
         }
+        tool.run(&call.arguments, &self.tool_context)
     }
 }
 

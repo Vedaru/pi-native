@@ -5,7 +5,7 @@
 //! lands in later milestones.
 
 use clap::{Parser, Subcommand, ValueEnum};
-use pi_agent::{anthropic_provider, Agent, AgentEvent};
+use pi_agent::{anthropic_provider, Agent, AgentEvent, AllowAll, Approval, Approver, DenyAll};
 use pi_cache::{
     clamp_openai_prompt_cache_key, get_cache_control, openai_completions_prompt_cache_key,
     openai_responses_prompt_cache_key, resolve_cache_retention, CacheRetention,
@@ -13,6 +13,7 @@ use pi_cache::{
 use pi_tools::{default_tools, ToolContext};
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Command as ProcessCommand, Stdio};
+use std::sync::Arc;
 
 #[derive(Parser)]
 #[command(name = "pi-native", version, about = "Native Rust runtime for pi")]
@@ -36,6 +37,9 @@ struct Cli {
     /// implemented yet, so this is a no-op.
     #[arg(long = "no-session")]
     no_session: bool,
+    /// Allow approval-required tools (bash/write/edit) without asking.
+    #[arg(long)]
+    yolo: bool,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -96,15 +100,15 @@ fn main() {
         return;
     }
     if cli.serve {
-        run_serve(&cli.model);
+        run_serve(&cli.model, cli.yolo);
         return;
     }
     if cli.client {
-        run_client();
+        run_client(cli.yolo);
         return;
     }
     if let Some(prompt) = cli.print {
-        run_print(&prompt, &cli.model);
+        run_print(&prompt, &cli.model, cli.yolo);
         return;
     }
     match cli.command {
@@ -149,7 +153,7 @@ fn run_rpc() {
 }
 
 /// Run one prompt through the agent and print the result.
-fn run_print(prompt: &str, model: &str) {
+fn run_print(prompt: &str, model: &str, yolo: bool) {
     let api_key = std::env::var("ANTHROPIC_API_KEY").unwrap_or_default();
     if api_key.is_empty() {
         eprintln!("pi-native --print: ANTHROPIC_API_KEY is not set");
@@ -159,12 +163,18 @@ fn run_print(prompt: &str, model: &str) {
         .unwrap_or_else(|_| "https://api.anthropic.com".to_string());
     let provider = anthropic_provider(base_url, api_key, model);
     let cwd = std::env::current_dir().unwrap_or_default();
+    let approver: Arc<dyn Approver> = if yolo {
+        Arc::new(AllowAll)
+    } else {
+        Arc::new(TerminalApprover)
+    };
     let mut agent = Agent::new(
         Box::new(provider),
         default_tools(),
         "You are pi, a coding agent. Be concise.",
         ToolContext::new(cwd),
-    );
+    )
+    .with_approver(approver);
     agent.push_user(prompt);
     match agent.run() {
         Ok(events) => {
@@ -186,10 +196,29 @@ fn run_print(prompt: &str, model: &str) {
     }
 }
 
+/// Asks the terminal before running an approval-required tool.
+struct TerminalApprover;
+
+impl Approver for TerminalApprover {
+    fn approve(&self, tool: &str, input: &serde_json::Value) -> Approval {
+        print!("[approve] {tool} {input}? [y/N] ");
+        let _ = std::io::stdout().flush();
+        let mut answer = String::new();
+        if std::io::stdin().read_line(&mut answer).unwrap_or(0) == 0 {
+            return Approval::Deny;
+        }
+        if answer.trim().eq_ignore_ascii_case("y") {
+            Approval::Allow
+        } else {
+            Approval::Deny
+        }
+    }
+}
+
 const SYSTEM_PROMPT: &str = "You are pi, a coding agent. Be concise.";
 
 /// Serve the RPC protocol over stdio with a real Anthropic provider.
-fn run_serve(model: &str) {
+fn run_serve(model: &str, yolo: bool) {
     let api_key = std::env::var("ANTHROPIC_API_KEY").unwrap_or_default();
     if api_key.is_empty() {
         eprintln!("pi-native --serve: ANTHROPIC_API_KEY is not set");
@@ -199,26 +228,32 @@ fn run_serve(model: &str) {
         .unwrap_or_else(|_| "https://api.anthropic.com".to_string());
     let provider = anthropic_provider(base_url, api_key, model);
     let cwd = std::env::current_dir().unwrap_or_default();
+    let approver: Arc<dyn Approver> = if yolo {
+        Arc::new(AllowAll)
+    } else {
+        Arc::new(DenyAll)
+    };
     let mut agent = Agent::new(
         Box::new(provider),
         default_tools(),
         SYSTEM_PROMPT,
         ToolContext::new(cwd),
-    );
+    )
+    .with_approver(approver);
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
     let _ = pi_rpc::serve(&mut agent, stdin.lock(), stdout.lock());
 }
 
 /// A minimal terminal client: spawn a unit serving the protocol and drive it.
-fn run_client() {
+fn run_client(yolo: bool) {
     let exe = std::env::current_exe().expect("current executable");
-    let mut child = match ProcessCommand::new(exe)
-        .arg("--serve")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()
-    {
+    let mut command = ProcessCommand::new(exe);
+    command.arg("--serve");
+    if yolo {
+        command.arg("--yolo");
+    }
+    let mut child = match command.stdin(Stdio::piped()).stdout(Stdio::piped()).spawn() {
         Ok(child) => child,
         Err(error) => {
             eprintln!("pi-native --client: {error}");

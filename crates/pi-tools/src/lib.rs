@@ -67,6 +67,12 @@ pub trait Tool: Send + Sync {
     fn input_schema(&self) -> Value;
     fn run(&self, input: &Value, ctx: &ToolContext) -> ToolResult;
 
+    /// Whether running this tool needs explicit approval. Read-only tools do
+    /// not; anything that mutates the workspace or spawns a process does.
+    fn requires_approval(&self) -> bool {
+        false
+    }
+
     /// The provider-facing tool definition.
     fn spec(&self) -> ToolSpec {
         ToolSpec {
@@ -154,6 +160,10 @@ pub struct BashTool;
 impl Tool for BashTool {
     fn name(&self) -> &'static str {
         "bash"
+    }
+
+    fn requires_approval(&self) -> bool {
+        true
     }
 
     fn description(&self) -> &'static str {
@@ -266,6 +276,10 @@ impl Tool for WriteTool {
         "write"
     }
 
+    fn requires_approval(&self) -> bool {
+        true
+    }
+
     fn description(&self) -> &'static str {
         "Create or overwrite a file with the given content. Parent directories are created."
     }
@@ -307,6 +321,10 @@ pub struct EditTool;
 impl Tool for EditTool {
     fn name(&self) -> &'static str {
         "edit"
+    }
+
+    fn requires_approval(&self) -> bool {
+        true
     }
 
     fn description(&self) -> &'static str {

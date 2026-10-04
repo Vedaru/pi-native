@@ -1,5 +1,5 @@
 use super::*;
-use pi_tools::{Tool, ToolContext, ToolResult};
+use pi_tools::{BashTool, Tool, ToolContext, ToolResult};
 use serde_json::json;
 use std::cell::RefCell;
 
@@ -164,4 +164,78 @@ fn iteration_bound_stops_a_runaway_loop() {
             stop_reason: Some("max_iterations".into())
         })
     );
+}
+
+fn bash_turn() -> AssistantTurn {
+    AssistantTurn {
+        tool_calls: vec![ToolCall {
+            id: "c1".into(),
+            name: "bash".into(),
+            arguments: json!({ "command": "echo hi" }),
+        }],
+        stop_reason: Some("tool_use".into()),
+        ..Default::default()
+    }
+}
+
+fn tool_end(events: &[AgentEvent]) -> (bool, String) {
+    events
+        .iter()
+        .find_map(|event| match event {
+            AgentEvent::ToolEnd {
+                is_error, content, ..
+            } => Some((*is_error, content.clone())),
+            _ => None,
+        })
+        .expect("a tool end event")
+}
+
+#[test]
+fn denied_approval_blocks_an_approval_tool() {
+    let provider = FakeProvider::new(vec![
+        bash_turn(),
+        AssistantTurn {
+            text: "ok".into(),
+            ..Default::default()
+        },
+    ]);
+    let mut agent = Agent::new(
+        Box::new(provider),
+        vec![Box::new(BashTool)],
+        "s",
+        ToolContext::new(std::env::temp_dir()),
+    )
+    .with_approver(std::sync::Arc::new(DenyAll));
+    agent.push_user("go");
+
+    let events = agent.run().expect("runs");
+    let (is_error, content) = tool_end(&events);
+    assert!(is_error, "denied tool should be an error: {content}");
+    assert!(content.contains("denied"), "{content}");
+    // The loop continues after a denial.
+    assert!(events.contains(&AgentEvent::AssistantText("ok".into())));
+}
+
+#[test]
+fn allowed_approval_runs_the_tool() {
+    let provider = FakeProvider::new(vec![
+        bash_turn(),
+        AssistantTurn {
+            text: "ok".into(),
+            ..Default::default()
+        },
+    ]);
+    let mut agent = Agent::new(
+        Box::new(provider),
+        vec![Box::new(BashTool)],
+        "s",
+        ToolContext::new(std::env::temp_dir()),
+    )
+    .with_approver(std::sync::Arc::new(AllowAll));
+    agent.push_user("go");
+
+    let events = agent.run().expect("runs");
+    let (is_error, content) = tool_end(&events);
+    assert!(!is_error, "{content}");
+    assert!(content.contains("hi"), "{content}");
 }
