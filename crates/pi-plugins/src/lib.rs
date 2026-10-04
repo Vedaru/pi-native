@@ -16,7 +16,7 @@ pub mod crypto;
 pub mod globals;
 pub mod modules;
 
-use rquickjs::{Context, Ctx, Function, Module, Object, Runtime};
+use rquickjs::{CatchResultExt, Context, Ctx, Function, Module, Object, Runtime};
 use std::sync::{Arc, Mutex};
 
 /// Capabilities a plugin may request, mirroring pi's policy tokens.
@@ -155,11 +155,41 @@ impl PluginHost {
             self.install_host_fs(&ctx)?;
             self.install_host_crypto(&ctx)?;
             self.install_host_child_process(&ctx)?;
+            self.install_host_zlib(&ctx)?;
+            self.install_host_api_call(&ctx)?;
             install_env(&ctx)?;
-            ctx.eval::<(), _>(globals::PRELUDE.as_bytes())?;
-            let entry = Module::declare(ctx.clone(), name, prepared.as_bytes())?;
+            ctx.eval::<(), _>(globals::PRELUDE.as_bytes())
+                .catch(&ctx)
+                .map_err(|error| caught_error("prelude", error))?;
+            let entry = Module::declare(ctx.clone(), name, prepared.as_bytes())
+                .catch(&ctx)
+                .map_err(|error| caught_error("declare", error))?;
             // Module bodies run synchronously; top-level await is not supported yet.
-            let _ = entry.eval()?;
+            let (evaluated, _promise) = entry
+                .eval()
+                .catch(&ctx)
+                .map_err(|error| caught_error("eval", error))?;
+            // Like pi, an extension exports a default factory that receives the
+            // extension API. Invoke it when present.
+            let namespace = evaluated
+                .namespace()
+                .catch(&ctx)
+                .map_err(|error| caught_error("namespace", error))?;
+            let default: Option<rquickjs::Value<'_>> = namespace
+                .get("default")
+                .catch(&ctx)
+                .map_err(|error| caught_error("default", error))?;
+            if let Some(function) = default.as_ref().and_then(|value| value.as_function()) {
+                let api: Object<'_> = ctx
+                    .globals()
+                    .get("pi")
+                    .catch(&ctx)
+                    .map_err(|error| caught_error("api", error))?;
+                function
+                    .call::<_, rquickjs::Value<'_>>((api,))
+                    .catch(&ctx)
+                    .map_err(|error| caught_error("factory", error))?;
+            }
             Ok::<(), PluginError>(())
         })?;
 
@@ -172,6 +202,14 @@ impl PluginHost {
 
         let calls = self.calls.lock().expect("calls lock").clone();
         Ok(calls)
+    }
+
+    /// Load and run a plugin from a file path. Relative imports resolve against
+    /// the file, and `.ts`/`.tsx` entries are transpiled.
+    pub fn run_file(&self, path: &std::path::Path) -> Result<Vec<HostCall>, PluginError> {
+        let source = std::fs::read_to_string(path)
+            .map_err(|error| PluginError::Engine(format!("read {}: {error}", path.display())))?;
+        self.run_named(&path.to_string_lossy(), &source)
     }
 
     fn install_pi_global(&self, ctx: &Ctx<'_>) -> Result<(), PluginError> {
@@ -511,6 +549,116 @@ impl PluginHost {
             }),
         )?;
 
+        // appendFileSync(path, data)
+        let (calls, denials, policy) = (
+            self.calls.clone(),
+            self.denials.clone(),
+            self.policy.clone(),
+        );
+        fs.set(
+            "appendFileSync",
+            Function::new(ctx.clone(), move |path: String, data: String| {
+                if record(
+                    &policy,
+                    &calls,
+                    &denials,
+                    Capability::Write,
+                    "fs.appendFileSync",
+                    serde_json::json!({ "path": path }),
+                ) {
+                    use std::io::Write as _;
+                    if let Ok(mut file) = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(&path)
+                    {
+                        let _ = file.write_all(data.as_bytes());
+                    }
+                }
+            }),
+        )?;
+
+        // copyFileSync(src, dest)
+        let (calls, denials, policy) = (
+            self.calls.clone(),
+            self.denials.clone(),
+            self.policy.clone(),
+        );
+        fs.set(
+            "copyFileSync",
+            Function::new(ctx.clone(), move |src: String, dest: String| {
+                if record(
+                    &policy,
+                    &calls,
+                    &denials,
+                    Capability::Write,
+                    "fs.copyFileSync",
+                    serde_json::json!({ "src": src, "dest": dest }),
+                ) {
+                    let _ = std::fs::copy(&src, &dest);
+                }
+            }),
+        )?;
+
+        // rmSync(path, recursive?)
+        let (calls, denials, policy) = (
+            self.calls.clone(),
+            self.denials.clone(),
+            self.policy.clone(),
+        );
+        fs.set(
+            "rmSync",
+            Function::new(ctx.clone(), move |path: String, recursive: Option<bool>| {
+                if record(
+                    &policy,
+                    &calls,
+                    &denials,
+                    Capability::Write,
+                    "fs.rmSync",
+                    serde_json::json!({ "path": path }),
+                ) {
+                    let _ = if recursive.unwrap_or(false) {
+                        std::fs::remove_dir_all(&path)
+                    } else {
+                        std::fs::remove_file(&path)
+                    };
+                }
+            }),
+        )?;
+
+        // mkdtemp(prefix) -> path
+        let (calls, denials, policy) = (
+            self.calls.clone(),
+            self.denials.clone(),
+            self.policy.clone(),
+        );
+        fs.set(
+            "mkdtemp",
+            Function::new(ctx.clone(), move |prefix: String| -> String {
+                let allowed = record(
+                    &policy,
+                    &calls,
+                    &denials,
+                    Capability::Write,
+                    "fs.mkdtemp",
+                    serde_json::json!({ "prefix": prefix }),
+                );
+                if !allowed {
+                    return String::new();
+                }
+                let unique = crate::crypto::random_bytes(6)
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<String>();
+                let dir = format!("{prefix}{unique}");
+                if std::fs::create_dir_all(&dir).is_ok() {
+                    dir
+                } else {
+                    String::new()
+                }
+            }),
+        )?;
+
         host.set("fs", fs)?;
         ctx.globals().set("__pi_host", host)?;
         Ok(())
@@ -615,6 +763,51 @@ impl PluginHost {
         host.set("child_process", cp)?;
         Ok(())
     }
+
+    /// Install `__pi_host.zlib` compression helpers.
+    fn install_host_zlib(&self, ctx: &Ctx<'_>) -> Result<(), PluginError> {
+        let globals = ctx.globals();
+        let host: Object = globals.get("__pi_host")?;
+        let zlib = Object::new(ctx.clone())?;
+        zlib.set(
+            "gzipSync",
+            Function::new(ctx.clone(), |data: Vec<u8>| -> Vec<u8> { gzip(&data) }),
+        )?;
+        zlib.set(
+            "gunzipSync",
+            Function::new(ctx.clone(), |data: Vec<u8>| -> Vec<u8> { gunzip(&data) }),
+        )?;
+        zlib.set(
+            "deflateSync",
+            Function::new(ctx.clone(), |data: Vec<u8>| -> Vec<u8> { deflate(&data) }),
+        )?;
+        zlib.set(
+            "inflateSync",
+            Function::new(ctx.clone(), |data: Vec<u8>| -> Vec<u8> { inflate(&data) }),
+        )?;
+        host.set("zlib", zlib)?;
+        Ok(())
+    }
+
+    /// Install `__pi_host.apiCall`, the catch-all used by the `pi` proxy for
+    /// extension methods we have not modeled yet. Records like any hostcall.
+    fn install_host_api_call(&self, ctx: &Ctx<'_>) -> Result<(), PluginError> {
+        let globals = ctx.globals();
+        let host: Object = globals.get("__pi_host")?;
+        let (calls, denials, policy) = (
+            self.calls.clone(),
+            self.denials.clone(),
+            self.policy.clone(),
+        );
+        host.set(
+            "apiCall",
+            Function::new(ctx.clone(), move |name: String, args_json: String| {
+                let args = serde_json::from_str(&args_json).unwrap_or(serde_json::Value::Null);
+                record(&policy, &calls, &denials, Capability::Events, &name, args);
+            }),
+        )?;
+        Ok(())
+    }
 }
 
 /// Run a shell command, returning stdout (lossy).
@@ -645,6 +838,57 @@ fn run_command(command: &str, args: &[String]) -> String {
         })
         .to_string(),
     }
+}
+
+fn caught_error(stage: &str, error: rquickjs::CaughtError<'_>) -> PluginError {
+    match error {
+        rquickjs::CaughtError::Exception(exception) => {
+            let message = exception.message().unwrap_or_default();
+            let stack = exception.stack().unwrap_or_default();
+            if stack.is_empty() {
+                PluginError::Engine(format!("{stage}: {message}"))
+            } else {
+                PluginError::Engine(format!("{stage}: {message}\n{stack}"))
+            }
+        }
+        other => PluginError::Engine(format!("{stage}: {other}")),
+    }
+}
+
+/// gzip-compress bytes.
+fn gzip(data: &[u8]) -> Vec<u8> {
+    use flate2::write::GzEncoder;
+    use std::io::Write as _;
+    let mut encoder = GzEncoder::new(Vec::new(), flate2::Compression::default());
+    let _ = encoder.write_all(data);
+    encoder.finish().unwrap_or_default()
+}
+
+/// gzip-decompress bytes.
+fn gunzip(data: &[u8]) -> Vec<u8> {
+    use flate2::read::GzDecoder;
+    use std::io::Read as _;
+    let mut out = Vec::new();
+    let _ = GzDecoder::new(data).read_to_end(&mut out);
+    out
+}
+
+/// zlib-deflate bytes.
+fn deflate(data: &[u8]) -> Vec<u8> {
+    use flate2::write::ZlibEncoder;
+    use std::io::Write as _;
+    let mut encoder = ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+    let _ = encoder.write_all(data);
+    encoder.finish().unwrap_or_default()
+}
+
+/// zlib-inflate bytes.
+fn inflate(data: &[u8]) -> Vec<u8> {
+    use flate2::read::ZlibDecoder;
+    use std::io::Read as _;
+    let mut out = Vec::new();
+    let _ = ZlibDecoder::new(data).read_to_end(&mut out);
+    out
 }
 
 fn platform_name() -> &'static str {
@@ -958,6 +1202,17 @@ mod tests {
             Err(PluginError::Denied { capability, .. }) => assert_eq!(capability, Capability::Exec),
             other => panic!("expected exec denial, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn extension_factory_receives_the_api() {
+        let host = PluginHost::new(PluginPolicy::permissive());
+        let calls = host
+            .run(r#"export default function (pi) { pi.registerTool({ name: "x", description: "d" }); }"#)
+            .expect("runs");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].method, "registerTool");
+        assert_eq!(calls[0].args["name"], serde_json::json!("x"));
     }
 
     #[test]

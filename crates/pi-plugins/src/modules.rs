@@ -104,7 +104,7 @@ impl Loader for PiLoader {
             return Module::declare(ctx.clone(), name, source);
         }
         if is_bare(name) {
-            return Module::declare(ctx.clone(), name, proxy_stub_source(name));
+            return Module::declare(ctx.clone(), name, stub_module_source(name));
         }
         // Relative/absolute file import.
         let path = name.strip_prefix("file://").unwrap_or(name);
@@ -138,22 +138,103 @@ pub fn virtual_module_source(canonical: &str) -> Option<String> {
         "node:events" => Some(EVENTS_MODULE.to_string()),
         "node:child_process" => Some(CHILD_PROCESS_MODULE.to_string()),
         "node:buffer" => Some(BUFFER_MODULE.to_string()),
+        "node:url" => Some(NODE_URL_MODULE.to_string()),
+        "node:module" => Some(NODE_MODULE_MODULE.to_string()),
+        "node:util" => Some(UTIL_MODULE.to_string()),
+        "node:zlib" => Some(ZLIB_MODULE.to_string()),
+        "node:readline" | "node:readline/promises" => Some(READLINE_MODULE.to_string()),
         _ => None,
     }
 }
 
-/// A proxy stub for npm packages that cannot run in the sandbox.
-fn proxy_stub_source(spec: &str) -> String {
-    format!(
-        "// pi-native npm proxy stub for {spec}: loads, but has no behavior.\n\
-         const stub = new Proxy(function () {{}}, {{\n\
-           get: () => stub,\n\
+/// A proxy module for a stubbed npm package.
+///
+/// `__real` carries real behavior for the names we implement (`Type`,
+/// `uuidv7`, ...); every other property is a callable/constructable proxy, so
+/// code loads and registers even when the library behavior is absent. Static
+/// ESM named imports are handled by the transpiler's import rewrite.
+pub fn stub_module_source(spec: &str) -> String {
+    let mut source = String::new();
+    source.push_str("// pi-native stub for ");
+    source.push_str(spec);
+    source.push_str("\nconst __real = { ");
+    match spec {
+        "typebox"
+        | "@earendil-works/pi-ai"
+        | "@earendil-works/pi-ai/compat"
+        | "@mariozechner/pi-ai" => source.push_str(PI_OVERRIDES),
+        "@earendil-works/pi-coding-agent" | "@mariozechner/pi-coding-agent" => {
+            source.push_str(PI_CODING_AGENT_OVERRIDES)
+        }
+        _ => {}
+    }
+    source.push_str(
+        " };\n\
+         const __stub = new Proxy(function () {}, {\n\
+           get: (_t, prop) => (prop in __real ? __real[prop] : __stub),\n\
            apply: () => undefined,\n\
-           construct: () => ({{}}),\n\
-         }});\n\
-         export default stub;\n"
-    )
+           construct: () => ({}),\n\
+         });\n\
+         export default __stub;\n",
+    );
+    source
 }
+
+/// Real overrides for the pi-ai / typebox surface that plugins use as values.
+const PI_OVERRIDES: &str = r#"
+Type: {
+  Object: (properties, options) => Object.assign({ type: "object", properties: properties || {} }, options || {}),
+  String: (options) => Object.assign({ type: "string" }, options || {}),
+  Number: (options) => Object.assign({ type: "number" }, options || {}),
+  Integer: (options) => Object.assign({ type: "integer" }, options || {}),
+  Boolean: (options) => Object.assign({ type: "boolean" }, options || {}),
+  Null: (options) => Object.assign({ type: "null" }, options || {}),
+  Array: (items, options) => Object.assign({ type: "array", items }, options || {}),
+  Optional: (schema, options) => Object.assign({}, schema, options || {}),
+  Union: (schemas, options) => Object.assign({ anyOf: schemas }, options || {}),
+  Literal: (value, options) => Object.assign({ const: value }, options || {}),
+  Any: (options) => Object.assign({}, options || {}),
+  Unknown: (options) => Object.assign({}, options || {}),
+  Record: (_key, value, options) => Object.assign({ type: "object", additionalProperties: value }, options || {}),
+},
+Kind: {},
+StringEnum: (values, options) => Object.assign({ type: "string", enum: values }, options || {}),
+uuidv7: () => {
+  const bytes = globalThis.__pi_host.crypto.randomBytes(16);
+  const ts = Date.now();
+  bytes[0] = Math.floor(ts / 2 ** 40) & 0xff; bytes[1] = Math.floor(ts / 2 ** 32) & 0xff;
+  bytes[2] = Math.floor(ts / 2 ** 24) & 0xff; bytes[3] = Math.floor(ts / 2 ** 16) & 0xff;
+  bytes[4] = Math.floor(ts / 2 ** 8) & 0xff; bytes[5] = ts & 0xff;
+  bytes[6] = (bytes[6] & 0x0f) | 0x70; bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = bytes.map((b) => b.toString(16).padStart(2, "0"));
+  return hex[0]+hex[1]+hex[2]+hex[3]+"-"+hex[4]+hex[5]+"-"+hex[6]+hex[7]+"-"+hex[8]+hex[9]+"-"+hex[10]+hex[11]+hex[12]+hex[13]+hex[14]+hex[15];
+},
+calculateCost: () => 0,
+collapseSystemMessages: (messages) => messages,
+getCurrentSystemPrompt: () => "",
+getCurrentTools: () => [],
+getSystemMessageText: (message) => (message && typeof message.content === "string" ? message.content : ""),
+contentText: () => "",
+registerApiProvider: () => {},
+stream: () => ({}),
+streamSimple: () => ({}),
+anthropicMessagesApi: () => ({ stream: () => ({}), streamSimple: () => ({}) }),
+openAICompletionsApi: () => ({ stream: () => ({}), streamSimple: () => ({}) }),
+openAIResponsesApi: () => ({ stream: () => ({}), streamSimple: () => ({}) }),
+googleGenerativeAIApi: () => ({ stream: () => ({}), streamSimple: () => ({}) }),
+piMessagesApi: () => ({ stream: () => ({}), streamSimple: () => ({}) }),
+createAssistantMessageEventStream: class {
+  constructor() { this.events = []; this.done = false; }
+  push(event) { this.events.push(event); }
+  end() { this.done = true; }
+  async *[Symbol.asyncIterator]() { for (const event of this.events) yield event; }
+},
+"#;
+
+const PI_CODING_AGENT_OVERRIDES: &str = r#"
+CONFIG_DIR_NAME: ".pi",
+VERSION: "0.0.0",
+"#;
 
 const PATH_MODULE: &str = r#"
 function normalize(parts) {
@@ -266,8 +347,15 @@ export function mkdirSync(path, options) {
   host.mkdirSync(path, !!(options && options.recursive));
 }
 export function unlinkSync(path) { host.unlinkSync(path); }
+export function appendFileSync(path, data, _options) { host.appendFileSync(path, typeof data === "string" ? data : String(data)); }
+export function copyFileSync(src, dest) { host.copyFileSync(src, dest); }
+export function rmSync(path, options) { host.rmSync(path, !!(options && options.recursive)); }
+export function mkdtempSync(prefix) { return host.mkdtemp(prefix); }
+export function createReadStream(_path, _options) {
+  return { on() { return this; }, once() { return this; }, pipe() { return this; }, close() {}, destroy() {}, async *[Symbol.asyncIterator]() {} };
+}
 export const constants = {};
-export default { readFileSync, writeFileSync, existsSync, readdirSync, mkdirSync, unlinkSync, constants };
+export default { readFileSync, writeFileSync, existsSync, readdirSync, mkdirSync, unlinkSync, appendFileSync, copyFileSync, rmSync, mkdtempSync, createReadStream, constants };
 "#;
 
 const FS_PROMISES_MODULE: &str = r#"
@@ -278,8 +366,11 @@ export async function writeFile(path, data, _options) { host.writeFileSync(path,
 export async function readdir(path, _options) { return host.readdirSync(path); }
 export async function mkdir(path, options) { host.mkdirSync(path, !!(options && options.recursive)); }
 export async function unlink(path) { host.unlinkSync(path); }
+export async function appendFile(path, data) { host.appendFileSync(path, typeof data === "string" ? data : String(data)); }
+export async function rm(path, options) { host.rmSync(path, !!(options && options.recursive)); }
+export async function mkdtemp(prefix) { return host.mkdtemp(prefix); }
 export async function access(path) { if (!host.existsSync(path)) throw new Error("ENOENT: " + path); }
-export default { readFile, writeFile, readdir, mkdir, unlink, access };
+export default { readFile, writeFile, readdir, mkdir, unlink, appendFile, rm, mkdtemp, access };
 "#;
 
 const CRYPTO_MODULE: &str = r#"
@@ -386,6 +477,106 @@ export { Buffer };
 export default { Buffer };
 "#;
 
+const NODE_URL_MODULE: &str = r##"
+export function pathToFileURL(path) {
+  const value = String(path);
+  return { href: "file://" + (value.startsWith("/") ? "" : "/") + value, pathname: value };
+}
+export function fileURLToPath(url) {
+  const value = typeof url === "string" ? url : (url && url.href) || "";
+  return decodeURIComponent(value.replace(/^file:\/\//, ""));
+}
+export class URL {
+  constructor(input, base) {
+    const value = String(input);
+    this.href = /^[a-z]+:\/\//i.test(value) || !base ? value : String(base).replace(/\/$/, "") + "/" + value;
+    const noScheme = this.href.replace(/^[a-z]+:\/\//i, "");
+    const slash = noScheme.indexOf("/");
+    this.pathname = slash === -1 ? "" : noScheme.slice(slash);
+    this.searchParams = new URLSearchParams((this.href.split("?")[1] || "").split("#")[0]);
+  }
+  toString() { return this.href; }
+}
+class URLSearchParams {
+  constructor(init) { this._p = new Map(); if (typeof init === "string" && init) for (const pair of init.split("&")) { const [k, v] = pair.split("="); if (k) this._p.set(decodeURIComponent(k), decodeURIComponent(v || "")); } }
+  get(k) { return this._p.has(k) ? this._p.get(k) : null; }
+  set(k, v) { this._p.set(k, String(v)); }
+  has(k) { return this._p.has(k); }
+}
+export { URLSearchParams };
+export default { pathToFileURL, fileURLToPath, URL, URLSearchParams };
+"##;
+
+const NODE_MODULE_MODULE: &str = r#"
+export function createRequire() {
+  const require = (specifier) => { throw new Error("createRequire is not supported in the plugin sandbox: " + specifier); };
+  require.resolve = (specifier) => specifier;
+  return require;
+}
+export default { createRequire };
+"#;
+
+const UTIL_MODULE: &str = r#"
+export function format(...args) {
+  if (args.length === 0) return "";
+  const first = args[0];
+  if (typeof first !== "string") return args.map((a) => inspect(a)).join(" ");
+  let i = 1;
+  const text = first.replace(/%[sdifjoO%]/g, (token) => {
+    if (token === "%%") return "%";
+    if (i >= args.length) return token;
+    const value = args[i++];
+    return typeof value === "string" ? value : inspect(value);
+  });
+  return [text, ...args.slice(i).map((a) => inspect(a))].join(" ");
+}
+export function inspect(value) {
+  try { return typeof value === "string" ? value : JSON.stringify(value); } catch (error) { return String(value); }
+}
+export function promisify(fn) {
+  return (...args) => new Promise((resolve, reject) => {
+    fn(...args, (error, value) => (error ? reject(error) : resolve(value)));
+  });
+}
+export function inherits(ctor, superCtor) {
+  Object.setPrototypeOf(ctor.prototype, superCtor.prototype);
+  Object.setPrototypeOf(ctor, superCtor);
+}
+export function deprecate(fn) { return fn; }
+export const types = { isDate: (v) => v instanceof Date, isRegExp: (v) => v instanceof RegExp, isArray: Array.isArray };
+export default { format, inspect, promisify, inherits, deprecate, types };
+"#;
+
+const READLINE_MODULE: &str = r#"
+export function createInterface() {
+  return {
+    on() { return this; },
+    once() { return this; },
+    close() {},
+    question(_query, callback) { if (callback) queueMicrotask(() => callback("")); },
+    write() {},
+    prompt() {},
+    async *[Symbol.asyncIterator]() {},
+  };
+}
+export default { createInterface };
+"#;
+
+const ZLIB_MODULE: &str = r#"
+const host = globalThis.__pi_host.zlib;
+function toBytes(data) {
+  if (data instanceof Uint8Array) return Array.from(data);
+  if (typeof data === "string") return Array.from(Buffer.from(data));
+  return Array.from(data || []);
+}
+export function gzipSync(data) { return Buffer.from(host.gzipSync(toBytes(data))); }
+export function gunzipSync(data) { return Buffer.from(host.gunzipSync(toBytes(data))); }
+export function deflateSync(data) { return Buffer.from(host.deflateSync(toBytes(data))); }
+export function inflateSync(data) { return Buffer.from(host.inflateSync(toBytes(data))); }
+export const constants = {};
+export default { gzipSync, gunzipSync, deflateSync, inflateSync, constants };
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -417,12 +608,31 @@ mod tests {
         assert!(virtual_module_source("node:events").is_some());
         assert!(virtual_module_source("node:child_process").is_some());
         assert!(virtual_module_source("node:buffer").is_some());
-        assert!(virtual_module_source("node:zlib").is_none());
+        assert!(virtual_module_source("node:url").is_some());
+        assert!(virtual_module_source("node:module").is_some());
+        assert!(virtual_module_source("node:util").is_some());
+        assert!(virtual_module_source("node:zlib").is_some());
+        assert!(virtual_module_source("node:readline").is_some());
+        assert!(virtual_module_source("some-unknown-pkg").is_none());
     }
 
     #[test]
     fn bare_specifier_gets_a_proxy_stub() {
-        let source = proxy_stub_source("some-npm-pkg");
-        assert!(source.contains("export default stub"));
+        let source = stub_module_source("some-npm-pkg");
+        assert!(source.contains("export default __stub"));
+    }
+
+    #[test]
+    fn pi_ai_stub_exposes_real_type_and_uuid() {
+        let source = stub_module_source("@earendil-works/pi-ai");
+        assert!(source.contains("StringEnum"));
+        assert!(source.contains("uuidv7"));
+        assert!(source.contains("Type:"));
+    }
+
+    #[test]
+    fn typebox_is_now_a_stub_not_a_virtual_module() {
+        assert!(virtual_module_source("typebox").is_none());
+        assert!(virtual_module_source("node:events").is_some());
     }
 }

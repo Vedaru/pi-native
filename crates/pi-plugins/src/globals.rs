@@ -127,9 +127,33 @@ pub const PRELUDE: &str = r#"
     arch: env.arch,
     cwd: () => env.cwd,
     env: env.env || {},
+    argv: ["pi-native"],
+    version: "v22.0.0",
+    versions: { node: "22.0.0" },
+    stdout: { write: (s) => { globalThis.__pi_host.apiCall("process.stdout.write", JSON.stringify([String(s)])); return true; }, isTTY: false },
+    stderr: { write: (s) => { globalThis.__pi_host.apiCall("process.stderr.write", JSON.stringify([String(s)])); return true; }, isTTY: false },
     exit: () => {},
+    on: () => globalThis.process,
     nextTick: (fn, ...args) => queueMicrotask(() => fn(...args)),
   };
+
+  // Wrap `pi` so any extension method we have not modeled records a hostcall
+  // instead of throwing "not a function".
+  const base = globalThis.pi || {};
+  const safeArgs = (args) => {
+    try {
+      return JSON.stringify(args.map((a) => (typeof a === "function" ? null : a)));
+    } catch (error) {
+      return "[]";
+    }
+  };
+  globalThis.pi = new Proxy(base, {
+    get(target, prop) {
+      if (prop in target) return target[prop];
+      if (typeof prop === "symbol") return undefined;
+      return (...args) => globalThis.__pi_host.apiCall(String(prop), safeArgs(args));
+    },
+  });
 })();
 "#;
 

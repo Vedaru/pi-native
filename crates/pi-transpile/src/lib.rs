@@ -12,8 +12,12 @@
 
 use std::path::Path;
 
-use swc_common::{sync::Lrc, FileName, Globals, Mark, SourceMap, GLOBALS};
-use swc_ecma_ast::{Module as SwcModule, Pass, Program as SwcProgram};
+use swc_common::{sync::Lrc, FileName, Globals, Mark, SourceMap, SyntaxContext, DUMMY_SP, GLOBALS};
+use swc_ecma_ast::{
+    BindingIdent, Decl, Expr, Ident, IdentName, ImportDecl, ImportDefaultSpecifier,
+    ImportSpecifier, MemberExpr, MemberProp, Module as SwcModule, ModuleDecl, ModuleExportName,
+    ModuleItem, Pass, Pat, Program as SwcProgram, Stmt, VarDecl, VarDeclKind, VarDeclarator,
+};
 use swc_ecma_codegen::{text_writer::JsWriter, Emitter};
 use swc_ecma_parser::{Parser as SwcParser, StringInput, Syntax, TsSyntax};
 use swc_ecma_transforms_base::resolver;
@@ -67,6 +71,10 @@ pub fn transpile(name: &str, source: &str) -> Result<String, String> {
         resolver(unresolved_mark, top_level_mark, false).process(&mut program);
         strip(unresolved_mark, top_level_mark).process(&mut program);
 
+        if let SwcProgram::Module(module) = &mut program {
+            rewrite_stub_imports(module, is_stub_specifier);
+        }
+
         let SwcProgram::Module(module) = program else {
             return Err(format!("transpile {name}: expected a module"));
         };
@@ -88,9 +96,125 @@ pub fn transpile(name: &str, source: &str) -> Result<String, String> {
     })
 }
 
+/// Bare specifiers resolve to a proxy stub in the plugin loader, so their named
+/// imports must be rewritten to property accesses. `node:` builtins, relative
+/// paths, and URLs are real modules and keep their named imports.
+fn is_stub_specifier(spec: &str) -> bool {
+    !(spec.starts_with("node:")
+        || spec.starts_with('.')
+        || spec.starts_with('/')
+        || spec.starts_with("file:")
+        || spec.starts_with("http:")
+        || spec.starts_with("https:"))
+}
+
+fn ident(name: &str) -> Ident {
+    Ident::new(name.into(), DUMMY_SP, SyntaxContext::empty())
+}
+
+fn member(obj: &Ident, prop: &str) -> Expr {
+    Expr::Member(MemberExpr {
+        span: DUMMY_SP,
+        obj: Box::new(Expr::Ident(obj.clone())),
+        prop: MemberProp::Ident(IdentName::new(prop.into(), DUMMY_SP)),
+    })
+}
+
+fn const_decl(local: Ident, init: Expr) -> ModuleItem {
+    ModuleItem::Stmt(Stmt::Decl(Decl::Var(Box::new(VarDecl {
+        span: DUMMY_SP,
+        ctxt: SyntaxContext::empty(),
+        kind: VarDeclKind::Const,
+        declare: false,
+        decls: vec![VarDeclarator {
+            span: DUMMY_SP,
+            name: Pat::Ident(BindingIdent {
+                id: local,
+                type_ann: None,
+            }),
+            init: Some(Box::new(init)),
+            definite: false,
+        }],
+    }))))
+}
+
+/// Rewrite named/namespace imports from stubbed packages into a default import
+/// plus `const` destructuring, so a proxy default satisfies arbitrary names.
+/// Static ESM named imports require the names to exist; a proxy cannot declare
+/// them, so we turn them into runtime property reads.
+pub fn rewrite_stub_imports(module: &mut SwcModule, is_stub: fn(&str) -> bool) {
+    let mut out = Vec::with_capacity(module.body.len());
+    let mut counter = 0usize;
+    for item in module.body.drain(..) {
+        let ModuleItem::ModuleDecl(ModuleDecl::Import(import)) = &item else {
+            out.push(item);
+            continue;
+        };
+        if !is_stub(import.src.value.as_str().unwrap_or("")) || import.specifiers.is_empty() {
+            out.push(item);
+            continue;
+        }
+        counter += 1;
+        let ns = ident(&format!("__pi_ns_{counter}"));
+        let mut consts = Vec::new();
+        for spec in &import.specifiers {
+            match spec {
+                ImportSpecifier::Default(default) => {
+                    consts.push(const_decl(default.local.clone(), member(&ns, "default")));
+                }
+                ImportSpecifier::Named(named) => {
+                    let imported = match &named.imported {
+                        Some(ModuleExportName::Ident(identifier)) => identifier.sym.to_string(),
+                        Some(ModuleExportName::Str(string)) => {
+                            string.value.to_string_lossy().into_owned()
+                        }
+                        None => named.local.sym.to_string(),
+                    };
+                    consts.push(const_decl(named.local.clone(), member(&ns, &imported)));
+                }
+                ImportSpecifier::Namespace(namespace) => {
+                    consts.push(const_decl(namespace.local.clone(), Expr::Ident(ns.clone())));
+                }
+            }
+        }
+        let default_import = ImportDecl {
+            span: DUMMY_SP,
+            specifiers: vec![ImportSpecifier::Default(ImportDefaultSpecifier {
+                span: DUMMY_SP,
+                local: ns,
+            })],
+            src: import.src.clone(),
+            type_only: false,
+            with: None,
+            phase: Default::default(),
+        };
+        out.push(ModuleItem::ModuleDecl(ModuleDecl::Import(default_import)));
+        out.extend(consts);
+    }
+    module.body = out;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rewrites_named_imports_from_stubbed_packages() {
+        let source = r#"import { Box, Editor as Ed } from "@earendil-works/pi-tui";
+import typeboxDefault, { Type } from "typebox";
+import { EventEmitter } from "node:events";
+Box; Ed; typeboxDefault; Type; EventEmitter;"#;
+        let out = transpile("plugin.ts", source).expect("transpiles");
+        // Stubbed packages become a default import plus consts.
+        assert!(!out.contains("import { Box"), "pi-tui not rewritten: {out}");
+        assert!(
+            !out.contains("import typeboxDefault, { Type } from"),
+            "typebox not rewritten: {out}"
+        );
+        // Node builtins are real modules and keep their named imports.
+        assert!(out.contains("from \"node:events\""), "{out}");
+        assert!(out.contains("import { EventEmitter }"), "{out}");
+    }
 
     #[test]
     fn detects_transpilable_extensions() {
