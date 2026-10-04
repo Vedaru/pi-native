@@ -9,9 +9,12 @@
 //! and npm bare specifiers resolve to stubs so a plugin can load and register
 //! even when a library's behavior is absent.
 //!
-//! Stage 1 (this commit): runtime + `pi` hostcall surface + capability check.
+//! Stage 1: runtime + `pi` hostcall surface + capability check.
+//! Stage 2: module resolver + virtual Node built-ins (`path`, `os`, `process`).
 
-use rquickjs::{Context, Ctx, Function, Object, Runtime};
+pub mod modules;
+
+use rquickjs::{Context, Ctx, Function, Module, Object, Runtime};
 use std::sync::{Arc, Mutex};
 
 /// Capabilities a plugin may request, mirroring pi's policy tokens.
@@ -130,11 +133,15 @@ impl PluginHost {
     /// Returns the hostcalls the plugin made.
     pub fn run(&self, source: &str) -> Result<Vec<HostCall>, PluginError> {
         let runtime = Runtime::new().map_err(PluginError::from)?;
+        runtime.set_loader(modules::PiResolver, modules::PiLoader);
         let context = Context::full(&runtime).map_err(PluginError::from)?;
 
         context.with(|ctx| {
             self.install_pi_global(&ctx)?;
-            ctx.eval::<(), _>(source.as_bytes())?;
+            install_env(&ctx)?;
+            let entry = Module::declare(ctx.clone(), "plugin://entry", source.as_bytes())?;
+            // Module bodies run synchronously; top-level await is not supported yet.
+            let _ = entry.eval()?;
             Ok::<(), PluginError>(())
         })?;
 
@@ -210,6 +217,32 @@ impl PluginHost {
         ctx.globals().set("pi", pi)?;
         Ok(())
     }
+}
+
+fn platform_name() -> &'static str {
+    match std::env::consts::OS {
+        "macos" => "darwin",
+        "windows" => "win32",
+        other => other,
+    }
+}
+
+/// Inject the small host environment the virtual `os`/`process` modules read.
+fn install_env(ctx: &Ctx<'_>) -> Result<(), PluginError> {
+    let env = Object::new(ctx.clone())?;
+    env.set("platform", platform_name())?;
+    env.set("arch", std::env::consts::ARCH)?;
+    env.set("homedir", std::env::var("HOME").unwrap_or_default())?;
+    env.set("tmpdir", std::env::temp_dir().to_string_lossy().to_string())?;
+    env.set("eol", "\n")?;
+    env.set(
+        "cwd",
+        std::env::current_dir()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default(),
+    )?;
+    ctx.globals().set("__pi_env", env)?;
+    Ok(())
 }
 
 fn json_from_js(value: &rquickjs::Value<'_>) -> serde_json::Value {
@@ -297,5 +330,32 @@ mod tests {
             .run(r#"const n = 2 + 3; pi.log("n=" + n);"#)
             .expect("runs");
         assert_eq!(calls[0].args, serde_json::json!("n=5"));
+    }
+
+    #[test]
+    fn plugin_can_import_node_path() {
+        let host = PluginHost::new(PluginPolicy::permissive());
+        let calls = host
+            .run(r#"import path from "node:path"; pi.log(path.join("a", "b"));"#)
+            .expect("runs");
+        assert_eq!(calls[0].args, serde_json::json!("a/b"));
+    }
+
+    #[test]
+    fn plugin_can_import_os_without_prefix() {
+        let host = PluginHost::new(PluginPolicy::permissive());
+        let calls = host
+            .run(r#"import os from "os"; pi.log(os.platform());"#)
+            .expect("runs");
+        assert_eq!(calls[0].args, serde_json::json!(platform_name()));
+    }
+
+    #[test]
+    fn bare_npm_import_loads_as_a_stub() {
+        let host = PluginHost::new(PluginPolicy::permissive());
+        let calls = host
+            .run(r#"import pkg from "some-npm-pkg"; pkg.anything(); pi.log("loaded");"#)
+            .expect("runs");
+        assert_eq!(calls[0].args, serde_json::json!("loaded"));
     }
 }
