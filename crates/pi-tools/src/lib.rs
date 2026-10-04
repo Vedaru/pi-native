@@ -21,6 +21,43 @@ const GREP_MAX_LINE_BYTES: usize = 64 * 1024;
 /// Max characters of a grep match shown in output.
 const GREP_MAX_LINE_LENGTH: usize = 500;
 
+/// Compile a regex, reusing a small cache. Agents often repeat the same pattern
+/// across calls; recompiling it every call is pure CPU.
+fn cached_regex(pattern: &str) -> Result<regex::Regex, regex::Error> {
+    use std::sync::{Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<std::collections::HashMap<String, regex::Regex>>> =
+        OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+    let mut map = cache.lock().expect("regex cache");
+    if let Some(regex) = map.get(pattern) {
+        return Ok(regex.clone());
+    }
+    let regex = regex::Regex::new(pattern)?;
+    if map.len() >= 64 {
+        map.clear();
+    }
+    map.insert(pattern.to_string(), regex.clone());
+    Ok(regex)
+}
+
+/// Compile a glob, reusing a small cache (finds often repeat a pattern).
+fn cached_glob(pattern: &str) -> Result<globset::GlobMatcher, globset::Error> {
+    use std::sync::{Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<std::collections::HashMap<String, globset::GlobMatcher>>> =
+        OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+    let mut map = cache.lock().expect("glob cache");
+    if let Some(matcher) = map.get(pattern) {
+        return Ok(matcher.clone());
+    }
+    let matcher = globset::Glob::new(pattern)?.compile_matcher();
+    if map.len() >= 64 {
+        map.clear();
+    }
+    map.insert(pattern.to_string(), matcher.clone());
+    Ok(matcher)
+}
+
 /// Human-readable byte size, matching pi's `formatSize`.
 fn format_size(bytes: usize) -> String {
     if bytes >= 1024 * 1024 {
@@ -433,7 +470,7 @@ impl Tool for GrepTool {
         let Some(pattern) = input.get("pattern").and_then(Value::as_str) else {
             return ToolResult::error("grep: missing required field `pattern`");
         };
-        let regex = match regex::Regex::new(pattern) {
+        let regex = match cached_regex(pattern) {
             Ok(regex) => regex,
             Err(error) => return ToolResult::error(format!("grep: invalid pattern: {error}")),
         };
@@ -520,8 +557,8 @@ impl Tool for FindTool {
         let Some(pattern) = input.get("pattern").and_then(Value::as_str) else {
             return ToolResult::error("find: missing required field `pattern`");
         };
-        let matcher = match globset::Glob::new(pattern) {
-            Ok(glob) => glob.compile_matcher(),
+        let matcher = match cached_glob(pattern) {
+            Ok(matcher) => matcher,
             Err(error) => return ToolResult::error(format!("find: invalid pattern: {error}")),
         };
         let root = input

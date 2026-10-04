@@ -205,6 +205,7 @@ pub struct Agent {
     context_window: Option<usize>,
     context_bytes: Option<usize>,
     retained_bytes: usize,
+    retained_tokens: usize,
     compaction: Option<(usize, usize)>,
     summarizer: Option<Arc<dyn Summarizer>>,
 }
@@ -227,6 +228,7 @@ impl Agent {
             context_window: None,
             context_bytes: None,
             retained_bytes: 0,
+            retained_tokens: 0,
             compaction: None,
             summarizer: None,
         }
@@ -279,15 +281,14 @@ impl Agent {
         self
     }
 
+    /// Running total of approximate tokens (O(1); no per-call transcript scan).
     fn total_tokens(&self) -> usize {
-        self.messages
-            .iter()
-            .map(TranscriptMessage::approx_tokens)
-            .sum()
+        self.retained_tokens
     }
 
     fn push(&mut self, message: TranscriptMessage) {
         self.retained_bytes += message.approx_bytes();
+        self.retained_tokens += message.approx_tokens();
         self.messages.push(message);
     }
 
@@ -329,6 +330,15 @@ impl Agent {
                 }
                 if cut > 0 {
                     let dropped = cut;
+                    let (dropped_bytes, dropped_tokens) = self.messages[..cut].iter().fold(
+                        (0usize, 0usize),
+                        |(bytes, tokens), message| {
+                            (
+                                bytes + message.approx_bytes(),
+                                tokens + message.approx_tokens(),
+                            )
+                        },
+                    );
                     let summary = if let Some(summarizer) = &self.summarizer {
                         summarizer.summarize(&self.messages[..cut]).ok()
                     } else {
@@ -343,12 +353,12 @@ impl Agent {
                         }
                     };
                     self.messages.drain(0..cut);
-                    self.messages.insert(0, TranscriptMessage::UserText(marker));
-                    self.retained_bytes = self
-                        .messages
-                        .iter()
-                        .map(TranscriptMessage::approx_bytes)
-                        .sum();
+                    let summary_message = TranscriptMessage::UserText(marker);
+                    self.retained_bytes = self.retained_bytes.saturating_sub(dropped_bytes)
+                        + summary_message.approx_bytes();
+                    self.retained_tokens = self.retained_tokens.saturating_sub(dropped_tokens)
+                        + summary_message.approx_tokens();
+                    self.messages.insert(0, summary_message);
                     return Some(AgentEvent::Compacted { dropped, summary });
                 }
             }
@@ -360,6 +370,8 @@ impl Agent {
                 for message in self.messages.drain(0..excess) {
                     self.retained_bytes =
                         self.retained_bytes.saturating_sub(message.approx_bytes());
+                    self.retained_tokens =
+                        self.retained_tokens.saturating_sub(message.approx_tokens());
                 }
             }
         }
@@ -367,6 +379,7 @@ impl Agent {
             while self.retained_bytes > budget && self.messages.len() > 1 {
                 let message = self.messages.remove(0);
                 self.retained_bytes = self.retained_bytes.saturating_sub(message.approx_bytes());
+                self.retained_tokens = self.retained_tokens.saturating_sub(message.approx_tokens());
             }
         }
         None
