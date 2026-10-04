@@ -20,7 +20,8 @@ pub mod session;
 
 pub use pi_tools::ToolContext;
 pub use providers::{
-    anthropic_provider, google_provider, openai_responses_provider, turn_from_stream, HttpProvider,
+    anthropic_provider, google_provider, openai_completions_provider, openai_responses_provider,
+    turn_from_stream, HttpProvider,
 };
 pub use session::{
     append_compaction, append_messages, message_value, messages_from_session, transcript_values,
@@ -90,6 +91,8 @@ pub enum AgentEvent {
         dropped: usize,
         summary: Option<String>,
     },
+    /// Provider token usage for one model call (for cache accounting).
+    Usage(Usage),
 }
 
 /// A provider that returns pre-scripted turns; for tests and embedding.
@@ -490,6 +493,9 @@ impl Agent {
                 tools: &tools,
             };
             let turn = self.provider.complete(&request)?;
+            if let Some(usage) = &turn.usage {
+                on_event(&AgentEvent::Usage(usage.clone()));
+            }
 
             if !turn.text.is_empty() {
                 on_event(&AgentEvent::AssistantText(turn.text.clone()));

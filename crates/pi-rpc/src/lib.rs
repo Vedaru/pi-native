@@ -170,6 +170,13 @@ pub enum Event {
         dropped: usize,
         summary: Option<String>,
     },
+    /// Provider token usage for one model call (for cache accounting).
+    Usage {
+        input: i64,
+        output: i64,
+        cache_read: i64,
+        cache_write: i64,
+    },
     /// The unit's resolved context, so a UI service can render it without
     /// owning the transcript. `transcript` uses pi's message shape.
     State {
@@ -550,6 +557,12 @@ fn from_agent_event(event: AgentEvent) -> Event {
         },
         AgentEvent::Done { stop_reason } => Event::Done { stop_reason },
         AgentEvent::Compacted { dropped, summary } => Event::Compacted { dropped, summary },
+        AgentEvent::Usage(usage) => Event::Usage {
+            input: usage.input,
+            output: usage.output,
+            cache_read: usage.cache_read,
+            cache_write: usage.cache_write,
+        },
     }
 }
 

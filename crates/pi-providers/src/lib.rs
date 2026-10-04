@@ -14,6 +14,7 @@ pub mod convert;
 pub mod google;
 pub mod google_stream;
 pub mod openai_completions;
+pub mod openai_completions_stream;
 pub mod openai_responses;
 pub mod openai_responses_stream;
 
@@ -30,6 +31,9 @@ pub use google::{build_google_params, GoogleBuildOptions, GoogleParams};
 pub use google_stream::{collect_google, GoogleStream, GoogleStreamEvent};
 pub use openai_completions::{
     build_openai_completions_params, MaxTokensField, OpenAiCompletionsBuildOptions, ThinkingFormat,
+};
+pub use openai_completions_stream::{
+    collect_completions, OpenAiCompletionsStream, OpenAiCompletionsStreamEvent,
 };
 pub use openai_responses::{
     build_openai_responses_params, convert_responses_input, convert_responses_tools,

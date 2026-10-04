@@ -7,8 +7,9 @@
 use std::io::Read;
 
 use pi_providers::{
-    collect_content, collect_google, collect_response, AnthropicParams, AnthropicStream,
-    AnthropicStreamEvent, ContentBlock, GoogleParams, GoogleStream, GoogleStreamEvent,
+    collect_completions, collect_content, collect_google, collect_response, AnthropicParams,
+    AnthropicStream, AnthropicStreamEvent, ContentBlock, GoogleParams, GoogleStream,
+    GoogleStreamEvent, OpenAiCompletionsStream, OpenAiCompletionsStreamEvent,
     OpenAiResponsesParams, OpenAiResponsesStream, OpenAiResponsesStreamEvent, Usage,
 };
 use pi_sse::SseParser;
@@ -257,6 +258,44 @@ impl SseProtocol for GoogleProtocol {
             usage: self.stream.usage().clone(),
         }
     }
+}
+
+/// OpenAI-compatible Chat Completions protocol (deepseek, xiaomi, openai).
+#[derive(Default)]
+pub struct OpenAiCompletionsProtocol {
+    stream: OpenAiCompletionsStream,
+    events: Vec<OpenAiCompletionsStreamEvent>,
+}
+
+impl SseProtocol for OpenAiCompletionsProtocol {
+    type Params = serde_json::Value;
+    fn endpoint(base_url: &str, _params: &serde_json::Value) -> String {
+        format!("{}/chat/completions", base_url.trim_end_matches('/'))
+    }
+    fn headers(api_key: &str) -> Vec<(&'static str, String)> {
+        vec![("authorization", format!("Bearer {api_key}"))]
+    }
+    fn ingest(&mut self, _event_type: &str, data: &str) {
+        self.events.push(self.stream.handle(data));
+    }
+    fn into_result(self) -> StreamResult {
+        let (text, content) = collect_completions(&self.events);
+        StreamResult {
+            message_id: self.stream.message_id().map(str::to_string),
+            content,
+            text,
+            usage: self.stream.usage().clone(),
+        }
+    }
+}
+
+/// Stream an OpenAI-compatible Chat Completions request.
+pub fn stream_openai_completions(
+    base_url: &str,
+    api_key: &str,
+    params: &serde_json::Value,
+) -> Result<StreamResult, NetError> {
+    stream_sse::<OpenAiCompletionsProtocol>(base_url, api_key, params)
 }
 
 /// Stream a Gemini `generateContent` request.

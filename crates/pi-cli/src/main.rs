@@ -7,9 +7,9 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use pi_agent::prompt::{build_system_prompt, load_project_context_files, SystemPromptOptions};
 use pi_agent::{
-    anthropic_provider, google_provider, openai_responses_provider, Agent, AgentEvent, AllowAll,
-    Approval, Approver, AssistantTurn, DenyAll, FnProvider, ModelProvider, ProviderSummarizer,
-    SessionJournal, ToolCall, DEFAULT_RESERVE_TOKENS,
+    anthropic_provider, google_provider, openai_completions_provider, openai_responses_provider,
+    Agent, AgentEvent, AllowAll, Approval, Approver, AssistantTurn, DenyAll, FnProvider,
+    ModelProvider, ProviderSummarizer, SessionJournal, ToolCall, DEFAULT_RESERVE_TOKENS,
 };
 use pi_cache::{
     clamp_openai_prompt_cache_key, get_cache_control, openai_completions_prompt_cache_key,
@@ -273,6 +273,21 @@ fn run_print(
                     AgentEvent::Done { .. } => {}
                     AgentEvent::Compacted { dropped, .. } => {
                         eprintln!("[compacted {dropped} messages]")
+                    }
+                    AgentEvent::Usage(usage) => {
+                        let rate = usage
+                            .cache_hit_rate()
+                            .map(|rate| format!("{:.0}%", rate * 100.0))
+                            .unwrap_or_else(|| "n/a".to_string());
+                        eprintln!(
+                            "[usage] prompt {} (cache read {}, input {}, write {}) output {} hit {}",
+                            usage.prompt_tokens(),
+                            usage.cache_read,
+                            usage.input,
+                            usage.cache_write,
+                            usage.output,
+                            rate
+                        );
                     }
                 }
             }
@@ -565,9 +580,36 @@ fn make_provider(model: &str, provider: &str) -> Box<dyn ModelProvider> {
                 model,
             ))
         }
+        "openai-completions" => {
+            let base = std::env::var("OPENAI_BASE_URL")
+                .unwrap_or_else(|_| "https://api.openai.com/v1".to_string());
+            Box::new(openai_completions_provider(
+                base,
+                env_key(&["OPENAI_API_KEY"]),
+                model,
+            ))
+        }
+        "deepseek" => {
+            let base = std::env::var("DEEPSEEK_BASE_URL")
+                .unwrap_or_else(|_| "https://api.deepseek.com".to_string());
+            Box::new(openai_completions_provider(
+                base,
+                env_key(&["DEEPSEEK_API_KEY"]),
+                model,
+            ))
+        }
+        "xiaomi" => {
+            let base = std::env::var("XIAOMI_BASE_URL")
+                .unwrap_or_else(|_| "https://api.xiaomimimo.com/v1".to_string());
+            Box::new(openai_completions_provider(
+                base,
+                env_key(&["XIAOMI_API_KEY"]),
+                model,
+            ))
+        }
         other => {
             eprintln!(
-                "pi-native: unknown provider `{other}` (anthropic, openai-responses, google)"
+                "pi-native: unknown provider `{other}` (anthropic, openai-responses, openai-completions, deepseek, xiaomi, google)"
             );
             std::process::exit(2);
         }

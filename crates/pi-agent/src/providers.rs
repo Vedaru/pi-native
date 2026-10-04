@@ -7,13 +7,14 @@
 
 use crate::{AgentError, AssistantTurn, CompletionRequest, ModelProvider, ToolCall};
 use pi_net::{
-    stream_sse, AnthropicProtocol, GoogleProtocol, OpenAiResponsesProtocol, SseProtocol,
-    StreamResult,
+    stream_sse, AnthropicProtocol, GoogleProtocol, OpenAiCompletionsProtocol,
+    OpenAiResponsesProtocol, SseProtocol, StreamResult,
 };
 use pi_providers::{
-    build_anthropic_params, build_google_params, build_openai_responses_params, convert_messages,
-    AnthropicBuildOptions, CacheRetention, ContentBlock, GoogleBuildOptions,
-    OpenAiResponsesBuildOptions, ThinkingOptions,
+    build_anthropic_params, build_google_params, build_openai_completions_params,
+    build_openai_responses_params, convert_messages, AnthropicBuildOptions, CacheRetention,
+    ContentBlock, GoogleBuildOptions, MaxTokensField, OpenAiCompletionsBuildOptions,
+    OpenAiResponsesBuildOptions, ThinkingFormat, ThinkingOptions,
 };
 
 /// Maps a streamed provider result to an `AssistantTurn`.
@@ -134,6 +135,40 @@ pub fn openai_responses_provider(
                 reasoning: true,
                 supports_image_input: true,
                 strict: false,
+            },
+        )
+    })
+}
+
+/// OpenAI-compatible Chat Completions provider (DeepSeek, Xiaomi, OpenAI).
+pub fn openai_completions_provider(
+    base_url: impl Into<String>,
+    api_key: impl Into<String>,
+    model: impl Into<String>,
+) -> HttpProvider<OpenAiCompletionsProtocol> {
+    let model = model.into();
+    HttpProvider::new(base_url, api_key, move |request| {
+        build_openai_completions_params(
+            model.clone(),
+            request.system,
+            request.tools,
+            request.messages,
+            &OpenAiCompletionsBuildOptions {
+                cache_retention: CacheRetention::Short,
+                session_id: None,
+                base_url_is_openai_api: false,
+                supports_long_cache_retention: true,
+                supports_usage_in_streaming: true,
+                supports_store: false,
+                max_tokens_field: MaxTokensField::MaxTokens,
+                supports_developer_role: false,
+                supports_strict_mode: true,
+                requires_reasoning_content_on_assistant_messages: true,
+                reasoning: true,
+                thinking_format: ThinkingFormat::Deepseek,
+                max_tokens: Some(384_000),
+                off_supported: true,
+                reasoning_effort: None,
             },
         )
     })
