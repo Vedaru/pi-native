@@ -74,51 +74,44 @@ struct Candidate {
 }
 
 /// Try PNG and several JPEG qualities, returning the encodings that fit.
-/// The smallest encoding under the limit, or `None`.
-///
-/// Encodings are produced one at a time and only the current best is retained,
-/// so peak memory is one encoded buffer rather than all candidates at once.
-fn best_candidate(img: &DynamicImage, quality: u8, max_bytes: usize) -> Option<Candidate> {
-    let mut best: Option<Candidate> = None;
-    consider(
-        &mut best,
-        encode(img, ImageFormat::Png, quality).map(|bytes| Candidate {
-            bytes,
-            mime: "image/png",
-        }),
-        max_bytes,
-    );
-    let mut quality = quality;
-    loop {
-        consider(
-            &mut best,
-            encode(img, ImageFormat::Jpeg, quality).map(|bytes| Candidate {
-                bytes,
-                mime: "image/jpeg",
-            }),
-            max_bytes,
-        );
-        if quality <= 25 {
-            break;
+/// JPEG quality steps in pi's order: the configured quality, then 85/70/55/40.
+fn quality_steps(configured: u8) -> Vec<u8> {
+    let mut steps = Vec::new();
+    for quality in [configured, 85, 70, 55, 40] {
+        if !steps.contains(&quality) {
+            steps.push(quality);
         }
-        quality = quality.saturating_sub(15).max(25);
     }
-    best
+    steps
 }
 
-fn consider(best: &mut Option<Candidate>, candidate: Option<Candidate>, max_bytes: usize) {
-    let Some(candidate) = candidate else {
-        return;
-    };
-    if base64_len(candidate.bytes.len()) >= max_bytes {
-        return;
+/// The first encoding under the limit in pi's preference order: PNG, then JPEG
+/// at the configured quality and lower steps. Returns the first that fits rather
+/// than the smallest, matching pi (higher quality wins when it fits).
+fn first_fitting(
+    img: &DynamicImage,
+    configured_quality: u8,
+    max_bytes: usize,
+) -> Option<Candidate> {
+    if let Some(bytes) = encode(img, ImageFormat::Png, configured_quality) {
+        if base64_len(bytes.len()) < max_bytes {
+            return Some(Candidate {
+                bytes,
+                mime: "image/png",
+            });
+        }
     }
-    if best
-        .as_ref()
-        .is_none_or(|current| candidate.bytes.len() < current.bytes.len())
-    {
-        *best = Some(candidate);
+    for quality in quality_steps(configured_quality) {
+        if let Some(bytes) = encode(img, ImageFormat::Jpeg, quality) {
+            if base64_len(bytes.len()) < max_bytes {
+                return Some(Candidate {
+                    bytes,
+                    mime: "image/jpeg",
+                });
+            }
+        }
     }
+    None
 }
 
 /// Apply an EXIF orientation (1-8) to an image. Unknown values are a no-op.
@@ -211,7 +204,7 @@ pub fn resize_image(input: &[u8], limits: &ImageLimits) -> Option<ResizedImage> 
             }
         });
 
-        if let Some(best) = best_candidate(current, limits.jpeg_quality, limits.max_bytes) {
+        if let Some(best) = first_fitting(current, limits.jpeg_quality, limits.max_bytes) {
             return Some(ResizedImage {
                 data_base64: base64::engine::general_purpose::STANDARD.encode(&best.bytes),
                 mime_type: best.mime.to_string(),
@@ -226,8 +219,9 @@ pub fn resize_image(input: &[u8], limits: &ImageLimits) -> Option<ResizedImage> 
         if target_width <= 1 && target_height <= 1 {
             return None;
         }
-        target_width = (target_width * 9 / 10).max(1);
-        target_height = (target_height * 9 / 10).max(1);
+        // pi shrinks by 25% per retry.
+        target_width = (target_width * 3 / 4).max(1);
+        target_height = (target_height * 3 / 4).max(1);
         scaled = None;
     }
 }
