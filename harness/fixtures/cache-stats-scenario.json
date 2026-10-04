@@ -1,0 +1,117 @@
+{
+  "models": {
+    "anthropic": {
+      "model-a": { "cost": { "cacheRead": 0.3 } },
+      "model-b": { "cost": { "cacheRead": 0.3 } }
+    }
+  },
+  "entries": [
+    {
+      "type": "message",
+      "id": "m1",
+      "parentId": null,
+      "timestamp": "2026-01-01T00:00:00.000Z",
+      "message": {
+        "role": "assistant",
+        "provider": "anthropic",
+        "model": "model-a",
+        "timestamp": 1000,
+        "usage": {
+          "input": 0,
+          "cacheRead": 0,
+          "cacheWrite": 5000,
+          "cost": { "input": 0, "cacheRead": 0, "cacheWrite": 0.01875 }
+        }
+      }
+    },
+    {
+      "type": "message",
+      "id": "m2",
+      "parentId": "m1",
+      "timestamp": "2026-01-01T00:01:00.000Z",
+      "message": {
+        "role": "assistant",
+        "provider": "anthropic",
+        "model": "model-a",
+        "timestamp": 2000,
+        "usage": {
+          "input": 0,
+          "cacheRead": 5000,
+          "cacheWrite": 0,
+          "cost": { "input": 0, "cacheRead": 0.0015, "cacheWrite": 0 }
+        }
+      }
+    },
+    {
+      "type": "message",
+      "id": "m3",
+      "parentId": "m2",
+      "timestamp": "2026-01-01T00:02:00.000Z",
+      "message": {
+        "role": "assistant",
+        "provider": "anthropic",
+        "model": "model-a",
+        "timestamp": 3000,
+        "usage": {
+          "input": 3000,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "cost": { "input": 0.009, "cacheRead": 0, "cacheWrite": 0 }
+        }
+      }
+    },
+    {
+      "type": "compaction",
+      "id": "c1",
+      "parentId": "m3",
+      "timestamp": "2026-01-01T00:03:00.000Z",
+      "summary": "compacted"
+    },
+    {
+      "type": "message",
+      "id": "m4",
+      "parentId": "c1",
+      "timestamp": "2026-01-01T00:04:00.000Z",
+      "message": {
+        "role": "assistant",
+        "provider": "anthropic",
+        "model": "model-a",
+        "timestamp": 4000,
+        "usage": {
+          "input": 4000,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "cost": { "input": 0.012, "cacheRead": 0, "cacheWrite": 0 }
+        }
+      }
+    },
+    {
+      "type": "usage",
+      "kind": "cache_warm",
+      "id": "w1",
+      "parentId": "m4",
+      "timestamp": "2026-01-01T00:05:00.000Z",
+      "provider": "anthropic",
+      "model": "model-a",
+      "usage": { "input": 0, "cacheRead": 4000, "cacheWrite": 0 }
+    },
+    {
+      "type": "message",
+      "id": "m5",
+      "parentId": "w1",
+      "timestamp": "2026-01-01T00:06:00.000Z",
+      "message": {
+        "role": "assistant",
+        "provider": "anthropic",
+        "model": "model-b",
+        "timestamp": 6000,
+        "usage": {
+          "input": 3000,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "cost": { "input": 0.009, "cacheRead": 0, "cacheWrite": 0 }
+        }
+      }
+    }
+  ]
+}
