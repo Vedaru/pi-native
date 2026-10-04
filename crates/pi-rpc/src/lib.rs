@@ -220,6 +220,20 @@ pub fn serve_unit<R: std::io::BufRead + 'static, W: std::io::Write + 'static>(
     reader: R,
     writer: W,
 ) -> Result<(), AgentError> {
+    serve_unit_with(agent, reader, writer, |_| {})
+}
+
+/// Like [`serve_unit`], but calls `after_turn` once a prompt finishes.
+pub fn serve_unit_with<
+    R: std::io::BufRead + 'static,
+    W: std::io::Write + 'static,
+    F: FnMut(&Agent),
+>(
+    agent: &mut Agent,
+    reader: R,
+    writer: W,
+    after_turn: F,
+) -> Result<(), AgentError> {
     let io = std::rc::Rc::new(SharedIo {
         reader: std::cell::RefCell::new(reader),
         writer: std::cell::RefCell::new(writer),
@@ -228,7 +242,7 @@ pub fn serve_unit<R: std::io::BufRead + 'static, W: std::io::Write + 'static>(
         io: io.clone(),
         counter: std::cell::Cell::new(0),
     }));
-    drive(agent, &io, |_| {});
+    drive(agent, &io, after_turn);
     Ok(())
 }
 

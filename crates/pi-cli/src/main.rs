@@ -7,9 +7,9 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use pi_agent::prompt::{build_system_prompt, load_project_context_files, SystemPromptOptions};
 use pi_agent::{
-    anthropic_provider, google_provider, messages_from_session, openai_responses_provider, Agent,
-    AgentEvent, AllowAll, Approval, Approver, AssistantTurn, DenyAll, FnProvider, ModelProvider,
-    ToolCall, DEFAULT_RESERVE_TOKENS,
+    anthropic_provider, google_provider, openai_responses_provider, Agent, AgentEvent, AllowAll,
+    Approval, Approver, AssistantTurn, DenyAll, FnProvider, ModelProvider, ProviderSummarizer,
+    SessionJournal, ToolCall, DEFAULT_RESERVE_TOKENS,
 };
 use pi_cache::{
     clamp_openai_prompt_cache_key, get_cache_control, openai_completions_prompt_cache_key,
@@ -20,6 +20,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Command as ProcessCommand, Stdio};
 use std::rc::Rc;
+use std::sync::Arc;
 
 const LONG_VERSION: &str = concat!(
     env!("CARGO_PKG_VERSION"),
@@ -242,7 +243,7 @@ fn run_print(
     let cwd = std::env::current_dir().unwrap_or_default();
     let system = system_prompt_for(&cwd);
     let mut agent = resolve_agent(model, provider, yolo, true, context_window, &system);
-    seed_session(&mut agent, session);
+    let mut journal = open_session(&mut agent, session, &cwd);
     agent.push_user(prompt);
     match agent.run() {
         Ok(events) => {
@@ -258,6 +259,9 @@ fn run_print(
                         eprintln!("[compacted {dropped} messages]")
                     }
                 }
+            }
+            if let Some(journal) = journal.as_mut() {
+                let _ = journal.persist(agent.messages());
             }
         }
         Err(error) => {
@@ -515,15 +519,9 @@ fn system_prompt_for(cwd: &std::path::Path) -> String {
 /// Build an agent for the selected provider, with compaction when enabled.
 ///
 /// One generic path: the provider is chosen here, the loop/tools are the same.
-fn resolve_agent(
-    model: &str,
-    provider: &str,
-    yolo: bool,
-    interactive: bool,
-    context_window: usize,
-    system: &str,
-) -> Agent {
-    let boxed: Box<dyn ModelProvider> = match provider {
+/// Build a provider instance for the selected protocol.
+fn make_provider(model: &str, provider: &str) -> Box<dyn ModelProvider> {
+    match provider {
         "anthropic" => {
             let base = std::env::var("ANTHROPIC_BASE_URL")
                 .unwrap_or_else(|_| "https://api.anthropic.com".to_string());
@@ -557,7 +555,17 @@ fn resolve_agent(
             );
             std::process::exit(2);
         }
-    };
+    }
+}
+
+fn resolve_agent(
+    model: &str,
+    provider: &str,
+    yolo: bool,
+    interactive: bool,
+    context_window: usize,
+    system: &str,
+) -> Agent {
     let approver: Rc<dyn Approver> = if yolo {
         Rc::new(AllowAll)
     } else if interactive {
@@ -566,10 +574,20 @@ fn resolve_agent(
         Rc::new(DenyAll)
     };
     let cwd = std::env::current_dir().unwrap_or_default();
-    let mut agent =
-        Agent::new(boxed, default_tools(), system, ToolContext::new(cwd)).with_approver(approver);
+    let mut agent = Agent::new(
+        make_provider(model, provider),
+        default_tools(),
+        system,
+        ToolContext::new(cwd),
+    )
+    .with_approver(approver);
     if context_window > 0 {
-        agent = agent.with_compaction(context_window, DEFAULT_RESERVE_TOKENS);
+        // Compaction summarizes dropped history with the model (pi's behavior).
+        agent = agent
+            .with_compaction(context_window, DEFAULT_RESERVE_TOKENS)
+            .with_summarizer(Arc::new(ProviderSummarizer::new(make_provider(
+                model, provider,
+            ))));
     }
     agent
 }
@@ -587,15 +605,22 @@ fn env_key(names: &[&str]) -> String {
     std::process::exit(2);
 }
 
-/// Seed the transcript from a session file, if one was given.
-fn seed_session(agent: &mut Agent, session: Option<&std::path::Path>) {
-    if let Some(path) = session {
-        match pi_session::SessionFile::read(path) {
-            Ok(file) => agent.extend_messages(messages_from_session(&file)),
-            Err(error) => {
-                eprintln!("pi-native: cannot read session {}: {error}", path.display());
-                std::process::exit(2);
-            }
+/// Seed the transcript from `--session` (if given) and return a journal that
+/// persists later turns back to the same file.
+fn open_session(
+    agent: &mut Agent,
+    session: Option<&std::path::Path>,
+    cwd: &std::path::Path,
+) -> Option<SessionJournal> {
+    let path = session?;
+    match SessionJournal::open(path.to_path_buf(), &cwd.to_string_lossy()) {
+        Ok((journal, transcript)) => {
+            agent.extend_messages(transcript);
+            Some(journal)
+        }
+        Err(error) => {
+            eprintln!("pi-native: cannot open session {}: {error}", path.display());
+            std::process::exit(2);
         }
     }
 }
@@ -611,15 +636,20 @@ fn run_serve(
     let cwd = std::env::current_dir().unwrap_or_default();
     let system = system_prompt_for(&cwd);
     let mut agent = resolve_agent(model, provider, yolo, false, context_window, &system);
-    seed_session(&mut agent, session);
+    let mut journal = open_session(&mut agent, session, &cwd);
     // Without `--yolo`, approval-required tools ask the connected client over
     // the protocol (`ui_request` / `ui_response`).
     let reader = std::io::BufReader::new(std::io::stdin());
     let writer = std::io::stdout();
+    let persist = |agent: &Agent| {
+        if let Some(journal) = journal.as_mut() {
+            let _ = journal.persist(agent.messages());
+        }
+    };
     let result = if yolo {
-        pi_rpc::serve(&mut agent, reader, writer)
+        pi_rpc::serve_with(&mut agent, reader, writer, persist)
     } else {
-        pi_rpc::serve_unit(&mut agent, reader, writer)
+        pi_rpc::serve_unit_with(&mut agent, reader, writer, persist)
     };
     let _ = result;
 }

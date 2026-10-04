@@ -6,8 +6,9 @@
 //! round-trips through the same files pi writes.
 
 use pi_providers::{AssistantBlock, ContentPart, TranscriptMessage};
-use pi_session::{build_context, SessionEntry, SessionFile};
+use pi_session::{build_context, SessionEntry, SessionFile, SessionHeader};
 use serde_json::{json, Value};
+use std::io::Write;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -242,6 +243,98 @@ pub fn append_messages(session: &mut SessionFile, messages: &[TranscriptMessage]
         appended += 1;
     }
     appended
+}
+
+/// A minimal header for a new native session.
+fn new_session_header(cwd: &str) -> SessionHeader {
+    SessionHeader {
+        kind: "header".to_string(),
+        id: new_id(),
+        timestamp: now_iso(),
+        cwd: cwd.to_string(),
+        version: Some(1),
+        parent_session: None,
+        extra: serde_json::Map::new(),
+    }
+}
+
+fn io_err(error: impl std::fmt::Display) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string())
+}
+
+/// Persists a transcript to a pi session file.
+///
+/// Appends new messages each turn (O(1) writes); when compaction shrinks the
+/// transcript, it rewrites the file from the current context. The file always
+/// reflects what `messages_from_session` would load back.
+pub struct SessionJournal {
+    path: std::path::PathBuf,
+    session: SessionFile,
+    persisted: usize,
+}
+
+impl SessionJournal {
+    /// Open an existing session (returning its transcript to seed) or create a
+    /// new file with just the header.
+    pub fn open(
+        path: std::path::PathBuf,
+        cwd: &str,
+    ) -> std::io::Result<(Self, Vec<TranscriptMessage>)> {
+        let (session, transcript) = if path.exists() {
+            let session = SessionFile::read(&path).map_err(io_err)?;
+            let transcript = messages_from_session(&session);
+            (session, transcript)
+        } else {
+            let session = SessionFile {
+                header: new_session_header(cwd),
+                entries: Vec::new(),
+            };
+            session.write(&path).map_err(io_err)?;
+            (session, Vec::new())
+        };
+        let persisted = transcript.len();
+        Ok((
+            Self {
+                path,
+                session,
+                persisted,
+            },
+            transcript,
+        ))
+    }
+
+    /// Record the current transcript. Returns the number of new entries.
+    pub fn persist(&mut self, messages: &[TranscriptMessage]) -> std::io::Result<usize> {
+        if messages.len() < self.persisted {
+            // Compaction dropped history: rewrite from the current context.
+            let mut session = SessionFile {
+                header: self.session.header.clone(),
+                entries: Vec::new(),
+            };
+            let appended = append_messages(&mut session, messages);
+            session.write(&self.path).map_err(io_err)?;
+            self.session = session;
+            self.persisted = messages.len();
+            return Ok(appended);
+        }
+
+        let new = &messages[self.persisted..];
+        if new.is_empty() {
+            return Ok(0);
+        }
+        let before = self.session.entries.len();
+        append_messages(&mut self.session, new);
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(&self.path)?;
+        for entry in &self.session.entries[before..] {
+            let line = serde_json::to_string(entry).map_err(io_err)?;
+            writeln!(file, "{line}")?;
+        }
+        self.persisted = messages.len();
+        Ok(self.session.entries.len() - before)
+    }
 }
 
 #[cfg(test)]

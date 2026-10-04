@@ -1,24 +1,24 @@
 use super::*;
 use pi_tools::{BashTool, Tool, ToolContext, ToolResult};
 use serde_json::json;
-use std::cell::RefCell;
+use std::sync::Mutex;
 
 /// Returns pre-scripted turns in order.
 struct FakeProvider {
-    turns: RefCell<Vec<AssistantTurn>>,
+    turns: Mutex<Vec<AssistantTurn>>,
 }
 
 impl FakeProvider {
     fn new(turns: Vec<AssistantTurn>) -> Self {
         Self {
-            turns: RefCell::new(turns),
+            turns: Mutex::new(turns),
         }
     }
 }
 
 impl ModelProvider for FakeProvider {
     fn complete(&self, _request: &CompletionRequest<'_>) -> Result<AssistantTurn, AgentError> {
-        let mut turns = self.turns.borrow_mut();
+        let mut turns = self.turns.lock().expect("turns lock");
         if turns.is_empty() {
             Ok(AssistantTurn::default())
         } else {
@@ -441,4 +441,17 @@ fn extend_messages_seeds_the_transcript() {
     ]);
     assert_eq!(agent.messages().len(), 2);
     assert!(agent.retained_bytes() > 0);
+}
+
+#[test]
+fn provider_summarizer_asks_the_model() {
+    let provider = FauxProvider::new(vec![AssistantTurn {
+        text: "SUMMARY".into(),
+        ..Default::default()
+    }]);
+    let summarizer = ProviderSummarizer::new(Box::new(provider));
+    let summary = summarizer
+        .summarize(&[TranscriptMessage::UserText("old".into())])
+        .expect("summary");
+    assert_eq!(summary, "SUMMARY");
 }

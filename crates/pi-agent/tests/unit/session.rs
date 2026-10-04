@@ -132,3 +132,54 @@ fn compaction_entry_round_trips_through_pi_session() {
         matches!(message, TranscriptMessage::Assistant(blocks) if matches!(&blocks[0], AssistantBlock::Text { text } if text == "old reply"))
     }));
 }
+
+fn temp_session_path(tag: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+    let dir = std::env::temp_dir().join(format!("pi-journal-{}-{tag}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create dir");
+    (dir.clone(), dir.join("s.jsonl"))
+}
+
+#[test]
+fn journal_appends_and_reloads() {
+    let (dir, path) = temp_session_path("append");
+    let (mut journal, seeded) = SessionJournal::open(path.clone(), "/tmp").expect("open");
+    assert!(seeded.is_empty());
+
+    let first = vec![
+        TranscriptMessage::UserText("hello".into()),
+        TranscriptMessage::Assistant(vec![AssistantBlock::Text { text: "hi".into() }]),
+    ];
+    assert_eq!(journal.persist(&first).expect("persist"), 2);
+
+    let (mut journal, seeded) = SessionJournal::open(path.clone(), "/tmp").expect("reopen");
+    assert_eq!(seeded.len(), 2);
+    assert!(matches!(&seeded[0], TranscriptMessage::UserText(text) if text == "hello"));
+
+    // Appending more keeps the earlier entries.
+    let mut more = first.clone();
+    more.push(TranscriptMessage::UserText("again".into()));
+    assert_eq!(journal.persist(&more).expect("persist"), 1);
+
+    let (_, seeded) = SessionJournal::open(path, "/tmp").expect("reopen");
+    assert_eq!(seeded.len(), 3);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn journal_rewrites_after_compaction() {
+    let (dir, path) = temp_session_path("compact");
+    let (mut journal, _) = SessionJournal::open(path.clone(), "/tmp").expect("open");
+    let many: Vec<TranscriptMessage> = (0..5)
+        .map(|index| TranscriptMessage::UserText(format!("m{index}")))
+        .collect();
+    journal.persist(&many).expect("persist");
+
+    // A shorter transcript (post-compaction) rewrites the file.
+    let compacted = vec![TranscriptMessage::UserText("summary".into())];
+    journal.persist(&compacted).expect("persist");
+    let (_, seeded) = SessionJournal::open(path, "/tmp").expect("reopen");
+    assert_eq!(seeded.len(), 1);
+    assert!(matches!(&seeded[0], TranscriptMessage::UserText(text) if text == "summary"));
+    let _ = std::fs::remove_dir_all(&dir);
+}

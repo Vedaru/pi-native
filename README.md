@@ -66,7 +66,8 @@ GEMINI_API_KEY=…  pi-native --serve --provider google       --model gemini-2.0
 
 Flags: `--provider anthropic|openai-responses|google`, `--model`, `--session
 <path>` (seed the transcript), `--context-window <tokens>` (compaction; 0
-disables), `--yolo`. Events stream as the turn produces them.
+disables; dropped history is summarized by the model), `--yolo`. Events stream
+as the turn produces them. `--session <path>` seeds and persists the session.
 
 ## Prompt-cache primitives (`pi-cache`)
 

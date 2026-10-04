@@ -24,6 +24,7 @@ pub use providers::{
 };
 pub use session::{
     append_compaction, append_messages, message_value, messages_from_session, transcript_values,
+    SessionJournal,
 };
 
 /// A tool call requested by the model.
@@ -129,12 +130,12 @@ impl ModelProvider for FauxProvider {
 ///
 /// Unlike [`FauxProvider`], it stores nothing, so a long turn does not
 /// pre-allocate every scripted turn (and does not shift a `Vec` per call).
-pub struct FnProvider<F: Fn(usize) -> AssistantTurn> {
+pub struct FnProvider<F: Fn(usize) -> AssistantTurn + Send + Sync> {
     build: F,
     index: std::sync::atomic::AtomicUsize,
 }
 
-impl<F: Fn(usize) -> AssistantTurn> FnProvider<F> {
+impl<F: Fn(usize) -> AssistantTurn + Send + Sync> FnProvider<F> {
     pub fn new(build: F) -> Self {
         Self {
             build,
@@ -143,7 +144,7 @@ impl<F: Fn(usize) -> AssistantTurn> FnProvider<F> {
     }
 }
 
-impl<F: Fn(usize) -> AssistantTurn> ModelProvider for FnProvider<F> {
+impl<F: Fn(usize) -> AssistantTurn + Send + Sync> ModelProvider for FnProvider<F> {
     fn complete(&self, _request: &CompletionRequest<'_>) -> Result<AssistantTurn, AgentError> {
         let index = self
             .index
@@ -153,7 +154,9 @@ impl<F: Fn(usize) -> AssistantTurn> ModelProvider for FnProvider<F> {
 }
 
 /// A model backend. Returns a full turn; streaming is a provider concern.
-pub trait ModelProvider {
+///
+/// `Send + Sync` so a second instance can power the compaction summarizer.
+pub trait ModelProvider: Send + Sync {
     fn complete(&self, request: &CompletionRequest<'_>) -> Result<AssistantTurn, AgentError>;
 }
 
@@ -164,6 +167,39 @@ pub const DEFAULT_RESERVE_TOKENS: usize = 16_384;
 /// Turns a span of older messages into a short summary.
 pub trait Summarizer: Send + Sync {
     fn summarize(&self, messages: &[TranscriptMessage]) -> Result<String, AgentError>;
+}
+
+/// pi's compaction summary system prompt.
+pub const SUMMARIZATION_SYSTEM_PROMPT: &str = "You are a context summarization assistant. Your task is to read a conversation between a user and an AI assistant, then produce a structured summary following the exact format specified.\n\nDo NOT continue the conversation. Do NOT respond to any questions in the conversation. ONLY output the structured summary.";
+
+/// pi's compaction instruction, appended as the final user message.
+pub const SUMMARIZATION_PROMPT: &str = "The messages above are a conversation to summarize. Create a structured context checkpoint summary that another LLM will use to continue the work.\n\nUse this EXACT format:\n\n## Goal\n[What is the user trying to accomplish? Can be multiple items if the session covers different tasks.]\n\n## Constraints & Preferences\n- [Any constraints, preferences, or requirements mentioned by user]\n- [Or \"(none)\" if none were mentioned]\n\n## Progress\n### Done\n- [x] [Completed tasks/changes]\n\n### In Progress\n- [ ] [Current work]\n\n### Blocked\n- [Issues preventing progress, if any]\n\n## Key Decisions\n- **[Decision]**: [Brief rationale]\n\n## Next Steps\n1. [Ordered list of what should happen next]\n\n## Critical Context\n- [Any data, examples, or references needed to continue]\n- [Or \"(none)\" if not applicable]\n\nKeep each section concise. Preserve exact file paths, function names, and error messages.";
+
+/// Summarizes dropped history by asking a model, matching pi's compaction call.
+pub struct ProviderSummarizer {
+    provider: Box<dyn ModelProvider>,
+}
+
+impl ProviderSummarizer {
+    pub fn new(provider: Box<dyn ModelProvider>) -> Self {
+        Self { provider }
+    }
+}
+
+impl Summarizer for ProviderSummarizer {
+    fn summarize(&self, messages: &[TranscriptMessage]) -> Result<String, AgentError> {
+        let mut conversation = messages.to_vec();
+        conversation.push(TranscriptMessage::UserText(
+            SUMMARIZATION_PROMPT.to_string(),
+        ));
+        let request = CompletionRequest {
+            system: SUMMARIZATION_SYSTEM_PROMPT,
+            messages: &conversation,
+            tools: &[],
+        };
+        let turn = self.provider.complete(&request)?;
+        Ok(turn.text)
+    }
 }
 
 /// Whether a tool may run.

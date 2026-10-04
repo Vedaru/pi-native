@@ -64,4 +64,5 @@ message.
   pi's message shape), so a UI service can render it without owning the session.
 - The memory benchmark's `pi-native --rpc` idle mode is separate from this
   protocol.
-- Not yet wired: persisting turns back to a session file.
+- `--session <path>` seeds the transcript and persists each turn back to the
+  file (append; rewrite after compaction).
