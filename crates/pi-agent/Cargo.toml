@@ -1,0 +1,12 @@
+[package]
+name = "pi-agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Agent loop: turns, tool calls, and events"
+
+[dependencies]
+serde_json = { workspace = true }
+pi-providers = { path = "../pi-providers" }
+pi-tools = { path = "../pi-tools" }

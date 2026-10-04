@@ -980,6 +980,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "pi-agent"
+version = "0.0.1"
+dependencies = [
+ "pi-providers",
+ "pi-tools",
+ "serde_json",
+]
+
+[[package]]
 name = "pi-cache"
 version = "0.0.1"
 dependencies = [
