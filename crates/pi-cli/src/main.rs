@@ -11,6 +11,8 @@ use pi_cache::{
     openai_responses_prompt_cache_key, resolve_cache_retention, CacheRetention,
 };
 use pi_tools::{default_tools, ToolContext};
+use std::io::{BufRead, BufReader, Write};
+use std::process::{Command as ProcessCommand, Stdio};
 
 #[derive(Parser)]
 #[command(name = "pi-native", version, about = "Native Rust runtime for pi")]
@@ -18,6 +20,12 @@ struct Cli {
     /// Start in RPC mode and idle on stdin (used by the memory benchmark).
     #[arg(long)]
     rpc: bool,
+    /// Serve the RPC protocol over stdio with a real provider.
+    #[arg(long)]
+    serve: bool,
+    /// Connect to a local unit and drive it from the terminal.
+    #[arg(long)]
+    client: bool,
     /// Non-interactive: run one prompt through the agent and print the result.
     #[arg(short = 'p', long = "print")]
     print: Option<String>,
@@ -85,6 +93,14 @@ fn main() {
     let cli = Cli::parse();
     if cli.rpc {
         run_rpc();
+        return;
+    }
+    if cli.serve {
+        run_serve(&cli.model);
+        return;
+    }
+    if cli.client {
+        run_client();
         return;
     }
     if let Some(prompt) = cli.print {
@@ -166,6 +182,132 @@ fn run_print(prompt: &str, model: &str) {
         Err(error) => {
             eprintln!("pi-native: {error}");
             std::process::exit(1);
+        }
+    }
+}
+
+const SYSTEM_PROMPT: &str = "You are pi, a coding agent. Be concise.";
+
+/// Serve the RPC protocol over stdio with a real Anthropic provider.
+fn run_serve(model: &str) {
+    let api_key = std::env::var("ANTHROPIC_API_KEY").unwrap_or_default();
+    if api_key.is_empty() {
+        eprintln!("pi-native --serve: ANTHROPIC_API_KEY is not set");
+        std::process::exit(2);
+    }
+    let base_url = std::env::var("ANTHROPIC_BASE_URL")
+        .unwrap_or_else(|_| "https://api.anthropic.com".to_string());
+    let provider = AnthropicProvider::new(base_url, api_key, model);
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let mut agent = Agent::new(
+        Box::new(provider),
+        default_tools(),
+        SYSTEM_PROMPT,
+        ToolContext::new(cwd),
+    );
+    let stdin = std::io::stdin();
+    let stdout = std::io::stdout();
+    let _ = pi_rpc::serve(&mut agent, stdin.lock(), stdout.lock());
+}
+
+/// A minimal terminal client: spawn a unit serving the protocol and drive it.
+fn run_client() {
+    let exe = std::env::current_exe().expect("current executable");
+    let mut child = match ProcessCommand::new(exe)
+        .arg("--serve")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(error) => {
+            eprintln!("pi-native --client: {error}");
+            std::process::exit(1);
+        }
+    };
+    let mut server_in = child.stdin.take().expect("server stdin");
+    let mut server_out = BufReader::new(child.stdout.take().expect("server stdout"));
+    let stdin = std::io::stdin();
+
+    eprintln!("pi-native client. Type a prompt; Ctrl-D to quit.");
+    loop {
+        print!("> ");
+        let _ = std::io::stdout().flush();
+        let mut line = String::new();
+        if stdin.read_line(&mut line).unwrap_or(0) == 0 {
+            break;
+        }
+        let text = line.trim();
+        if text.is_empty() {
+            continue;
+        }
+        if send(
+            &mut server_in,
+            &serde_json::json!({ "type": "prompt", "text": text }),
+        )
+        .is_err()
+        {
+            break;
+        }
+        if !pump(&mut server_out, &mut server_in, &stdin) {
+            break;
+        }
+    }
+    let _ = child.kill();
+}
+
+fn send(writer: &mut impl Write, value: &serde_json::Value) -> std::io::Result<()> {
+    writeln!(writer, "{value}")?;
+    writer.flush()
+}
+
+/// Read events until `done`, answering any generic UI request.
+fn pump(reader: &mut impl BufRead, writer: &mut impl Write, stdin: &std::io::Stdin) -> bool {
+    let mut buffer = String::new();
+    loop {
+        buffer.clear();
+        match reader.read_line(&mut buffer) {
+            Ok(0) | Err(_) => return false,
+            Ok(_) => {}
+        }
+        let trimmed = buffer.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Ok(event) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+            continue;
+        };
+        match event["type"].as_str() {
+            Some("assistant_text") => println!("{}", event["text"].as_str().unwrap_or("")),
+            Some("tool_start") => {
+                eprintln!("[tool {} start]", event["name"].as_str().unwrap_or(""))
+            }
+            Some("tool_end") => eprintln!(
+                "[tool {} {}]",
+                event["name"].as_str().unwrap_or(""),
+                if event["is_error"].as_bool().unwrap_or(false) {
+                    "error"
+                } else {
+                    "ok"
+                }
+            ),
+            Some("done") => return true,
+            Some("error") => eprintln!("error: {}", event["message"].as_str().unwrap_or("")),
+            Some("ui_request") => {
+                let kind = event["kind"].as_str().unwrap_or("input");
+                let prompt = event["prompt"].as_str().unwrap_or("");
+                print!("[{kind}] {prompt} ");
+                let _ = std::io::stdout().flush();
+                let mut answer = String::new();
+                let _ = stdin.read_line(&mut answer);
+                let response = serde_json::json!({
+                    "type": "ui_response",
+                    "id": event["id"],
+                    "value": answer.trim(),
+                });
+                let _ = send(writer, &response);
+            }
+            _ => {}
         }
     }
 }

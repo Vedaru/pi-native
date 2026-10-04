@@ -14,5 +14,6 @@ path = "src/main.rs"
 pi-cache = { path = "../pi-cache" }
 pi-agent = { path = "../pi-agent" }
 pi-tools = { path = "../pi-tools" }
+pi-rpc = { path = "../pi-rpc" }
 serde_json = { workspace = true }
 clap = { workspace = true }

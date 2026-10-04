@@ -1091,6 +1091,7 @@ dependencies = [
  "clap",
  "pi-agent",
  "pi-cache",
+ "pi-rpc",
  "pi-tools",
  "serde_json",
 ]
