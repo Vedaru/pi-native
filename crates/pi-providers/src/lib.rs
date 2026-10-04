@@ -10,6 +10,7 @@
 
 pub mod anthropic;
 pub mod convert;
+pub mod openai_completions;
 pub mod openai_responses;
 
 pub use anthropic::{
@@ -18,6 +19,9 @@ pub use anthropic::{
     AnthropicSystemBlock, AnthropicTool, ContentBlock, MessageContent, ThinkingOptions, ToolSpec,
 };
 pub use convert::{convert_messages, AssistantBlock, ContentPart, TranscriptMessage};
+pub use openai_completions::{
+    build_openai_completions_params, MaxTokensField, OpenAiCompletionsBuildOptions, ThinkingFormat,
+};
 pub use openai_responses::{
     build_openai_responses_params, convert_responses_input, convert_responses_tools,
     OpenAiResponsesBuildOptions, OpenAiResponsesParams,

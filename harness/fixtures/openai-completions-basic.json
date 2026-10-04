@@ -1,0 +1,61 @@
+{
+  "max_tokens": 384000,
+  "messages": [
+    {
+      "content": "You are pi, a coding agent. Be concise.",
+      "role": "system"
+    },
+    {
+      "content": "hello",
+      "role": "user"
+    }
+  ],
+  "model": "deepseek-flash",
+  "stream": true,
+  "stream_options": {
+    "include_usage": true
+  },
+  "thinking": {
+    "type": "disabled"
+  },
+  "tools": [
+    {
+      "function": {
+        "description": "Read a file",
+        "name": "read",
+        "parameters": {
+          "properties": {
+            "path": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "type": "object"
+        },
+        "strict": false
+      },
+      "type": "function"
+    },
+    {
+      "function": {
+        "description": "Run a shell command",
+        "name": "bash",
+        "parameters": {
+          "properties": {
+            "command": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "command"
+          ],
+          "type": "object"
+        },
+        "strict": false
+      },
+      "type": "function"
+    }
+  ]
+}

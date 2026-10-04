@@ -43,6 +43,11 @@ const PROVIDERS = {
     models: "providers/openai.models.js",
     export: "OPENAI_MODELS",
   },
+  deepseek: {
+    api: "api/openai-completions.js",
+    models: "providers/deepseek.models.js",
+    export: "DEEPSEEK_MODELS",
+  },
 };
 
 /** Recursively sort object keys so JSON key order cannot cause false diffs. */
@@ -64,7 +69,9 @@ async function main() {
   }
   const scenario = JSON.parse(readFileSync(scenarioPath, "utf8"));
   const providerName = scenario.provider ?? "anthropic";
-  const provider = PROVIDERS[providerName];
+  const provider = scenario.apiModule
+    ? { api: scenario.apiModule, models: scenario.modelsModule, export: scenario.modelsExport }
+    : PROVIDERS[providerName];
   if (!provider) throw new Error(`unknown provider: ${providerName}`);
 
   const { streamSimple } = await load(provider.api);
