@@ -6,6 +6,32 @@ rewriting only the memory-heavy subsystems in Rust and removing the Node runtime
 Linear project: *pi native runtime: Rust memory-heavy rewrite, drop Node*
 (team `VED`).
 
+## Why pi-native
+
+A headless-first Rust runtime for a **swarm of coding-agent units**: one small
+self-contained binary each, no Node/V8, provider-identical to pi.
+
+| | pi-native | pi-node |
+| --- | --- | --- |
+| shipped runtime | one ~7.5 MB static-capable binary | Node + `node_modules` |
+| idle RSS (`--rpc`) | **4.1 MB** | 111.7 MB |
+| idle RSS (full unit, `--serve`) | **5.3 MB** | 111.7 MB |
+| RSS per real agent turn (tools) | **7.7 MB** | — |
+| idle CPU | **~0.001 s / 3 s** (no busy-wait) | — |
+
+- **Small overhead.** ~27× less idle memory than pi-node; tools stream I/O with
+  bounded buffers, so a 200 MB file read peaks at ~5 MB. A static build idles at
+  ~3.3 MB (measured in a throwaway container).
+- **Small binary.** One ~7.5 MB stripped binary (`lto=fat`, `opt-level=2`,
+  `panic=abort`). Plugins run in an embedded QuickJS engine — no Node, no V8.
+- **Swarm friendly.** 32 idle units ≈ 4.1 MB each; 8 busy read-session units
+  ≈ 6.3 MB each. The dynamic build shares libc across units, so a swarm costs
+  less than the per-unit sum suggests.
+- **High cache hit rate.** Outbound requests are byte-identical to pi
+  (verified against pi's real requests), so the prompt cache behaves the same:
+  on DeepSeek the system+tools prefix (1,408 tokens) is cached and a multi-turn
+  session runs at ~86% hit per turn — exactly pi's numbers.
+
 ## Non-negotiable constraint
 
 The native runtime MUST be indistinguishable from pi at the provider API for an
