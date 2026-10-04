@@ -69,6 +69,13 @@ Flags: `--provider anthropic|openai-responses|google`, `--model`, `--session
 disables; dropped history is summarized by the model), `--yolo`. Events stream
 as the turn produces them. `--session <path>` seeds and persists the session.
 
+Load pi extensions/plugins with `--extension <path>` (repeatable). Tools they
+register via `pi.registerTool` are exposed to the agent and run in QuickJS:
+
+```bash
+pi-native --serve --extension ./extensions/my-tool.ts
+```
+
 ## Prompt-cache primitives (`pi-cache`)
 
 The provider-parity gate (VED-315) requires exact cache behavior. `pi-cache`

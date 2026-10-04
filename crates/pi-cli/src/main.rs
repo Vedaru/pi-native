@@ -15,7 +15,8 @@ use pi_cache::{
     clamp_openai_prompt_cache_key, get_cache_control, openai_completions_prompt_cache_key,
     openai_responses_prompt_cache_key, resolve_cache_retention, CacheRetention,
 };
-use pi_tools::{default_tools, ToolContext};
+use pi_plugins::{PluginInstance, PluginPolicy};
+use pi_tools::{default_tools, Tool, ToolContext, ToolResult};
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Command as ProcessCommand, Stdio};
@@ -63,6 +64,9 @@ struct Cli {
     /// Load an existing session file to seed the transcript.
     #[arg(long)]
     session: Option<PathBuf>,
+    /// Load a pi extension/plugin file (repeatable).
+    #[arg(long = "extension", short = 'e')]
+    extensions: Vec<PathBuf>,
     /// Accepted for parity with pi's benchmark invocation; sessions are not
     /// persisted yet, so this is a no-op.
     #[arg(long = "no-session")]
@@ -153,6 +157,7 @@ fn main() {
             cli.yolo,
             cli.context_window,
             cli.session.as_deref(),
+            &cli.extensions,
         );
         return;
     }
@@ -163,6 +168,7 @@ fn main() {
             cli.yolo,
             cli.context_window,
             cli.session.as_deref(),
+            &cli.extensions,
         );
         return;
     }
@@ -187,6 +193,7 @@ fn main() {
             cli.yolo,
             cli.context_window,
             cli.session.as_deref(),
+            &cli.extensions,
         );
         return;
     }
@@ -239,10 +246,19 @@ fn run_print(
     yolo: bool,
     context_window: usize,
     session: Option<&std::path::Path>,
+    extensions: &[PathBuf],
 ) {
     let cwd = std::env::current_dir().unwrap_or_default();
     let system = system_prompt_for(&cwd);
-    let mut agent = resolve_agent(model, provider, yolo, true, context_window, &system);
+    let mut agent = resolve_agent(
+        model,
+        provider,
+        yolo,
+        true,
+        context_window,
+        &system,
+        extensions,
+    );
     let mut journal = open_session(&mut agent, session, &cwd);
     agent.push_user(prompt);
     match agent.run() {
@@ -565,6 +581,7 @@ fn resolve_agent(
     interactive: bool,
     context_window: usize,
     system: &str,
+    extensions: &[PathBuf],
 ) -> Agent {
     let approver: Rc<dyn Approver> = if yolo {
         Rc::new(AllowAll)
@@ -574,9 +591,11 @@ fn resolve_agent(
         Rc::new(DenyAll)
     };
     let cwd = std::env::current_dir().unwrap_or_default();
+    let mut tools = default_tools();
+    tools.extend(load_extension_tools(extensions));
     let mut agent = Agent::new(
         make_provider(model, provider),
-        default_tools(),
+        tools,
         system,
         ToolContext::new(cwd),
     )
@@ -632,10 +651,19 @@ fn run_serve(
     yolo: bool,
     context_window: usize,
     session: Option<&std::path::Path>,
+    extensions: &[PathBuf],
 ) {
     let cwd = std::env::current_dir().unwrap_or_default();
     let system = system_prompt_for(&cwd);
-    let mut agent = resolve_agent(model, provider, yolo, false, context_window, &system);
+    let mut agent = resolve_agent(
+        model,
+        provider,
+        yolo,
+        false,
+        context_window,
+        &system,
+        extensions,
+    );
     let path = session.map(|path| path.to_path_buf());
     let cwd_string = cwd.to_string_lossy().into_owned();
     // Without `--yolo`, approval-required tools ask the connected client over
@@ -658,6 +686,7 @@ fn run_client(
     yolo: bool,
     context_window: usize,
     session: Option<&std::path::Path>,
+    extensions: &[PathBuf],
 ) {
     let exe = std::env::current_exe().expect("current executable");
     let mut command = ProcessCommand::new(exe);
@@ -674,6 +703,9 @@ fn run_client(
     }
     if let Some(path) = session {
         command.arg("--session").arg(path);
+    }
+    for extension in extensions {
+        command.arg("--extension").arg(extension);
     }
     let mut child = match command.stdin(Stdio::piped()).stdout(Stdio::piped()).spawn() {
         Ok(child) => child,
@@ -821,4 +853,92 @@ fn run_command(command: Command) {
             );
         }
     }
+}
+
+/// A tool registered by a loaded pi extension (`pi.registerTool`).
+struct PluginTool {
+    instance: Rc<PluginInstance>,
+    name: String,
+    description: String,
+    parameters: serde_json::Value,
+}
+
+impl Tool for PluginTool {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn description(&self) -> &str {
+        &self.description
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        self.parameters.clone()
+    }
+
+    fn run(&self, input: &serde_json::Value, _ctx: &ToolContext) -> ToolResult {
+        // pi's default policy is permissive for explicitly loaded extensions.
+        match self.instance.call_tool(&self.name, input) {
+            Ok(value) => {
+                let is_error = value
+                    .get("isError")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false);
+                let text = tool_result_text(&value);
+                if is_error {
+                    ToolResult::error(text)
+                } else {
+                    ToolResult::ok(text)
+                }
+            }
+            Err(error) => ToolResult::error(format!("{}: {error}", self.name)),
+        }
+    }
+}
+
+/// Extract text from a plugin tool result (`{content:[{type:"text",text}]}` or a string).
+fn tool_result_text(value: &serde_json::Value) -> String {
+    if let Some(text) = value.as_str() {
+        return text.to_string();
+    }
+    if let Some(items) = value.get("content").and_then(serde_json::Value::as_array) {
+        let text: Vec<String> = items
+            .iter()
+            .filter_map(|item| {
+                if item.get("type").and_then(serde_json::Value::as_str) == Some("text") {
+                    item.get("text")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        if !text.is_empty() {
+            return text.join("\n");
+        }
+    }
+    value.to_string()
+}
+
+/// Load each `--extension` file and expose the tools it registered.
+fn load_extension_tools(paths: &[PathBuf]) -> Vec<Box<dyn Tool>> {
+    let mut tools: Vec<Box<dyn Tool>> = Vec::new();
+    for path in paths {
+        match PluginInstance::from_file(PluginPolicy::permissive(), path) {
+            Ok(instance) => {
+                let instance = Rc::new(instance);
+                for spec in instance.tools() {
+                    tools.push(Box::new(PluginTool {
+                        instance: instance.clone(),
+                        name: spec.name.clone(),
+                        description: spec.description.clone(),
+                        parameters: spec.parameters.clone(),
+                    }));
+                }
+            }
+            Err(error) => eprintln!("pi-native: extension {}: {error}", path.display()),
+        }
+    }
+    tools
 }

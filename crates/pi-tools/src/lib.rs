@@ -113,9 +113,9 @@ impl ToolResult {
 }
 
 /// A tool the agent can call.
-pub trait Tool: Send + Sync {
-    fn name(&self) -> &'static str;
-    fn description(&self) -> &'static str;
+pub trait Tool {
+    fn name(&self) -> &str;
+    fn description(&self) -> &str;
     fn input_schema(&self) -> Value;
     fn run(&self, input: &Value, ctx: &ToolContext) -> ToolResult;
 

@@ -240,3 +240,31 @@ fn plugin_can_use_buffer_hex_and_base64() {
     assert_eq!(calls[0].args, serde_json::json!("68656c6c6f"));
     assert_eq!(calls[1].args, serde_json::json!("aGk="));
 }
+
+#[test]
+fn instance_registers_and_calls_a_tool() {
+    let source = r#"
+        export default function (pi) {
+            pi.registerTool({
+                name: "greet",
+                description: "Greet someone",
+                parameters: { type: "object", properties: { who: { type: "string" } } },
+                execute: (input) => ({ content: [{ type: "text", text: "hello " + input.who }] }),
+            });
+            pi.registerCommand("shout", { description: "Shout" });
+        }
+    "#;
+    let instance =
+        PluginInstance::load(PluginPolicy::permissive(), "plugin://test.ts", source).expect("load");
+    assert_eq!(instance.tools().len(), 1);
+    assert_eq!(instance.tools()[0].name, "greet");
+    assert_eq!(instance.commands().len(), 1);
+
+    let result = instance
+        .call_tool("greet", &serde_json::json!({ "who": "world" }))
+        .expect("call");
+    assert_eq!(
+        result["content"][0]["text"],
+        serde_json::json!("hello world")
+    );
+}

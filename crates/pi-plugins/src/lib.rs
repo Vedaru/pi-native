@@ -115,11 +115,21 @@ impl From<rquickjs::Error> for PluginError {
     }
 }
 
+/// A tool an extension registered via `pi.registerTool`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PluginToolSpec {
+    pub name: String,
+    pub description: String,
+    pub parameters: serde_json::Value,
+}
+
 /// Runs a plugin for the duration of one call and records its hostcalls.
 pub struct PluginHost {
     policy: PluginPolicy,
     calls: Arc<Mutex<Vec<HostCall>>>,
     denials: Arc<Mutex<Vec<HostCall>>>,
+    tools: Arc<Mutex<Vec<PluginToolSpec>>>,
+    commands: Arc<Mutex<Vec<serde_json::Value>>>,
 }
 
 impl PluginHost {
@@ -128,6 +138,8 @@ impl PluginHost {
             policy,
             calls: Arc::new(Mutex::new(Vec::new())),
             denials: Arc::new(Mutex::new(Vec::new())),
+            tools: Arc::new(Mutex::new(Vec::new())),
+            commands: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -149,7 +161,21 @@ impl PluginHost {
         let runtime = Runtime::new().map_err(PluginError::from)?;
         runtime.set_loader(modules::PiResolver, modules::PiLoader);
         let context = Context::full(&runtime).map_err(PluginError::from)?;
+        self.evaluate(&context, name, &prepared)?;
 
+        if let Some(denied) = self.denials.lock().expect("denials lock").first().cloned() {
+            return Err(PluginError::Denied {
+                capability: denied.capability,
+                method: denied.method,
+            });
+        }
+
+        let calls = self.calls.lock().expect("calls lock").clone();
+        Ok(calls)
+    }
+
+    /// Install globals, evaluate the module, and invoke its default factory.
+    fn evaluate(&self, context: &Context, name: &str, prepared: &str) -> Result<(), PluginError> {
         context.with(|ctx| {
             self.install_pi_global(&ctx)?;
             self.install_host_fs(&ctx)?;
@@ -164,13 +190,10 @@ impl PluginHost {
             let entry = Module::declare(ctx.clone(), name, prepared.as_bytes())
                 .catch(&ctx)
                 .map_err(|error| caught_error("declare", error))?;
-            // Module bodies run synchronously; top-level await is not supported yet.
             let (evaluated, _promise) = entry
                 .eval()
                 .catch(&ctx)
                 .map_err(|error| caught_error("eval", error))?;
-            // Like pi, an extension exports a default factory that receives the
-            // extension API. Invoke it when present.
             let namespace = evaluated
                 .namespace()
                 .catch(&ctx)
@@ -191,17 +214,7 @@ impl PluginHost {
                     .map_err(|error| caught_error("factory", error))?;
             }
             Ok::<(), PluginError>(())
-        })?;
-
-        if let Some(denied) = self.denials.lock().expect("denials lock").first().cloned() {
-            return Err(PluginError::Denied {
-                capability: denied.capability,
-                method: denied.method,
-            });
-        }
-
-        let calls = self.calls.lock().expect("calls lock").clone();
-        Ok(calls)
+        })
     }
 
     /// Load and run a plugin from a file path. Relative imports resolve against
@@ -212,8 +225,10 @@ impl PluginHost {
         self.run_named(&path.to_string_lossy(), &source)
     }
 
-    fn install_pi_global(&self, ctx: &Ctx<'_>) -> Result<(), PluginError> {
+    fn install_pi_global<'js>(&self, ctx: &Ctx<'js>) -> Result<(), PluginError> {
         let pi = Object::new(ctx.clone())?;
+        // Registry of registered tools' `execute` functions (name -> function).
+        ctx.globals().set("__pi_tools", Object::new(ctx.clone())?)?;
 
         // pi.log(entry)
         let calls = self.calls.clone();
@@ -276,18 +291,59 @@ impl PluginHost {
             self.denials.clone(),
             self.policy.clone(),
         );
+        let tools = self.tools.clone();
         pi.set(
             "registerTool",
-            Function::new(ctx.clone(), move |spec: rquickjs::Value<'_>| {
-                record(
-                    &policy,
-                    &calls,
-                    &denials,
-                    Capability::Events,
-                    "registerTool",
-                    json_from_js(&spec),
-                );
-            }),
+            Function::new(
+                ctx.clone(),
+                move |ctx: Ctx<'js>, spec: rquickjs::Value<'js>| {
+                    let json = json_from_js(&spec);
+                    let allowed = record(
+                        &policy,
+                        &calls,
+                        &denials,
+                        Capability::Events,
+                        "registerTool",
+                        json.clone(),
+                    );
+                    if !allowed {
+                        return;
+                    }
+                    let name = json
+                        .get("name")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    if name.is_empty() {
+                        return;
+                    }
+                    let description = json
+                        .get("description")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    let parameters = json
+                        .get("parameters")
+                        .cloned()
+                        .unwrap_or_else(|| serde_json::json!({ "type": "object" }));
+                    // Keep the execute function in a JS-side registry so the
+                    // instance can call it after the module has finished loading.
+                    if let Some(object) = spec.as_object() {
+                        if let Ok(execute) = object.get::<_, rquickjs::Value>("execute") {
+                            if execute.is_function() {
+                                if let Ok(registry) = ctx.globals().get::<_, Object>("__pi_tools") {
+                                    let _ = registry.set(name.clone(), execute);
+                                }
+                            }
+                        }
+                    }
+                    tools.lock().expect("tools lock").push(PluginToolSpec {
+                        name,
+                        description,
+                        parameters,
+                    });
+                },
+            ),
         )?;
 
         let (calls, denials, policy) = (
@@ -295,19 +351,23 @@ impl PluginHost {
             self.denials.clone(),
             self.policy.clone(),
         );
+        let commands = self.commands.clone();
         pi.set(
             "registerCommand",
             Function::new(
                 ctx.clone(),
                 move |name: String, spec: rquickjs::Value<'_>| {
-                    record(
+                    let json = serde_json::json!({ "name": name, "spec": json_from_js(&spec) });
+                    if record(
                         &policy,
                         &calls,
                         &denials,
                         Capability::Events,
                         "registerCommand",
-                        serde_json::json!({ "name": name, "spec": json_from_js(&spec) }),
-                    );
+                        json.clone(),
+                    ) {
+                        commands.lock().expect("commands lock").push(json);
+                    }
                 },
             ),
         )?;
@@ -982,6 +1042,111 @@ fn record(
     } else {
         denials.lock().expect("denials lock").push(call);
         false
+    }
+}
+
+/// A loaded extension kept alive so its registered tools and commands can be
+/// used after the module has finished evaluating.
+pub struct PluginInstance {
+    context: Context,
+    tools: Vec<PluginToolSpec>,
+    commands: Vec<serde_json::Value>,
+}
+
+impl PluginInstance {
+    pub fn load(policy: PluginPolicy, name: &str, source: &str) -> Result<Self, PluginError> {
+        let prepared = if pi_transpile::needs_transpile(name) {
+            pi_transpile::transpile(name, source).map_err(PluginError::Engine)?
+        } else {
+            source.to_string()
+        };
+        let host = PluginHost::new(policy);
+        let runtime = Runtime::new().map_err(PluginError::from)?;
+        runtime.set_loader(modules::PiResolver, modules::PiLoader);
+        let context = Context::full(&runtime).map_err(PluginError::from)?;
+        host.evaluate(&context, name, &prepared)?;
+        if let Some(denied) = host.denials.lock().expect("denials lock").first().cloned() {
+            return Err(PluginError::Denied {
+                capability: denied.capability,
+                method: denied.method,
+            });
+        }
+        let tools = host.tools.lock().expect("tools lock").clone();
+        let commands = host.commands.lock().expect("commands lock").clone();
+        Ok(Self {
+            context,
+            tools,
+            commands,
+        })
+    }
+
+    pub fn from_file(policy: PluginPolicy, path: &std::path::Path) -> Result<Self, PluginError> {
+        let source = std::fs::read_to_string(path)
+            .map_err(|error| PluginError::Engine(format!("read {}: {error}", path.display())))?;
+        Self::load(policy, &path.to_string_lossy(), &source)
+    }
+
+    pub fn tools(&self) -> &[PluginToolSpec] {
+        &self.tools
+    }
+
+    pub fn commands(&self) -> &[serde_json::Value] {
+        &self.commands
+    }
+
+    /// Call a registered tool's `execute(input)` and return its JSON result.
+    pub fn call_tool(
+        &self,
+        name: &str,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, PluginError> {
+        self.context.with(|ctx| {
+            let registry: Object<'_> =
+                ctx.globals().get("__pi_tools").map_err(PluginError::from)?;
+            let value: rquickjs::Value<'_> = registry.get(name).map_err(PluginError::from)?;
+            let Some(function) = value.as_function() else {
+                return Err(PluginError::Engine(format!(
+                    "plugin tool `{name}` is not callable"
+                )));
+            };
+            let input = json_to_js(&ctx, input);
+            let result: rquickjs::Value<'_> = function
+                .call((input,))
+                .catch(&ctx)
+                .map_err(|error| caught_error("tool", error))?;
+            Ok(js_to_json(&result, 0))
+        })
+    }
+}
+
+fn json_to_js<'js>(ctx: &Ctx<'js>, value: &serde_json::Value) -> rquickjs::Value<'js> {
+    match value {
+        serde_json::Value::Null => rquickjs::Value::new_null(ctx.clone()),
+        serde_json::Value::Bool(flag) => rquickjs::Value::new_bool(ctx.clone(), *flag),
+        serde_json::Value::Number(number) => {
+            if let Some(int) = number.as_i64() {
+                rquickjs::Value::new_int(ctx.clone(), int as i32)
+            } else {
+                rquickjs::Value::new_float(ctx.clone(), number.as_f64().unwrap_or(0.0))
+            }
+        }
+        serde_json::Value::String(text) => rquickjs::String::from_str(ctx.clone(), text)
+            .map(|value| value.into_value())
+            .unwrap_or_else(|_| rquickjs::Value::new_null(ctx.clone())),
+        serde_json::Value::Array(items) => {
+            let array = rquickjs::Array::new(ctx.clone()).expect("array");
+            for (index, item) in items.iter().enumerate() {
+                let _ = array.set(index, json_to_js(ctx, item));
+            }
+            array.into_value()
+        }
+        serde_json::Value::Object(map) => {
+            let object = Object::new(ctx.clone()).expect("object");
+            for (key, item) in map {
+                let _ = object.set(key.as_str(), json_to_js(ctx, item));
+            }
+            object.into_value()
+        }
     }
 }
 

@@ -1093,6 +1093,7 @@ dependencies = [
  "clap",
  "pi-agent",
  "pi-cache",
+ "pi-plugins",
  "pi-rpc",
  "pi-session",
  "pi-tools",
