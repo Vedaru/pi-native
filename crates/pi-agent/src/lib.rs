@@ -12,6 +12,10 @@ use pi_providers::{AssistantBlock, ContentPart, ToolSpec, TranscriptMessage, Usa
 use pi_tools::{Tool, ToolContext, ToolResult};
 use serde_json::Value;
 
+pub mod anthropic;
+
+pub use anthropic::{turn_from_stream, AnthropicProvider};
+
 /// A tool call requested by the model.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ToolCall {

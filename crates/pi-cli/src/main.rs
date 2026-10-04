@@ -5,10 +5,12 @@
 //! lands in later milestones.
 
 use clap::{Parser, Subcommand, ValueEnum};
+use pi_agent::{Agent, AgentEvent, AnthropicProvider};
 use pi_cache::{
     clamp_openai_prompt_cache_key, get_cache_control, openai_completions_prompt_cache_key,
     openai_responses_prompt_cache_key, resolve_cache_retention, CacheRetention,
 };
+use pi_tools::{default_tools, ToolContext};
 
 #[derive(Parser)]
 #[command(name = "pi-native", version, about = "Native Rust runtime for pi")]
@@ -16,6 +18,12 @@ struct Cli {
     /// Start in RPC mode and idle on stdin (used by the memory benchmark).
     #[arg(long)]
     rpc: bool,
+    /// Non-interactive: run one prompt through the agent and print the result.
+    #[arg(short = 'p', long = "print")]
+    print: Option<String>,
+    /// Model id for `--print` (defaults to an Anthropic Claude model).
+    #[arg(long, default_value = "claude-sonnet-4-5")]
+    model: String,
     /// Accepted for parity with pi's benchmark invocation; sessions are not
     /// implemented yet, so this is a no-op.
     #[arg(long = "no-session")]
@@ -79,6 +87,10 @@ fn main() {
         run_rpc();
         return;
     }
+    if let Some(prompt) = cli.print {
+        run_print(&prompt, &cli.model);
+        return;
+    }
     match cli.command {
         Some(command) => run_command(command),
         None => {
@@ -116,6 +128,44 @@ fn run_rpc() {
             });
             let _ = writeln!(out, "{response}");
             let _ = out.flush();
+        }
+    }
+}
+
+/// Run one prompt through the agent and print the result.
+fn run_print(prompt: &str, model: &str) {
+    let api_key = std::env::var("ANTHROPIC_API_KEY").unwrap_or_default();
+    if api_key.is_empty() {
+        eprintln!("pi-native --print: ANTHROPIC_API_KEY is not set");
+        std::process::exit(2);
+    }
+    let base_url = std::env::var("ANTHROPIC_BASE_URL")
+        .unwrap_or_else(|_| "https://api.anthropic.com".to_string());
+    let provider = AnthropicProvider::new(base_url, api_key, model);
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let mut agent = Agent::new(
+        Box::new(provider),
+        default_tools(),
+        "You are pi, a coding agent. Be concise.",
+        ToolContext::new(cwd),
+    );
+    agent.push_user(prompt);
+    match agent.run() {
+        Ok(events) => {
+            for event in events {
+                match event {
+                    AgentEvent::AssistantText(text) => println!("{text}"),
+                    AgentEvent::ToolStart { name, .. } => eprintln!("[tool {name} start]"),
+                    AgentEvent::ToolEnd { name, is_error, .. } => {
+                        eprintln!("[tool {name} {}]", if is_error { "error" } else { "ok" })
+                    }
+                    AgentEvent::Done { .. } => {}
+                }
+            }
+        }
+        Err(error) => {
+            eprintln!("pi-native: {error}");
+            std::process::exit(1);
         }
     }
 }

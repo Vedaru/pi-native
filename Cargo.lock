@@ -983,6 +983,7 @@ dependencies = [
 name = "pi-agent"
 version = "0.0.1"
 dependencies = [
+ "pi-net",
  "pi-providers",
  "pi-tools",
  "serde_json",
@@ -1024,7 +1025,9 @@ name = "pi-native"
 version = "0.0.1"
 dependencies = [
  "clap",
+ "pi-agent",
  "pi-cache",
+ "pi-tools",
  "serde_json",
 ]
 

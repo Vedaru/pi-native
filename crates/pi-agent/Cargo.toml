@@ -10,3 +10,4 @@ description = "Agent loop: turns, tool calls, and events"
 serde_json = { workspace = true }
 pi-providers = { path = "../pi-providers" }
 pi-tools = { path = "../pi-tools" }
+pi-net = { path = "../pi-net" }
