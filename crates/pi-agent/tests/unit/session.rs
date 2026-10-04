@@ -108,3 +108,27 @@ fn assistant_tool_call_round_trips() {
         other => panic!("expected assistant, got {other:?}"),
     }
 }
+
+#[test]
+fn compaction_entry_round_trips_through_pi_session() {
+    let mut session = empty_session();
+    let messages = vec![
+        TranscriptMessage::UserText("old".into()),
+        TranscriptMessage::Assistant(vec![AssistantBlock::Text {
+            text: "old reply".into(),
+        }]),
+    ];
+    append_messages(&mut session, &messages);
+    let first_kept = session.entries.last().expect("entry").id.clone();
+    append_compaction(&mut session, "SUMMARY", &first_kept, 1234);
+
+    // pi-session's context builder must honor firstKeptEntryId: the summary
+    // replaces the summarized span, the kept entry and later ones remain.
+    let context = messages_from_session(&session);
+    assert!(context.iter().any(|message| {
+        matches!(message, TranscriptMessage::UserText(text) if text == "SUMMARY")
+    }));
+    assert!(context.iter().any(|message| {
+        matches!(message, TranscriptMessage::Assistant(blocks) if matches!(&blocks[0], AssistantBlock::Text { text } if text == "old reply"))
+    }));
+}

@@ -188,6 +188,31 @@ fn message_value(message: &TranscriptMessage) -> Value {
     }
 }
 
+/// Append a `compaction` entry (pi's shape: `summary`, `firstKeptEntryId`,
+/// `tokensBefore`) so `pi-session` context building drops the summarized span.
+pub fn append_compaction(
+    session: &mut SessionFile,
+    summary: &str,
+    first_kept_entry_id: &str,
+    tokens_before: usize,
+) -> String {
+    let id = new_id();
+    let timestamp = now_iso();
+    let mut data = serde_json::Map::new();
+    data.insert("summary".to_string(), json!(summary));
+    data.insert("firstKeptEntryId".to_string(), json!(first_kept_entry_id));
+    data.insert("tokensBefore".to_string(), json!(tokens_before));
+    let parent_id = session.entries.last().map(|entry| entry.id.clone());
+    session.entries.push(SessionEntry {
+        kind: "compaction".to_string(),
+        id: id.clone(),
+        parent_id,
+        timestamp,
+        data,
+    });
+    id
+}
+
 /// Append transcript messages as new session entries, chaining `parentId`.
 ///
 /// Returns the number of entries appended.

@@ -20,7 +20,7 @@ pub use pi_tools::ToolContext;
 pub use providers::{
     anthropic_provider, google_provider, openai_responses_provider, turn_from_stream, HttpProvider,
 };
-pub use session::{append_messages, messages_from_session};
+pub use session::{append_compaction, append_messages, messages_from_session};
 
 /// A tool call requested by the model.
 #[derive(Debug, Clone, PartialEq)]
