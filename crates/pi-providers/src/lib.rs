@@ -15,6 +15,8 @@ pub mod google;
 pub mod openai_completions;
 pub mod openai_responses;
 
+pub use pi_cache::CacheRetention;
+
 pub use anthropic::{
     apply_conversation_cache_breakpoint, build_anthropic_params, build_system, convert_tools,
     resolve_thinking, AnthropicBuildOptions, AnthropicMessage, AnthropicParams,
