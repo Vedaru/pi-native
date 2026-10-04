@@ -133,8 +133,6 @@ for the same session (retained rendered transcript components) — the variable
 cost the native renderer and windowed transcript must remove. Target for our
 build: **<= 25 MB idle headless**, and a bounded TUI transcript.
 
-TUI numbers: `python3 scripts/measure_tui.py [--session ...]` (pty-based).
-
 ## Image pipeline (`pi-image`)
 
 Native decode/orient/resize/encode, replacing photon WASM. Matches pi's strategy:
@@ -142,7 +140,7 @@ keep the original if within limits, otherwise fit to `maxWidth`/`maxHeight`,
 then return the first encoding under `maxBytes` in pi's order (PNG, then JPEG at
 the configured quality and 85/70/55/40), shrinking by 25% per retry.
 
-Comparison on a 6000x4000 PNG (`harness/compare-image-resize.mjs` vs
+Comparison on a 6000x4000 PNG (native, via
 `cargo run --release -p pi-image --example resize`):
 
 | | pi (photon WASM) | pi-image (native) |
@@ -218,7 +216,7 @@ Swarm (`scripts/swarm_stress.py`): N units at once, aggregate and per-unit.
 | 32 idle `--rpc` | 3.8 MB | 121.8 MB |
 | 8 busy (`read` sessions, 200k turns) | 4.9 MB | 39.1 MB |
 
-Native states (`scripts/native_states.py`), 200k turns where applicable:
+Native states (from `--stress --stress-session`), 200k turns where applicable:
 
 | State | RSS | CPU |
 | --- | --- | --- |

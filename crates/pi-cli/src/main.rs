@@ -18,8 +18,22 @@ use std::io::{BufRead, BufReader, Write};
 use std::process::{Command as ProcessCommand, Stdio};
 use std::sync::Arc;
 
+const LONG_VERSION: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    " (",
+    env!("PI_NATIVE_GIT_SHA"),
+    ", ",
+    env!("PI_NATIVE_TARGET"),
+    ")"
+);
+
 #[derive(Parser)]
-#[command(name = "pi-native", version, about = "Native Rust runtime for pi")]
+#[command(
+    name = "pi-native",
+    version,
+    long_version = LONG_VERSION,
+    about = "Native Rust runtime for pi"
+)]
 struct Cli {
     /// Start in RPC mode and idle on stdin (used by the memory benchmark).
     #[arg(long)]
