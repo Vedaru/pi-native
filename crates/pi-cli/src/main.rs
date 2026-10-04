@@ -7,7 +7,7 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use pi_agent::{
     anthropic_provider, Agent, AgentEvent, AllowAll, Approval, Approver, AssistantTurn, DenyAll,
-    FauxProvider, ToolCall,
+    FnProvider, ToolCall,
 };
 use pi_cache::{
     clamp_openai_prompt_cache_key, get_cache_control, openai_completions_prompt_cache_key,
@@ -236,32 +236,34 @@ fn run_stress(turns: usize) {
     let _ = std::fs::create_dir_all(&dir);
     let _ = std::fs::write(dir.join("f.txt"), "x\n");
 
-    let mut scripted = Vec::with_capacity(turns + 1);
-    for index in 0..turns {
-        scripted.push(AssistantTurn {
-            tool_calls: vec![ToolCall {
-                id: format!("stress-{index}"),
-                name: "ls".to_string(),
-                arguments: serde_json::json!({}),
-            }],
-            stop_reason: Some("tool_use".to_string()),
-            ..Default::default()
-        });
-    }
-    scripted.push(AssistantTurn {
-        text: "done".to_string(),
-        stop_reason: Some("end_turn".to_string()),
-        ..Default::default()
+    // Generate turns on demand so a long run does not pre-allocate every turn.
+    let provider = FnProvider::new(move |index| {
+        if index < turns {
+            AssistantTurn {
+                tool_calls: vec![ToolCall {
+                    id: format!("stress-{index}"),
+                    name: "ls".to_string(),
+                    arguments: serde_json::json!({}),
+                }],
+                stop_reason: Some("tool_use".to_string()),
+                ..Default::default()
+            }
+        } else {
+            AssistantTurn {
+                text: "done".to_string(),
+                stop_reason: Some("end_turn".to_string()),
+                ..Default::default()
+            }
+        }
     });
-
-    let provider = FauxProvider::new(scripted);
     let mut agent = Agent::new(
         Box::new(provider),
         default_tools(),
         SYSTEM_PROMPT,
         ToolContext::new(&dir),
     )
-    .with_max_iterations(turns + 2);
+    .with_max_iterations(turns + 2)
+    .with_context_window(4096);
     agent.push_user("stress");
 
     // Stream events instead of collecting them, so a long run does not retain

@@ -116,6 +116,33 @@ impl ModelProvider for FauxProvider {
     }
 }
 
+/// A provider that generates the i-th turn on demand.
+///
+/// Unlike [`FauxProvider`], it stores nothing, so a long turn does not
+/// pre-allocate every scripted turn (and does not shift a `Vec` per call).
+pub struct FnProvider<F: Fn(usize) -> AssistantTurn> {
+    build: F,
+    index: std::sync::atomic::AtomicUsize,
+}
+
+impl<F: Fn(usize) -> AssistantTurn> FnProvider<F> {
+    pub fn new(build: F) -> Self {
+        Self {
+            build,
+            index: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+}
+
+impl<F: Fn(usize) -> AssistantTurn> ModelProvider for FnProvider<F> {
+    fn complete(&self, _request: &CompletionRequest<'_>) -> Result<AssistantTurn, AgentError> {
+        let index = self
+            .index
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok((self.build)(index))
+    }
+}
+
 /// A model backend. Returns a full turn; streaming is a provider concern.
 pub trait ModelProvider {
     fn complete(&self, request: &CompletionRequest<'_>) -> Result<AssistantTurn, AgentError>;
@@ -161,6 +188,7 @@ pub struct Agent {
     tool_context: ToolContext,
     approver: Arc<dyn Approver>,
     max_iterations: usize,
+    context_window: Option<usize>,
 }
 
 impl Agent {
@@ -178,6 +206,7 @@ impl Agent {
             tool_context,
             approver: Arc::new(AllowAll),
             max_iterations: 16,
+            context_window: None,
         }
     }
 
@@ -190,6 +219,26 @@ impl Agent {
     pub fn with_approver(mut self, approver: Arc<dyn Approver>) -> Self {
         self.approver = approver;
         self
+    }
+
+    /// Bound retained context to the most recent `max_messages` entries.
+    ///
+    /// This caps memory for long sessions by dropping the oldest messages.
+    /// Callers that need durability should persist before the window drops
+    /// them. Full-fidelity history needs summarization (compaction), not a
+    /// window; this is the simple bound.
+    pub fn with_context_window(mut self, max_messages: usize) -> Self {
+        self.context_window = Some(max_messages.max(2));
+        self
+    }
+
+    fn trim_context(&mut self) {
+        if let Some(window) = self.context_window {
+            if self.messages.len() > window {
+                let excess = self.messages.len() - window;
+                self.messages.drain(0..excess);
+            }
+        }
     }
 
     pub fn push_user(&mut self, text: impl Into<String>) {
@@ -269,6 +318,7 @@ impl Agent {
                     is_error: result.is_error,
                 });
             }
+            self.trim_context();
         }
 
         on_event(&AgentEvent::Done {

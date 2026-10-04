@@ -239,3 +239,41 @@ fn allowed_approval_runs_the_tool() {
     assert!(!is_error, "{content}");
     assert!(content.contains("hi"), "{content}");
 }
+
+#[test]
+fn context_window_bounds_retained_messages() {
+    let provider = FnProvider::new(|index| {
+        if index < 20 {
+            AssistantTurn {
+                tool_calls: vec![ToolCall {
+                    id: format!("c{index}"),
+                    name: "echo".into(),
+                    arguments: json!({ "text": "x" }),
+                }],
+                stop_reason: Some("tool_use".into()),
+                ..Default::default()
+            }
+        } else {
+            AssistantTurn {
+                text: "done".into(),
+                ..Default::default()
+            }
+        }
+    });
+    let mut agent = Agent::new(
+        Box::new(provider),
+        vec![Box::new(EchoTool)],
+        "s",
+        ToolContext::new(std::env::temp_dir()),
+    )
+    .with_max_iterations(30)
+    .with_context_window(4);
+    agent.push_user("go");
+
+    agent.run().expect("runs");
+    assert!(
+        agent.messages().len() <= 4,
+        "window not enforced: {}",
+        agent.messages().len()
+    );
+}
