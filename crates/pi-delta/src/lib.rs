@@ -20,6 +20,19 @@ pub enum Op {
     Set { path: Path, value: Value },
     /// Remove the key at `path`.
     Delete { path: Path },
+    /// Append a value to the array at `path`.
+    Push { path: Path, value: Value },
+    /// Truncate the array at `path` to `length`.
+    Truncate { path: Path, length: usize },
+    /// Replace `delete_count` items at `start` with `items` in the array at `path`.
+    Splice {
+        path: Path,
+        start: usize,
+        delete_count: usize,
+        items: Vec<Value>,
+    },
+    /// Reorder the array at `path`: `new[i] = old[permutation[i]]`.
+    Move { path: Path, permutation: Vec<usize> },
 }
 
 /// Compute operations that transform `before` into `after`.
@@ -57,11 +70,61 @@ fn diff_into(before: &Value, after: &Value, path: &mut Path, ops: &mut Vec<Op>) 
                 }
             }
         }
+        (Value::Array(before_items), Value::Array(after_items)) => {
+            // Incremental array edits when the change is an append, truncation,
+            // or reorder; otherwise replace the array wholesale.
+            if after_items.len() >= before_items.len()
+                && after_items[..before_items.len()] == before_items[..]
+            {
+                for item in &after_items[before_items.len()..] {
+                    ops.push(Op::Push {
+                        path: path.clone(),
+                        value: item.clone(),
+                    });
+                }
+            } else if before_items.len() > after_items.len()
+                && before_items[..after_items.len()] == after_items[..]
+            {
+                ops.push(Op::Truncate {
+                    path: path.clone(),
+                    length: after_items.len(),
+                });
+            } else if let Some(permutation) = permutation(before_items, after_items) {
+                ops.push(Op::Move {
+                    path: path.clone(),
+                    permutation,
+                });
+            } else {
+                ops.push(Op::Set {
+                    path: path.clone(),
+                    value: after.clone(),
+                });
+            }
+        }
         _ => ops.push(Op::Set {
             path: path.clone(),
             value: after.clone(),
         }),
     }
+}
+
+/// A permutation `new[i] = old[permutation[i]]`, or `None` when the arrays are
+/// not a reordering of each other.
+fn permutation(before: &[Value], after: &[Value]) -> Option<Vec<usize>> {
+    if before.len() != after.len() {
+        return None;
+    }
+    let mut used = vec![false; before.len()];
+    let mut permutation = Vec::with_capacity(after.len());
+    for value in after {
+        let index = before
+            .iter()
+            .enumerate()
+            .position(|(index, candidate)| !used[index] && candidate == value)?;
+        used[index] = true;
+        permutation.push(index);
+    }
+    Some(permutation)
 }
 
 /// Apply an operation batch to a revision, returning the new revision.
@@ -71,9 +134,51 @@ pub fn apply(base: &Value, ops: &[Op]) -> Value {
         match op {
             Op::Set { path, value } => set_at(&mut root, path, value.clone()),
             Op::Delete { path } => delete_at(&mut root, path),
+            Op::Push { path, value } => {
+                if let Some(array) = array_at_mut(&mut root, path) {
+                    array.push(value.clone());
+                }
+            }
+            Op::Truncate { path, length } => {
+                if let Some(array) = array_at_mut(&mut root, path) {
+                    array.truncate(*length);
+                }
+            }
+            Op::Splice {
+                path,
+                start,
+                delete_count,
+                items,
+            } => {
+                if let Some(array) = array_at_mut(&mut root, path) {
+                    let start = (*start).min(array.len());
+                    let end = (start + delete_count).min(array.len());
+                    array.splice(start..end, items.clone());
+                }
+            }
+            Op::Move { path, permutation } => {
+                if let Some(array) = array_at_mut(&mut root, path) {
+                    let old = array.clone();
+                    let reordered: Vec<Value> = permutation
+                        .iter()
+                        .filter_map(|&index| old.get(index).cloned())
+                        .collect();
+                    if reordered.len() == old.len() {
+                        *array = reordered;
+                    }
+                }
+            }
         }
     }
     root
+}
+
+fn array_at_mut<'a>(root: &'a mut Value, path: &[String]) -> Option<&'a mut Vec<Value>> {
+    let mut current = root;
+    for segment in path {
+        current = current.as_object_mut()?.get_mut(segment)?;
+    }
+    current.as_array_mut()
 }
 
 fn set_at(root: &mut Value, path: &[String], value: Value) {

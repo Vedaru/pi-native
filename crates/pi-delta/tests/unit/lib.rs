@@ -62,3 +62,58 @@ fn delete_missing_path_is_a_no_op() {
     }];
     assert_eq!(apply(&base, &ops), base);
 }
+
+#[test]
+fn append_becomes_push_ops() {
+    let before = json!({"list": [1, 2]});
+    let after = json!({"list": [1, 2, 3, 4]});
+    let ops = diff(&before, &after);
+    assert_eq!(ops.len(), 2);
+    assert!(matches!(&ops[0], Op::Push { value, .. } if value == &json!(3)));
+    assert_eq!(apply(&before, &ops), after);
+}
+
+#[test]
+fn shrinking_a_prefix_becomes_truncate() {
+    let before = json!({"list": [1, 2, 3]});
+    let after = json!({"list": [1, 2]});
+    let ops = diff(&before, &after);
+    assert_eq!(
+        ops,
+        vec![Op::Truncate {
+            path: vec!["list".to_string()],
+            length: 2
+        }]
+    );
+    assert_eq!(apply(&before, &ops), after);
+}
+
+#[test]
+fn reordering_becomes_move() {
+    let before = json!({"list": [1, 2, 3]});
+    let after = json!({"list": [3, 1, 2]});
+    let ops = diff(&before, &after);
+    assert!(matches!(&ops[0], Op::Move { .. }), "expected move: {ops:?}");
+    assert_eq!(apply(&before, &ops), after);
+}
+
+#[test]
+fn in_place_edit_replaces_the_array() {
+    let before = json!({"list": [1, 2, 3]});
+    let after = json!({"list": [1, 9, 3]});
+    let ops = diff(&before, &after);
+    assert!(matches!(&ops[0], Op::Set { .. }), "expected set: {ops:?}");
+    assert_eq!(apply(&before, &ops), after);
+}
+
+#[test]
+fn splice_applies_and_matches_a_set() {
+    let base = json!({"list": [1, 2, 3]});
+    let ops = vec![Op::Splice {
+        path: vec!["list".to_string()],
+        start: 1,
+        delete_count: 1,
+        items: vec![json!(9), json!(10)],
+    }];
+    assert_eq!(apply(&base, &ops), json!({"list": [1, 9, 10, 3]}));
+}
