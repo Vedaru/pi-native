@@ -53,7 +53,8 @@ struct Cli {
     #[arg(long, default_value_t = 0)]
     stress_byte_limit_mb: usize,
     /// Token context window for --stress compaction (reserve is 16,384).
-    #[arg(long, default_value_t = 32000)]
+    /// Default matches a real 200k-token model.
+    #[arg(long, default_value_t = 200000)]
     stress_context_tokens: usize,
     #[command(subcommand)]
     command: Option<Command>,

@@ -312,12 +312,16 @@ impl Agent {
         // `context_window - reserve_tokens`; keep a recent tail worth `reserve`.
         if let Some((window, reserve)) = self.compaction {
             let threshold = window.saturating_sub(reserve);
+            // The kept tail must be strictly smaller than the threshold, or the
+            // next check compacts again immediately (pathological churn). Cap it
+            // at half the threshold.
+            let tail_budget = reserve.min(threshold / 2).max(1);
             if self.total_tokens() > threshold {
                 let mut tail_tokens = 0usize;
                 let mut cut = self.messages.len();
                 while cut > 0 {
                     let tokens = self.messages[cut - 1].approx_tokens();
-                    if tail_tokens + tokens > reserve {
+                    if tail_tokens + tokens > tail_budget {
                         break;
                     }
                     tail_tokens += tokens;

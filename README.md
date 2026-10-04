@@ -173,10 +173,17 @@ window):
 Without the window, 50,000 `ls` turns: 0.08 s / 39 MB (and 1M turns stay flat
 at ~5 MB with the window).
 
-The message-count window alone does **not** bound memory when tools return large
-output (`window x output`). A **byte budget** (`with_context_byte_limit`) does:
-20,000 `read` turns of 40 KB go from **87 MB** (window only) to **20.6 MB**
-(16 MB budget), independent of how large the output is.
+Context is bounded by **token-based compaction** (pi's rule: compact when
+estimated tokens exceed `contextWindow - reserveTokens`, reserve 16,384). With a
+realistic 200,000-token window, 20,000 turns compact only occasionally:
+
+| Workload | Compactions / 20k turns | Peak RSS |
+| --- | --- | --- |
+| `ls` (tiny messages) | 5 | 7.0 MB |
+| `read` (40 KB results) | 1,176 (~1 per 17 turns) | 4.9 MB |
+
+The kept tail is capped at half the threshold, so compaction cannot churn (a
+misconfigured window/reserve previously caused ~2 compactions per turn).
 
 Growth is proportional to the retained transcript (~900 B/turn), with no leak.
 Two fixes came out of pressure testing:

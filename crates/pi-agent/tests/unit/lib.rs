@@ -376,3 +376,53 @@ fn compaction_summarizes_older_messages() {
         other => panic!("expected summary, got {other:?}"),
     }
 }
+
+#[test]
+fn compaction_does_not_churn_when_reserve_is_large() {
+    // window 2000, reserve 1500 -> threshold 500. If the kept tail were allowed
+    // to reach the reserve (1500 > threshold), every check would compact again.
+    // With the tail capped at threshold/2, compaction happens occasionally.
+    let provider = FnProvider::new(|index| {
+        if index < 60 {
+            AssistantTurn {
+                tool_calls: vec![ToolCall {
+                    id: format!("c{index}"),
+                    name: "echo".into(),
+                    arguments: json!({ "text": "x".repeat(400) }),
+                }],
+                stop_reason: Some("tool_use".into()),
+                ..Default::default()
+            }
+        } else {
+            AssistantTurn {
+                text: "done".into(),
+                ..Default::default()
+            }
+        }
+    });
+    let mut agent = Agent::new(
+        Box::new(provider),
+        vec![Box::new(EchoTool)],
+        "s",
+        ToolContext::new(std::env::temp_dir()),
+    )
+    .with_max_iterations(70)
+    .with_compaction(2_000, 1_500)
+    .with_summarizer(std::sync::Arc::new(StubSummarizer));
+    agent.push_user("go");
+
+    let mut compactions = 0usize;
+    agent
+        .run_with(|event| {
+            if matches!(event, AgentEvent::Compacted { .. }) {
+                compactions += 1;
+            }
+        })
+        .expect("runs");
+
+    assert!(compactions > 0, "no compaction ran");
+    assert!(
+        compactions <= 60,
+        "compaction churned: {compactions} over 60 turns"
+    );
+}
