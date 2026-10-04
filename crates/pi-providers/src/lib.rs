@@ -12,5 +12,6 @@ pub mod anthropic;
 
 pub use anthropic::{
     apply_conversation_cache_breakpoint, build_anthropic_params, build_system, convert_tools,
-    AnthropicMessage, AnthropicParams, AnthropicSystemBlock, AnthropicTool, ContentBlock, ToolSpec,
+    resolve_thinking, AnthropicBuildOptions, AnthropicMessage, AnthropicParams,
+    AnthropicSystemBlock, AnthropicTool, ContentBlock, ThinkingOptions, ToolSpec,
 };

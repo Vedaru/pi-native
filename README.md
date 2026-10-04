@@ -53,6 +53,20 @@ cargo run -q -p pi-native -- prompt-cache-key --session-id sess-123 --responses
 # {"prompt_cache_key":"sess-123","retention":"short"}
 ```
 
+## Provider wire parity (VED-313)
+
+The gate requires byte-identical provider requests. `harness/capture-anthropic.mjs`
+captures pi's real outgoing request by injecting a fake `fetch` into pi's
+Anthropic provider, then writes canonical JSON fixtures. The Rust builder is
+tested against those fixtures.
+
+```bash
+./scripts/parity-check.sh
+```
+
+Fixtures live in `harness/fixtures/`. JSON key order is canonicalized so only
+semantic changes count. `PI_AI_DIST` overrides the installed pi-ai path.
+
 ## Attribution
 
 Derived in part from pi (<https://github.com/earendil-works/pi>), MIT. See

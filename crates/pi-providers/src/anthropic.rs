@@ -1,8 +1,12 @@
 //! Anthropic Messages request construction with pi's cache-breakpoint rules.
+//!
+//! Sources mirrored: `packages/ai/src/api/anthropic-messages.ts`
+//! (`buildParams`, `convertTools`, the conversation breakpoint at the end of
+//! `convertMessages`, and the `thinking` block).
 
 use pi_cache::{get_cache_control, CacheControlEphemeral, CacheRetention};
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{json, Value};
 
 /// A system prompt block. Pi always uses a single `text` block.
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -58,7 +62,6 @@ pub enum ContentBlock {
         thinking: String,
         signature: String,
     },
-    /// Interleaved thinking used by adaptive-effort models.
     RedactedThinking {
         data: String,
     },
@@ -79,8 +82,7 @@ pub struct ToolSpec {
     pub input_schema: Value,
 }
 
-/// Assembled Anthropic Messages params. Field order matches pi's `params`
-/// literal so canonical JSON comparison is stable.
+/// Assembled Anthropic Messages params.
 #[derive(Debug, Clone, Serialize)]
 pub struct AnthropicParams {
     pub model: String,
@@ -93,6 +95,18 @@ pub struct AnthropicParams {
     pub temperature: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<AnthropicTool>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<Value>,
+}
+
+/// Extended-thinking selection, mirroring pi's option surface.
+#[derive(Debug, Clone, Default)]
+pub struct ThinkingOptions {
+    /// `Some(false)` emits `{"type":"disabled"}` on reasoning models.
+    pub enabled: Option<bool>,
+    pub display: Option<String>,
+    pub effort: Option<String>,
+    pub budget_tokens: Option<i64>,
 }
 
 /// Options controlling request assembly.
@@ -101,15 +115,17 @@ pub struct AnthropicBuildOptions {
     pub cache_retention: CacheRetention,
     pub supports_long_cache_retention: bool,
     pub supports_cache_control_on_tools: bool,
-    pub eager_input_streaming: bool,
+    pub supports_eager_tool_input_streaming: bool,
     pub strict_tools: bool,
     pub max_tokens: Option<i64>,
     pub default_max_tokens: i64,
     pub temperature: Option<f64>,
+    pub reasoning: bool,
+    pub force_adaptive_thinking: bool,
+    pub thinking: ThinkingOptions,
 }
 
-/// Build the non-OAuth system prompt block. An empty prompt is omitted, matching
-/// pi's falsy check.
+/// Build the non-OAuth system prompt block. An empty prompt is omitted.
 pub fn build_system(
     text: &str,
     cache_control: Option<CacheControlEphemeral>,
@@ -150,6 +166,37 @@ pub fn convert_tools(
         .collect()
 }
 
+/// Resolve the `thinking` block. Only reasoning models get one, matching pi.
+pub fn resolve_thinking(
+    reasoning: bool,
+    force_adaptive: bool,
+    options: &ThinkingOptions,
+) -> Option<Value> {
+    if !reasoning {
+        return None;
+    }
+    match options.enabled {
+        Some(true) => {
+            let display = options
+                .display
+                .clone()
+                .unwrap_or_else(|| "summarized".to_string());
+            if force_adaptive {
+                Some(json!({ "type": "adaptive", "display": display }))
+            } else {
+                Some(json!({
+                    "type": "enabled",
+                    "budget_tokens": options.budget_tokens.unwrap_or(1024),
+                    "display": display,
+                }))
+            }
+        }
+        // `thinkingLevelMap.off !== null` holds for the models we target.
+        Some(false) => Some(json!({ "type": "disabled" })),
+        None => None,
+    }
+}
+
 fn eligible_for_cache_marker(block: &ContentBlock) -> bool {
     matches!(
         block,
@@ -157,8 +204,7 @@ fn eligible_for_cache_marker(block: &ContentBlock) -> bool {
     )
 }
 
-/// Mark the last user/system message's final eligible block, matching pi's
-/// conversation-history cache breakpoint.
+/// Mark the last user/system message's final eligible block.
 pub fn apply_conversation_cache_breakpoint(
     messages: &mut [AnthropicMessage],
     cache_control: &Option<CacheControlEphemeral>,
@@ -223,7 +269,7 @@ pub fn build_anthropic_params(
     } else {
         Some(convert_tools(
             tools,
-            options.eager_input_streaming,
+            options.supports_eager_tool_input_streaming,
             options.strict_tools,
             tool_cache_control,
         ))
@@ -237,6 +283,11 @@ pub fn build_anthropic_params(
         system: build_system(system_text, cache_control),
         temperature: options.temperature,
         tools,
+        thinking: resolve_thinking(
+            options.reasoning,
+            options.force_adaptive_thinking,
+            &options.thinking,
+        ),
     }
 }
 
@@ -250,11 +301,17 @@ mod tests {
             cache_retention: CacheRetention::Short,
             supports_long_cache_retention: true,
             supports_cache_control_on_tools: true,
-            eager_input_streaming: false,
+            supports_eager_tool_input_streaming: true,
             strict_tools: false,
             max_tokens: None,
             default_max_tokens: 4096,
             temperature: None,
+            reasoning: true,
+            force_adaptive_thinking: false,
+            thinking: ThinkingOptions {
+                enabled: Some(false),
+                ..Default::default()
+            },
         }
     }
 
@@ -266,19 +323,23 @@ mod tests {
         }
     }
 
+    fn user_text(text: &str) -> AnthropicMessage {
+        AnthropicMessage {
+            role: "user",
+            content: vec![ContentBlock::Text {
+                text: text.to_string(),
+                cache_control: None,
+            }],
+        }
+    }
+
     #[test]
     fn system_block_carries_marker() {
         let params = build_anthropic_params(
             "claude".into(),
             "system",
             &[],
-            vec![AnthropicMessage {
-                role: "user",
-                content: vec![ContentBlock::Text {
-                    text: "hi".into(),
-                    cache_control: None,
-                }],
-            }],
+            vec![user_text("hi")],
             &options(),
         );
         let system = params.system.unwrap();
@@ -317,34 +378,26 @@ mod tests {
 
     #[test]
     fn last_user_text_block_is_marked() {
-        let params = build_anthropic_params(
-            "claude".into(),
-            "s",
-            &[],
-            vec![
-                AnthropicMessage {
-                    role: "assistant",
-                    content: vec![ContentBlock::Text {
-                        text: "a".into(),
-                        cache_control: None,
-                    }],
-                },
-                AnthropicMessage {
-                    role: "user",
-                    content: vec![ContentBlock::Text {
-                        text: "b".into(),
-                        cache_control: None,
-                    }],
-                },
-            ],
-            &options(),
-        );
-        match &params.messages[1].content[0] {
+        let mut messages = vec![
+            AnthropicMessage {
+                role: "assistant",
+                content: vec![ContentBlock::Text {
+                    text: "a".into(),
+                    cache_control: None,
+                }],
+            },
+            user_text("b"),
+        ];
+        let marker = Some(CacheControlEphemeral {
+            r#type: "ephemeral",
+            ttl: None,
+        });
+        apply_conversation_cache_breakpoint(&mut messages, &marker);
+        match &messages[1].content[0] {
             ContentBlock::Text { cache_control, .. } => assert!(cache_control.is_some()),
             _ => panic!("expected text"),
         }
-        // The earlier assistant block is left alone.
-        match &params.messages[0].content[0] {
+        match &messages[0].content[0] {
             ContentBlock::Text { cache_control, .. } => assert!(cache_control.is_none()),
             _ => panic!("expected text"),
         }
@@ -401,13 +454,7 @@ mod tests {
             "claude".into(),
             "s",
             &[tool("read")],
-            vec![AnthropicMessage {
-                role: "user",
-                content: vec![ContentBlock::Text {
-                    text: "hi".into(),
-                    cache_control: None,
-                }],
-            }],
+            vec![user_text("hi")],
             &opts,
         );
         assert!(params.system.unwrap()[0].cache_control.is_none());
@@ -419,38 +466,108 @@ mod tests {
     }
 
     #[test]
-    fn serialized_shape_matches_anthropic_wire() {
-        let params = build_anthropic_params(
-            "claude".into(),
-            "sys",
-            &[tool("read")],
-            vec![AnthropicMessage {
-                role: "user",
-                content: vec![ContentBlock::Text {
-                    text: "hi".into(),
-                    cache_control: None,
-                }],
-            }],
-            &options(),
+    fn thinking_disabled_on_reasoning_model() {
+        let value = resolve_thinking(
+            true,
+            false,
+            &ThinkingOptions {
+                enabled: Some(false),
+                ..Default::default()
+            },
         );
-        let value = serde_json::to_value(&params).unwrap();
-        assert_eq!(value["model"], json!("claude"));
-        assert_eq!(value["stream"], json!(true));
-        assert_eq!(value["max_tokens"], json!(4096));
-        assert_eq!(value["system"][0]["type"], json!("text"));
-        assert_eq!(
-            value["system"][0]["cache_control"]["type"],
-            json!("ephemeral")
+        assert_eq!(value, Some(json!({"type": "disabled"})));
+    }
+
+    #[test]
+    fn no_thinking_on_non_reasoning_model() {
+        let value = resolve_thinking(
+            false,
+            false,
+            &ThinkingOptions {
+                enabled: Some(true),
+                ..Default::default()
+            },
         );
-        assert_eq!(value["tools"][0]["input_schema"]["type"], json!("object"));
-        assert_eq!(
-            value["tools"][0]["cache_control"]["type"],
-            json!("ephemeral")
+        assert_eq!(value, None);
+    }
+
+    #[test]
+    fn budget_thinking_shape() {
+        let value = resolve_thinking(
+            true,
+            false,
+            &ThinkingOptions {
+                enabled: Some(true),
+                budget_tokens: Some(2048),
+                ..Default::default()
+            },
         );
-        assert_eq!(value["messages"][0]["content"][0]["type"], json!("text"));
         assert_eq!(
-            value["messages"][0]["content"][0]["cache_control"]["type"],
-            json!("ephemeral")
+            value,
+            Some(json!({"type": "enabled", "budget_tokens": 2048, "display": "summarized"}))
+        );
+    }
+
+    /// End-to-end parity against a request captured from pi itself (VED-313).
+    /// Regenerate the fixture with `node harness/capture-anthropic.mjs
+    /// harness/scenarios/anthropic-basic.json`.
+    #[test]
+    fn matches_captured_pi_request() {
+        let expected: Value = serde_json::from_str(include_str!(
+            "../../../harness/fixtures/anthropic-claude-sonnet-4-5.json"
+        ))
+        .expect("fixture parses");
+
+        let tools = vec![
+            ToolSpec {
+                name: "read".into(),
+                description: "Read a file".into(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"]
+                }),
+            },
+            ToolSpec {
+                name: "bash".into(),
+                description: "Run a shell command".into(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {"command": {"type": "string"}},
+                    "required": ["command"]
+                }),
+            },
+        ];
+
+        let opts = AnthropicBuildOptions {
+            cache_retention: CacheRetention::Short,
+            supports_long_cache_retention: true,
+            supports_cache_control_on_tools: true,
+            supports_eager_tool_input_streaming: true,
+            strict_tools: false,
+            max_tokens: Some(64_000),
+            default_max_tokens: 64_000,
+            temperature: None,
+            reasoning: true,
+            force_adaptive_thinking: false,
+            thinking: ThinkingOptions {
+                enabled: Some(false),
+                ..Default::default()
+            },
+        };
+
+        let actual = serde_json::to_value(build_anthropic_params(
+            "claude-sonnet-4-5".into(),
+            "You are pi, a coding agent. Be concise.",
+            &tools,
+            vec![user_text("hello")],
+            &opts,
+        ))
+        .expect("params serialize");
+
+        assert_eq!(
+            actual, expected,
+            "native request differs from captured pi request"
         );
     }
 }
