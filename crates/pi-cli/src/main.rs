@@ -276,7 +276,7 @@ fn stress_args(tool: &str, index: usize) -> serde_json::Value {
         "read" => serde_json::json!({ "path": "big.txt" }),
         "edit" => {
             // Alternate A<->B so every edit targets unique text.
-            let (old, new) = if index % 2 == 0 {
+            let (old, new) = if index.is_multiple_of(2) {
                 ("A", "B")
             } else {
                 ("B", "A")
