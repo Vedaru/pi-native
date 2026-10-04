@@ -10,31 +10,58 @@
 
 use syntect::parsing::{ParseState, ScopeStack, SyntaxSet};
 
-/// The categories a theme can style. An empty scope is plain text.
+/// The categories a theme can style. The names match pi's highlight theme keys
+/// (`buildCliHighlightTheme`), so the TUI theme can look a span's category up
+/// directly. [`Scope::Plain`] has no key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Scope {
     Keyword,
+    BuiltIn,
+    Literal,
+    Number,
+    Regexp,
     String,
     Comment,
-    Number,
+    DocTag,
+    Meta,
     Function,
+    Title,
+    Class,
     Type,
+    Tag,
+    Name,
+    Attr,
     Variable,
+    Params,
     Operator,
+    Punctuation,
     Plain,
 }
 
 impl Scope {
-    pub fn as_str(self) -> &'static str {
+    /// pi's highlight theme key for this category (`""` means plain).
+    pub fn theme_key(self) -> &'static str {
         match self {
             Scope::Keyword => "keyword",
+            Scope::BuiltIn => "built_in",
+            Scope::Literal => "literal",
+            Scope::Number => "number",
+            Scope::Regexp => "regexp",
             Scope::String => "string",
             Scope::Comment => "comment",
-            Scope::Number => "number",
+            Scope::DocTag => "doctag",
+            Scope::Meta => "meta",
             Scope::Function => "function",
+            Scope::Title => "title",
+            Scope::Class => "class",
             Scope::Type => "type",
+            Scope::Tag => "tag",
+            Scope::Name => "name",
+            Scope::Attr => "attr",
             Scope::Variable => "variable",
+            Scope::Params => "params",
             Scope::Operator => "operator",
+            Scope::Punctuation => "punctuation",
             Scope::Plain => "",
         }
     }
@@ -53,26 +80,54 @@ pub fn supports_language(language: &str) -> bool {
     syntaxes.find_syntax_by_token(language).is_some()
 }
 
-/// Classify a TextMate scope stack into a theme category.
+/// Classify a TextMate scope stack into a theme category. Most specific first.
 fn classify(scope: &ScopeStack) -> Scope {
     let text = scope.to_string();
     if text.contains("comment") {
-        Scope::Comment
+        if text.contains("doctag") {
+            Scope::DocTag
+        } else {
+            Scope::Comment
+        }
+    } else if text.contains("regexp") {
+        Scope::Regexp
     } else if text.contains("string") || text.contains("char") {
         Scope::String
     } else if text.contains("constant.numeric") {
         Scope::Number
+    } else if text.contains("constant.language") || text.contains("constant") {
+        Scope::Literal
+    } else if text.contains("keyword.operator") {
+        Scope::Operator
     } else if text.contains("keyword") {
         Scope::Keyword
+    } else if text.contains("storage") {
+        // TextMate puts `fn`/`let`/`def` in `storage`; highlight.js (pi) colors
+        // these as keywords.
+        Scope::Keyword
+    } else if text.contains("support.type") || text.contains("support.class") {
+        Scope::BuiltIn
     } else if text.contains("entity.name.function") || text.contains("support.function") {
         Scope::Function
-    } else if text.contains("entity.name.type") || text.contains("storage.type") {
+    } else if text.contains("entity.name.class") {
+        Scope::Class
+    } else if text.contains("entity.name.type") {
         Scope::Type
+    } else if text.contains("entity.name.tag") {
+        Scope::Tag
+    } else if text.contains("entity.other.attribute-name") {
+        Scope::Attr
+    } else if text.contains("entity.name") {
+        Scope::Name
+    } else if text.contains("variable.parameter") {
+        Scope::Params
     } else if text.contains("variable") {
         Scope::Variable
-    } else if text.contains("keyword.operator") || text.contains("punctuation") {
-        Scope::Operator
+    } else if text.contains("punctuation") {
+        Scope::Punctuation
     } else {
+        // TextMate `meta.*` scopes wrap whole regions (including whitespace), so
+        // treat them as plain rather than pi's `meta` (muted).
         Scope::Plain
     }
 }

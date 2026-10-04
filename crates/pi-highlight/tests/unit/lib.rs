@@ -49,3 +49,60 @@ fn spans_reconstruct_the_source() {
         .collect();
     assert_eq!(rebuilt, source);
 }
+
+#[test]
+fn theme_keys_match_pis_highlight_theme() {
+    // The keys buildCliHighlightTheme() dispatches on.
+    let valid = [
+        "",
+        "keyword",
+        "built_in",
+        "literal",
+        "number",
+        "regexp",
+        "string",
+        "comment",
+        "doctag",
+        "meta",
+        "function",
+        "title",
+        "class",
+        "type",
+        "tag",
+        "name",
+        "attr",
+        "variable",
+        "params",
+        "operator",
+        "punctuation",
+    ];
+    for scope in [
+        Scope::Keyword,
+        Scope::BuiltIn,
+        Scope::Literal,
+        Scope::Number,
+        Scope::Regexp,
+        Scope::String,
+        Scope::Comment,
+        Scope::DocTag,
+        Scope::Meta,
+        Scope::Function,
+        Scope::Title,
+        Scope::Class,
+        Scope::Type,
+        Scope::Tag,
+        Scope::Name,
+        Scope::Attr,
+        Scope::Variable,
+        Scope::Params,
+        Scope::Operator,
+        Scope::Punctuation,
+        Scope::Plain,
+    ] {
+        assert!(
+            valid.contains(&scope.theme_key()),
+            "unknown key: {}",
+            scope.theme_key()
+        );
+    }
+}
