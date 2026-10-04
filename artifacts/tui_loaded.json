@@ -1,0 +1,16 @@
+{
+  "schema": "pi.native.mem_bench.v1",
+  "generated_at": "2026-10-04T11:17:53.621381+00:00",
+  "results": [
+    {
+      "target": "pi-node",
+      "kind": "node",
+      "command": "pi --session /home/vedaru/.pi/agent/sessions/--home-vedaru--/2026-10-04T05-20-33-350Z_01a1055b-5246-75b5-aadf-3df82e0b9a99.jsonl",
+      "taxonomy": "tui-loaded",
+      "rss_bytes": 217108480,
+      "rss_min_bytes": 217108480,
+      "rss_max_bytes": 217108480,
+      "sample_count": 5
+    }
+  ]
+}
