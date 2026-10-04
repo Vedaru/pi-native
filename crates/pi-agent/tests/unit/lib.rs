@@ -318,3 +318,61 @@ fn context_byte_limit_bounds_retained_output() {
         agent.messages().len()
     );
 }
+
+struct StubSummarizer;
+
+impl Summarizer for StubSummarizer {
+    fn summarize(&self, messages: &[TranscriptMessage]) -> Result<String, AgentError> {
+        Ok(format!("summarized {} messages", messages.len()))
+    }
+}
+
+#[test]
+fn compaction_summarizes_older_messages() {
+    let provider = FnProvider::new(|index| {
+        if index < 30 {
+            AssistantTurn {
+                tool_calls: vec![ToolCall {
+                    id: format!("c{index}"),
+                    name: "echo".into(),
+                    arguments: json!({ "text": "x".repeat(400) }),
+                }],
+                stop_reason: Some("tool_use".into()),
+                ..Default::default()
+            }
+        } else {
+            AssistantTurn {
+                text: "done".into(),
+                ..Default::default()
+            }
+        }
+    });
+    let mut agent = Agent::new(
+        Box::new(provider),
+        vec![Box::new(EchoTool)],
+        "s",
+        ToolContext::new(std::env::temp_dir()),
+    )
+    .with_max_iterations(40)
+    .with_compaction(2_000, 500)
+    .with_summarizer(std::sync::Arc::new(StubSummarizer));
+    agent.push_user("go");
+
+    let mut compactions = 0usize;
+    agent
+        .run_with(|event| {
+            if matches!(event, AgentEvent::Compacted { .. }) {
+                compactions += 1;
+            }
+        })
+        .expect("runs");
+
+    assert!(compactions > 0, "compaction never ran");
+    match &agent.messages()[0] {
+        TranscriptMessage::UserText(text) => assert!(
+            text.starts_with("[Earlier conversation summary]"),
+            "first message is not a summary: {text}"
+        ),
+        other => panic!("expected summary, got {other:?}"),
+    }
+}

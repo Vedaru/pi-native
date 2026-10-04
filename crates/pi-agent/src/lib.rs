@@ -80,6 +80,11 @@ pub enum AgentEvent {
     Done {
         stop_reason: Option<String>,
     },
+    /// Context was compacted: `dropped` older messages were replaced by `summary`.
+    Compacted {
+        dropped: usize,
+        summary: Option<String>,
+    },
 }
 
 /// A provider that returns pre-scripted turns; for tests and embedding.
@@ -148,6 +153,15 @@ pub trait ModelProvider {
     fn complete(&self, request: &CompletionRequest<'_>) -> Result<AssistantTurn, AgentError>;
 }
 
+/// Default tokens reserved for the prompt tail and the model's response, matching
+/// pi's `reserveTokens`.
+pub const DEFAULT_RESERVE_TOKENS: usize = 16_384;
+
+/// Turns a span of older messages into a short summary.
+pub trait Summarizer: Send + Sync {
+    fn summarize(&self, messages: &[TranscriptMessage]) -> Result<String, AgentError>;
+}
+
 /// Whether a tool may run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Approval {
@@ -191,6 +205,8 @@ pub struct Agent {
     context_window: Option<usize>,
     context_bytes: Option<usize>,
     retained_bytes: usize,
+    compaction: Option<(usize, usize)>,
+    summarizer: Option<Arc<dyn Summarizer>>,
 }
 
 impl Agent {
@@ -211,6 +227,8 @@ impl Agent {
             context_window: None,
             context_bytes: None,
             retained_bytes: 0,
+            compaction: None,
+            summarizer: None,
         }
     }
 
@@ -246,12 +264,92 @@ impl Agent {
         self
     }
 
+    /// Compact when estimated context tokens exceed
+    /// `context_window_tokens - reserve_tokens` (pi's rule). The reserve also
+    /// determines how much recent tail is kept.
+    pub fn with_compaction(mut self, context_window_tokens: usize, reserve_tokens: usize) -> Self {
+        self.compaction = Some((context_window_tokens, reserve_tokens));
+        self
+    }
+
+    /// Use `summarizer` to summarize the dropped span. Without one, a visible
+    /// placeholder marks the omission (never a silent drop).
+    pub fn with_summarizer(mut self, summarizer: Arc<dyn Summarizer>) -> Self {
+        self.summarizer = Some(summarizer);
+        self
+    }
+
+    fn total_tokens(&self) -> usize {
+        self.messages
+            .iter()
+            .map(TranscriptMessage::approx_tokens)
+            .sum()
+    }
+
     fn push(&mut self, message: TranscriptMessage) {
         self.retained_bytes += message.approx_bytes();
         self.messages.push(message);
     }
 
-    fn trim_context(&mut self) {
+    /// Apply context policy: token-based compaction (pi's rule), then the
+    /// message-count window, then the byte budget. Returns a `Compacted` event
+    /// when compaction happened.
+    pub fn push_user(&mut self, text: impl Into<String>) {
+        self.push(TranscriptMessage::UserText(text.into()));
+    }
+
+    pub fn messages(&self) -> &[TranscriptMessage] {
+        &self.messages
+    }
+
+    /// Approximate retained transcript size in bytes (for the byte budget).
+    pub fn retained_bytes(&self) -> usize {
+        self.retained_bytes
+    }
+
+    fn enforce_context(&mut self) -> Option<AgentEvent> {
+        // Token-based compaction: compact when estimated tokens exceed
+        // `context_window - reserve_tokens`; keep a recent tail worth `reserve`.
+        if let Some((window, reserve)) = self.compaction {
+            let threshold = window.saturating_sub(reserve);
+            if self.total_tokens() > threshold {
+                let mut tail_tokens = 0usize;
+                let mut cut = self.messages.len();
+                while cut > 0 {
+                    let tokens = self.messages[cut - 1].approx_tokens();
+                    if tail_tokens + tokens > reserve {
+                        break;
+                    }
+                    tail_tokens += tokens;
+                    cut -= 1;
+                }
+                if cut > 0 {
+                    let dropped = cut;
+                    let summary = if let Some(summarizer) = &self.summarizer {
+                        summarizer.summarize(&self.messages[..cut]).ok()
+                    } else {
+                        None
+                    };
+                    let marker = match &summary {
+                        Some(text) => format!("[Earlier conversation summary]\n{text}"),
+                        None => {
+                            format!(
+                                "[{dropped} earlier messages omitted to fit the context window]"
+                            )
+                        }
+                    };
+                    self.messages.drain(0..cut);
+                    self.messages.insert(0, TranscriptMessage::UserText(marker));
+                    self.retained_bytes = self
+                        .messages
+                        .iter()
+                        .map(TranscriptMessage::approx_bytes)
+                        .sum();
+                    return Some(AgentEvent::Compacted { dropped, summary });
+                }
+            }
+        }
+
         if let Some(window) = self.context_window {
             if self.messages.len() > window {
                 let excess = self.messages.len() - window;
@@ -267,19 +365,7 @@ impl Agent {
                 self.retained_bytes = self.retained_bytes.saturating_sub(message.approx_bytes());
             }
         }
-    }
-
-    pub fn push_user(&mut self, text: impl Into<String>) {
-        self.push(TranscriptMessage::UserText(text.into()));
-    }
-
-    pub fn messages(&self) -> &[TranscriptMessage] {
-        &self.messages
-    }
-
-    /// Approximate retained transcript size in bytes (for the byte budget).
-    pub fn retained_bytes(&self) -> usize {
-        self.retained_bytes
+        None
     }
 
     /// Run the model/tool loop, collecting events. Convenience wrapper over
@@ -323,7 +409,9 @@ impl Agent {
             if !blocks.is_empty() {
                 self.push(TranscriptMessage::Assistant(blocks));
             }
-            self.trim_context();
+            if let Some(event) = self.enforce_context() {
+                on_event(&event);
+            }
 
             if turn.tool_calls.is_empty() {
                 on_event(&AgentEvent::Done {
@@ -352,7 +440,9 @@ impl Agent {
                     is_error: result.is_error,
                 });
             }
-            self.trim_context();
+            if let Some(event) = self.enforce_context() {
+                on_event(&event);
+            }
         }
 
         on_event(&AgentEvent::Done {

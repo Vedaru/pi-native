@@ -7,7 +7,7 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use pi_agent::{
     anthropic_provider, Agent, AgentEvent, AllowAll, Approval, Approver, AssistantTurn, DenyAll,
-    FnProvider, ToolCall,
+    FnProvider, ToolCall, DEFAULT_RESERVE_TOKENS,
 };
 use pi_cache::{
     clamp_openai_prompt_cache_key, get_cache_control, openai_completions_prompt_cache_key,
@@ -49,9 +49,12 @@ struct Cli {
     /// Tool used by --stress: ls (default), grep, find, edit, or read.
     #[arg(long, default_value = "ls")]
     stress_tool: String,
-    /// Context byte budget in MB for --stress; 0 disables the budget.
-    #[arg(long, default_value_t = 16)]
+    /// Context byte budget in MB for --stress; 0 disables (compaction is the bound).
+    #[arg(long, default_value_t = 0)]
     stress_byte_limit_mb: usize,
+    /// Token context window for --stress compaction (reserve is 16,384).
+    #[arg(long, default_value_t = 32000)]
+    stress_context_tokens: usize,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -120,7 +123,12 @@ fn main() {
         return;
     }
     if let Some(turns) = cli.stress {
-        run_stress(turns, &cli.stress_tool, cli.stress_byte_limit_mb);
+        run_stress(
+            turns,
+            &cli.stress_tool,
+            cli.stress_byte_limit_mb,
+            cli.stress_context_tokens,
+        );
         return;
     }
     if let Some(prompt) = cli.print {
@@ -202,6 +210,9 @@ fn run_print(prompt: &str, model: &str, yolo: bool) {
                         eprintln!("[tool {name} {}]", if is_error { "error" } else { "ok" })
                     }
                     AgentEvent::Done { .. } => {}
+                    AgentEvent::Compacted { dropped, .. } => {
+                        eprintln!("[compacted {dropped} messages]")
+                    }
                 }
             }
         }
@@ -235,7 +246,7 @@ impl Approver for TerminalApprover {
 /// tiny output, then a final message. No network, no subprocesses, and a
 /// constant per-tool-result size, so the measured memory is the harness
 /// overhead rather than the size of a directory listing.
-fn run_stress(turns: usize, tool: &str, byte_limit_mb: usize) {
+fn run_stress(turns: usize, tool: &str, byte_limit_mb: usize, context_tokens: usize) {
     // A small workspace is created per run so each tool has a deterministic input.
     let dir = std::env::temp_dir().join(format!("pi-stress-{}-{tool}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -296,7 +307,7 @@ fn run_stress(turns: usize, tool: &str, byte_limit_mb: usize) {
         ToolContext::new(&dir),
     )
     .with_max_iterations(turns + 2)
-    .with_context_window(4096);
+    .with_compaction(context_tokens, DEFAULT_RESERVE_TOKENS);
     let mut agent = if byte_limit_mb > 0 {
         agent.with_context_byte_limit(byte_limit_mb * 1024 * 1024)
     } else {
@@ -308,18 +319,21 @@ fn run_stress(turns: usize, tool: &str, byte_limit_mb: usize) {
     // every event (which would duplicate tool output for the whole turn).
     let mut tool_results = 0usize;
     let mut tool_errors = 0usize;
-    let result = agent.run_with(|event| {
-        if let AgentEvent::ToolEnd { is_error, .. } = event {
+    let mut compactions = 0usize;
+    let result = agent.run_with(|event| match event {
+        AgentEvent::ToolEnd { is_error, .. } => {
             tool_results += 1;
             if *is_error {
                 tool_errors += 1;
             }
         }
+        AgentEvent::Compacted { .. } => compactions += 1,
+        _ => {}
     });
     match result {
         Ok(()) => {
             println!(
-                "stress[{tool}]: {turns} turns, {} messages, {tool_results} tool results, {tool_errors} errors",
+                "stress[{tool}]: {turns} turns, {} messages, {tool_results} tool results, {tool_errors} errors, {compactions} compactions",
                 agent.messages().len()
             );
             if let Some(peak_mb) = peak_rss_mb() {

@@ -50,6 +50,11 @@ pub enum Event {
     Done {
         stop_reason: Option<String>,
     },
+    /// Older messages were compacted into a summary.
+    Compacted {
+        dropped: usize,
+        summary: Option<String>,
+    },
     State {
         messages: usize,
     },
@@ -100,6 +105,7 @@ fn from_agent_event(event: AgentEvent) -> Event {
             content,
         },
         AgentEvent::Done { stop_reason } => Event::Done { stop_reason },
+        AgentEvent::Compacted { dropped, summary } => Event::Compacted { dropped, summary },
     }
 }
 

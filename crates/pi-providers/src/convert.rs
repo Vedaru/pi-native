@@ -167,6 +167,11 @@ fn block_bytes(block: &AssistantBlock) -> usize {
 }
 
 impl TranscriptMessage {
+    /// Approximate token count (bytes / 4), matching pi's rough estimator.
+    pub fn approx_tokens(&self) -> usize {
+        self.approx_bytes().div_ceil(4)
+    }
+
     /// Approximate serialized size in bytes, for context budgeting.
     pub fn approx_bytes(&self) -> usize {
         match self {
