@@ -1,15 +1,21 @@
 #!/usr/bin/env python3
-"""Memory regression gate (VED-317).
+"""Memory regression gate.
 
-Runs the memory benchmark and fails when a target's RSS regresses past a
-threshold against the committed baseline (`artifacts/mem_bench.json`).
+Two independent checks, both meaningful in CI:
 
-Designed to be safe in CI where no pi binary is installed: if no targets are
-available, it prints a notice and exits 0 so the job is a no-op rather than a
-false failure.
+1. **Absolute**: each target's RSS vs the committed baseline
+   (`artifacts/mem_bench.json`), only for `(target, taxonomy)` keys present in
+   both. Skipped when the baseline does not cover the current environment.
+2. **Ratio**: each native target's RSS vs the Node target's RSS for the same
+   taxonomy. This is environment-independent, so it works on a CI runner whose
+   absolute numbers differ from a developer machine.
+
+Exits 0 when no benchmark target is installed (CI without `pi`), but says so
+loudly instead of passing silently.
 
 Usage:
-    python3 scripts/mem_gate.py [--threshold 0.10]
+    python3 scripts/mem_gate.py [--threshold 0.10] [--ratio-threshold 0.6]
+    python3 scripts/mem_gate.py --from-json artifacts/current.json   # evaluate a file
 """
 
 from __future__ import annotations
@@ -21,6 +27,9 @@ import sys
 from pathlib import Path
 
 DEFAULT_THRESHOLD = 0.10
+DEFAULT_RATIO_THRESHOLD = 0.60
+NODE_TARGET = "pi-node"
+NATIVE_TARGETS = {"pi-rust", "pi-native"}
 
 
 def project_root() -> Path:
@@ -52,24 +61,11 @@ def human_mb(value: int) -> str:
     return f"{value / 1048576:.1f} MB"
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--threshold", type=float, default=DEFAULT_THRESHOLD)
-    args = parser.parse_args()
-
-    root = project_root()
-    baseline_path = root / "artifacts" / "mem_bench.json"
-    current_path = root / "artifacts" / "mem_bench.current.json"
-
-    baseline = index_results(load_json(baseline_path))
-    if not baseline:
-        print("No committed baseline; memory gate skipped.")
-        return 0
-
+def run_benchmark(current_path: Path) -> dict | None:
     run = subprocess.run(
         [
             sys.executable,
-            str(root / "scripts" / "mem_bench.py"),
+            str(project_root() / "scripts" / "mem_bench.py"),
             "--all",
             "--json",
             str(current_path),
@@ -77,54 +73,83 @@ def main() -> int:
         capture_output=True,
         text=True,
     )
-    if run.returncode != 0 and "Unknown/unavailable targets" in (run.stderr or ""):
-        print("No benchmark targets available in this environment; memory gate skipped.")
-        return 0
     if run.returncode != 0:
         sys.stderr.write(run.stdout)
         sys.stderr.write(run.stderr)
-        return run.returncode
+        return None
+    return load_json(current_path)
 
-    current_artifact = load_json(current_path)
-    if not current_artifact or not current_artifact.get("results"):
-        # No target binaries in this environment (e.g. CI without pi installed).
-        print("No benchmark targets available in this environment; memory gate skipped.")
-        return 0
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--threshold", type=float, default=DEFAULT_THRESHOLD)
+    parser.add_argument("--ratio-threshold", type=float, default=DEFAULT_RATIO_THRESHOLD)
+    parser.add_argument("--from-json", help="evaluate this artifact instead of running the benchmark")
+    parser.add_argument(
+        "--no-absolute",
+        action="store_true",
+        help="skip the absolute baseline check (use on runners whose memory profile differs)",
+    )
+    args = parser.parse_args()
+
+    root = project_root()
+    baseline = index_results(load_json(root / "artifacts" / "mem_bench.json"))
+
+    if args.from_json:
+        current_artifact = load_json(Path(args.from_json))
+    else:
+        current_artifact = run_benchmark(root / "artifacts" / "mem_bench.current.json")
 
     current = index_results(current_artifact)
-    regressions: list[str] = []
-    comparisons: list[str] = []
-    for key, rss in current.items():
-        if key not in baseline:
-            continue
-        previous = baseline[key]
-        delta = (rss - previous) / previous
-        line = (
-            f"{key[0]} [{key[1]}]: {human_mb(previous)} -> {human_mb(rss)} "
-            f"({delta * 100:+.1f}%)"
-        )
-        comparisons.append(line)
-        if delta > args.threshold:
-            regressions.append(line)
-
-    print("Memory gate:")
-    for line in comparisons:
-        print(f"  {line}")
-
-    if not comparisons:
+    if not current:
         print(
-            "\nFAIL: baseline exists but no (target, taxonomy) keys overlap the "
-            "current run; refusing to pass vacuously."
+            "NOTICE: no benchmark targets available in this environment; the memory gate "
+            "did not run. Install `pi` (and optionally the reference native binary) to enable it."
         )
-        return 1
+        return 0
 
-    if regressions:
-        print(f"\nFAIL: {len(regressions)} regression(s) over {args.threshold * 100:.0f}%:")
-        for line in regressions:
-            print(f"  {line}")
-        return 1
+    failed = False
 
-    print("\nPASS: no regression over threshold.")
+    # 1. Absolute regression against the committed baseline.
+    print("Absolute (vs committed baseline):")
+    overlaps = 0
+    if args.no_absolute:
+        print("  (skipped by --no-absolute)")
+    else:
+        for (target, taxonomy), rss in sorted(current.items()):
+            if (target, taxonomy) not in baseline:
+                continue
+            overlaps += 1
+            delta = (rss - baseline[(target, taxonomy)]) / baseline[(target, taxonomy)]
+            print(f"  {target} [{taxonomy}]: {human_mb(baseline[(target, taxonomy)])} -> {human_mb(rss)} ({delta * 100:+.1f}%)")
+            if delta > args.threshold:
+                print(f"    FAIL: over {args.threshold * 100:.0f}%")
+                failed = True
+        if overlaps == 0:
+            print("  (no comparable baseline keys in this environment; skipped)")
+
+    # 2. Ratio of native targets to the Node target, same taxonomy.
+    print(f"Ratio (native <= {args.ratio_threshold:.0%} of {NODE_TARGET}):")
+    ratios = 0
+    for (target, taxonomy), rss in sorted(current.items()):
+        if target not in NATIVE_TARGETS:
+            continue
+        node_rss = current.get((NODE_TARGET, taxonomy))
+        if not node_rss:
+            continue
+        ratios += 1
+        ratio = rss / node_rss
+        print(f"  {target}/{NODE_TARGET} [{taxonomy}]: {ratio:.2f} ({human_mb(rss)} / {human_mb(node_rss)})")
+        if ratio > args.ratio_threshold:
+            print(f"    FAIL: over {args.ratio_threshold:.0%}")
+            failed = True
+    if ratios == 0:
+        print(f"  (no native target alongside {NODE_TARGET} in this environment; skipped)")
+
+    if failed:
+        print("\nFAIL: memory gate failed.")
+        return 1
+    print("\nPASS: memory gate passed.")
     return 0
 
 

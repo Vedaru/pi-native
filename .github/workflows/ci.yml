@@ -24,6 +24,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # Skips cleanly when no benchmark target (pi) is installed.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install benchmark targets
+        run: |
+          npm install -g --ignore-scripts @earendil-works/pi-coding-agent@1.0.2
+          curl -sL -o /tmp/pi-rust.tar.xz https://github.com/Dicklesworthstone/pi_agent_rust/releases/download/v0.7.1/pi-linux-amd64.tar.xz
+          mkdir -p /tmp/pi-rust
+          tar -xJf /tmp/pi-rust.tar.xz -C /tmp/pi-rust
+          echo "PI_RUST_BIN=/tmp/pi-rust/pi" >> "$GITHUB_ENV"
+      # Absolute baseline is a dev-machine measurement, so CI uses the
+      # environment-independent ratio check (native <= 60% of Node).
       - name: Memory regression gate
-        run: python3 scripts/mem_gate.py --threshold 0.10
+        run: python3 scripts/mem_gate.py --no-absolute --ratio-threshold 0.6
