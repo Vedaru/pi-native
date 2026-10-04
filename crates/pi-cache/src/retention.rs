@@ -40,7 +40,10 @@ pub struct CacheControlResult {
 
 /// Resolve retention: an explicit choice wins, else `PI_CACHE_RETENTION ==
 /// "long"` selects long, else short. `none` is only reachable explicitly.
-pub fn resolve_cache_retention(explicit: Option<CacheRetention>, env_value: Option<&str>) -> CacheRetention {
+pub fn resolve_cache_retention(
+    explicit: Option<CacheRetention>,
+    env_value: Option<&str>,
+) -> CacheRetention {
     if let Some(retention) = explicit {
         return retention;
     }
@@ -54,7 +57,10 @@ pub fn resolve_cache_retention(explicit: Option<CacheRetention>, env_value: Opti
 ///
 /// `none` yields no marker at all. `long` adds `ttl: "1h"` only when the model
 /// advertises support for long retention.
-pub fn get_cache_control(retention: CacheRetention, supports_long_cache_retention: bool) -> CacheControlResult {
+pub fn get_cache_control(
+    retention: CacheRetention,
+    supports_long_cache_retention: bool,
+) -> CacheControlResult {
     if retention == CacheRetention::None {
         return CacheControlResult {
             retention,
@@ -93,8 +99,14 @@ mod tests {
 
     #[test]
     fn env_long_selects_long_otherwise_short() {
-        assert_eq!(resolve_cache_retention(None, Some("long")), CacheRetention::Long);
-        assert_eq!(resolve_cache_retention(None, Some("short")), CacheRetention::Short);
+        assert_eq!(
+            resolve_cache_retention(None, Some("long")),
+            CacheRetention::Long
+        );
+        assert_eq!(
+            resolve_cache_retention(None, Some("short")),
+            CacheRetention::Short
+        );
         assert_eq!(resolve_cache_retention(None, None), CacheRetention::Short);
     }
 
@@ -136,7 +148,9 @@ mod tests {
 
     #[test]
     fn serializes_to_pi_wire_shape() {
-        let marker = get_cache_control(CacheRetention::Long, true).cache_control.unwrap();
+        let marker = get_cache_control(CacheRetention::Long, true)
+            .cache_control
+            .unwrap();
         let json = serde_json::to_string(&marker).unwrap();
         assert_eq!(json, r#"{"type":"ephemeral","ttl":"1h"}"#);
     }

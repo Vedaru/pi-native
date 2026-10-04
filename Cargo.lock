@@ -146,6 +146,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "pi-providers"
+version = "0.0.1"
+dependencies = [
+ "pi-cache",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "proc-macro2"
 version = "1.0.107"
 source = "registry+https://github.com/rust-lang/crates.io-index"

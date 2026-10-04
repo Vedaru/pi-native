@@ -15,11 +15,18 @@ pub fn clamp_openai_prompt_cache_key(key: Option<&str>) -> Option<String> {
     if key.chars().count() <= OPENAI_PROMPT_CACHE_KEY_MAX_LENGTH {
         return Some(key.to_string());
     }
-    Some(key.chars().take(OPENAI_PROMPT_CACHE_KEY_MAX_LENGTH).collect())
+    Some(
+        key.chars()
+            .take(OPENAI_PROMPT_CACHE_KEY_MAX_LENGTH)
+            .collect(),
+    )
 }
 
 /// `openai-responses.ts`: `cacheRetention === "none" ? undefined : clamp(sessionId)`.
-pub fn openai_responses_prompt_cache_key(retention: CacheRetention, session_id: Option<&str>) -> Option<String> {
+pub fn openai_responses_prompt_cache_key(
+    retention: CacheRetention,
+    session_id: Option<&str>,
+) -> Option<String> {
     if retention == CacheRetention::None {
         return None;
     }
@@ -61,7 +68,10 @@ mod tests {
 
     #[test]
     fn clamp_leaves_short_keys_untouched() {
-        assert_eq!(clamp_openai_prompt_cache_key(Some("abc")), Some("abc".to_string()));
+        assert_eq!(
+            clamp_openai_prompt_cache_key(Some("abc")),
+            Some("abc".to_string())
+        );
         assert_eq!(clamp_openai_prompt_cache_key(None), None);
     }
 
@@ -117,8 +127,17 @@ mod tests {
 
     #[test]
     fn retention_field_requires_long_and_support() {
-        assert_eq!(openai_prompt_cache_retention(CacheRetention::Long, true), Some("24h"));
-        assert_eq!(openai_prompt_cache_retention(CacheRetention::Long, false), None);
-        assert_eq!(openai_prompt_cache_retention(CacheRetention::Short, true), None);
+        assert_eq!(
+            openai_prompt_cache_retention(CacheRetention::Long, true),
+            Some("24h")
+        );
+        assert_eq!(
+            openai_prompt_cache_retention(CacheRetention::Long, false),
+            None
+        );
+        assert_eq!(
+            openai_prompt_cache_retention(CacheRetention::Short, true),
+            None
+        );
     }
 }

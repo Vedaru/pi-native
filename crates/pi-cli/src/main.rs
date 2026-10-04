@@ -97,7 +97,12 @@ fn main() {
             let key = if responses {
                 openai_responses_prompt_cache_key(retention, session_id.as_deref())
             } else {
-                openai_completions_prompt_cache_key(retention, session_id.as_deref(), openai_api, supports_long)
+                openai_completions_prompt_cache_key(
+                    retention,
+                    session_id.as_deref(),
+                    openai_api,
+                    supports_long,
+                )
             };
             println!(
                 "{}",

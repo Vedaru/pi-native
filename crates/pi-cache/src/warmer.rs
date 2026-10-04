@@ -46,7 +46,11 @@ pub fn get_cache_warming_delay_ms(ttl_ms: i64) -> Option<i64> {
 /// Whether replaying a request with a one-token output cap leaves its cache
 /// entry untouched. Anthropic budget-based thinking derives `budget_tokens`
 /// from `max_tokens`, which would be changed by the replay.
-pub fn is_replayable(reasoning: bool, is_anthropic_messages: bool, force_adaptive_thinking: bool) -> bool {
+pub fn is_replayable(
+    reasoning: bool,
+    is_anthropic_messages: bool,
+    force_adaptive_thinking: bool,
+) -> bool {
     if !reasoning || !is_anthropic_messages {
         return true;
     }

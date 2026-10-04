@@ -1,0 +1,12 @@
+[package]
+name = "pi-providers"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Provider request builders with pi-byte-parity cache semantics"
+
+[dependencies]
+pi-cache = { path = "../pi-cache" }
+serde = { workspace = true }
+serde_json = { workspace = true }

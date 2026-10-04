@@ -19,11 +19,12 @@ a pi-compatible implementation.
 
 ```
 crates/pi-cache/       provider prompt-cache primitives, ported from pi (VED-314)
+crates/pi-providers/   Anthropic/OpenAI request builders with pi's cache placement
 crates/pi-cli/         `pi-native` CLI (early scaffold)
 scripts/mem_bench.py   runtime memory benchmark (VED-302)
 config/                target and benchmark configuration
 artifacts/             generated measurement artifacts (committed for history)
-docs/                  decisions and notes
+docs/adr/              architecture decision records
 ```
 
 ## Build and test
@@ -56,6 +57,12 @@ cargo run -q -p pi-native -- prompt-cache-key --session-id sess-123 --responses
 
 Derived in part from pi (<https://github.com/earendil-works/pi>), MIT. See
 `LICENSE`.
+
+## Architecture
+
+See [`docs/adr/0001-host-architecture.md`](docs/adr/0001-host-architecture.md):
+native Rust host, embedded QuickJS (`rquickjs`) + `swc` for JS/TS extensions,
+native providers/HTTP, `crossterm` TUI. No Node runtime.
 
 
 ## Memory benchmark

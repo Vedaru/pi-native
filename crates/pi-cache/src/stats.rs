@@ -149,7 +149,10 @@ fn as_previous_request(message: &MissMessage, reported_cache: bool) -> Option<Pr
 }
 
 /// Scan entries, returning the trailing request state and cumulative waste.
-pub fn scan(entries: &[CacheEntry<'_>], models: &dyn ModelPriceSource) -> (Option<PreviousRequest>, CacheWasteTotals) {
+pub fn scan(
+    entries: &[CacheEntry<'_>],
+    models: &dyn ModelPriceSource,
+) -> (Option<PreviousRequest>, CacheWasteTotals) {
     let mut prev: Option<PreviousRequest> = None;
     let mut totals = CacheWasteTotals::default();
 
@@ -181,7 +184,10 @@ pub fn scan(entries: &[CacheEntry<'_>], models: &dyn ModelPriceSource) -> (Optio
                     totals.missed_cost += miss.missed_cost;
                     totals.miss_count += 1;
                 }
-                if let Some(next) = as_previous_request(message, prev.as_ref().map(|p| p.reported_cache).unwrap_or(false)) {
+                if let Some(next) = as_previous_request(
+                    message,
+                    prev.as_ref().map(|p| p.reported_cache).unwrap_or(false),
+                ) {
                     prev = Some(next);
                 }
             }
@@ -192,7 +198,10 @@ pub fn scan(entries: &[CacheEntry<'_>], models: &dyn ModelPriceSource) -> (Optio
 }
 
 /// Cumulative cache waste across a session.
-pub fn compute_cache_waste(entries: &[CacheEntry<'_>], models: &dyn ModelPriceSource) -> CacheWasteTotals {
+pub fn compute_cache_waste(
+    entries: &[CacheEntry<'_>],
+    models: &dyn ModelPriceSource,
+) -> CacheWasteTotals {
     scan(entries, models).1
 }
 
@@ -235,7 +244,10 @@ mod tests {
             reported_cache: true,
         };
         // missed = 10000 - 9000 = 1000 <= 1024 -> ignored.
-        assert_eq!(detect_miss(Some(&prev), &msg(1000, 9000, 0, 5), &NoPrices), None);
+        assert_eq!(
+            detect_miss(Some(&prev), &msg(1000, 9000, 0, 5), &NoPrices),
+            None
+        );
     }
 
     #[test]
