@@ -1,0 +1,16 @@
+[package]
+name = "pi-transpile"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "TypeScript/JSX transpilation for the native plugin host (swc)"
+
+[dependencies]
+swc_common = "26.0.0"
+swc_ecma_ast = "29.0.2"
+swc_ecma_parser = "45.1.6"
+swc_ecma_codegen = "32.0.3"
+swc_ecma_transforms_base = "49.0.1"
+swc_ecma_transforms_typescript = "55.0.4"
+swc_ecma_visit = "29.0.0"

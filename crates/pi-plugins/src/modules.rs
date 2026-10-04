@@ -109,7 +109,15 @@ impl Loader for PiLoader {
         // Relative/absolute file import.
         let path = name.strip_prefix("file://").unwrap_or(name);
         match std::fs::read_to_string(path) {
-            Ok(source) => Module::declare(ctx.clone(), name, source),
+            Ok(raw) => {
+                let source = if pi_transpile::needs_transpile(path) {
+                    pi_transpile::transpile(path, &raw)
+                        .map_err(|err| rquickjs::Error::new_loading_message(name, err))?
+                } else {
+                    raw
+                };
+                Module::declare(ctx.clone(), name, source)
+            }
             Err(error) => Err(rquickjs::Error::new_loading_message(
                 name,
                 format!("could not read {path}: {error}"),

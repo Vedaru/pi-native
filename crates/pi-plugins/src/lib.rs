@@ -132,6 +132,18 @@ impl PluginHost {
     /// Execute plugin source that registers itself against the `pi` global.
     /// Returns the hostcalls the plugin made.
     pub fn run(&self, source: &str) -> Result<Vec<HostCall>, PluginError> {
+        self.run_named("plugin://entry.js", source)
+    }
+
+    /// Execute plugin source under a filename so its extension selects the
+    /// transpiler (`.ts`/`.tsx`/`.jsx` are transpiled with `swc`).
+    pub fn run_named(&self, name: &str, source: &str) -> Result<Vec<HostCall>, PluginError> {
+        let prepared = if pi_transpile::needs_transpile(name) {
+            pi_transpile::transpile(name, source).map_err(PluginError::Engine)?
+        } else {
+            source.to_string()
+        };
+
         let runtime = Runtime::new().map_err(PluginError::from)?;
         runtime.set_loader(modules::PiResolver, modules::PiLoader);
         let context = Context::full(&runtime).map_err(PluginError::from)?;
@@ -139,7 +151,7 @@ impl PluginHost {
         context.with(|ctx| {
             self.install_pi_global(&ctx)?;
             install_env(&ctx)?;
-            let entry = Module::declare(ctx.clone(), "plugin://entry", source.as_bytes())?;
+            let entry = Module::declare(ctx.clone(), name, prepared.as_bytes())?;
             // Module bodies run synchronously; top-level await is not supported yet.
             let _ = entry.eval()?;
             Ok::<(), PluginError>(())
@@ -357,5 +369,17 @@ mod tests {
             .run(r#"import pkg from "some-npm-pkg"; pkg.anything(); pi.log("loaded");"#)
             .expect("runs");
         assert_eq!(calls[0].args, serde_json::json!("loaded"));
+    }
+
+    #[test]
+    fn runs_a_typescript_entrypoint() {
+        let host = PluginHost::new(PluginPolicy::permissive());
+        let calls = host
+            .run_named(
+                "plugin.ts",
+                r#"const n: number = 41; pi.log("n=" + (n + 1));"#,
+            )
+            .expect("runs");
+        assert_eq!(calls[0].args, serde_json::json!("n=42"));
     }
 }
