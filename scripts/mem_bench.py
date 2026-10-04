@@ -146,7 +146,19 @@ def resolve_targets() -> dict[str, dict]:
     return targets
 
 
-def measure_target(name: str, spec: dict, settle: float, interval: float, count: int) -> dict:
+def measure_target(
+    name: str,
+    spec: dict,
+    settle: float,
+    interval: float,
+    count: int,
+    extra_args: list[str] | None = None,
+    taxonomy: str = IDLE_TAXONOMY,
+) -> dict:
+    argv = list(spec["argv"]) + list(extra_args or [])
+    if "--session" in (extra_args or []):
+        # `--no-session` and `--session` are mutually exclusive.
+        argv = [arg for arg in argv if arg != "--no-session"]
     env = dict(os.environ)
     env.update(spec.get("env", {}))
     env.setdefault("PI_OFFLINE", "1")
@@ -154,7 +166,7 @@ def measure_target(name: str, spec: dict, settle: float, interval: float, count:
     env.setdefault("NO_COLOR", "1")
 
     proc = subprocess.Popen(
-        spec["argv"],
+        argv,
         env=env,
         stdin=subprocess.PIPE,
         stdout=subprocess.DEVNULL,
@@ -165,10 +177,10 @@ def measure_target(name: str, spec: dict, settle: float, interval: float, count:
     result: dict = {
         "target": name,
         "kind": spec.get("kind", "unknown"),
-        "command": " ".join(spec["argv"]),
-        "binary": spec["argv"][0],
-        "binary_sha256": sha256_file(Path(spec["argv"][0])),
-        "taxonomy": IDLE_TAXONOMY,
+        "command": " ".join(argv),
+        "binary": argv[0],
+        "binary_sha256": sha256_file(Path(argv[0])),
+        "taxonomy": taxonomy,
         "settle_seconds": settle,
         "sample_interval_seconds": interval,
         "samples_bytes": [],
@@ -230,6 +242,11 @@ def main() -> int:
     parser.add_argument("--samples", type=int, default=DEFAULT_SAMPLE_COUNT)
     parser.add_argument("--json", help="write the artifact to this path")
     parser.add_argument("--list", action="store_true", help="list detected targets and exit")
+    parser.add_argument(
+        "--session",
+        help="load this session JSONL in every target (taxonomy: session-loaded)",
+    )
+    parser.add_argument("--taxonomy", help="override the idle-taxonomy label")
     args = parser.parse_args()
 
     targets = resolve_targets()
@@ -253,9 +270,19 @@ def main() -> int:
         return 1
 
     results = []
+    extra_args = ["--session", args.session] if args.session else []
+    taxonomy = args.taxonomy or ("session-loaded" if args.session else IDLE_TAXONOMY)
     for name in selected:
         print(f"Measuring {name} ...", flush=True)
-        res = measure_target(name, targets[name], args.settle, args.interval, args.samples)
+        res = measure_target(
+            name,
+            targets[name],
+            args.settle,
+            args.interval,
+            args.samples,
+            extra_args=extra_args,
+            taxonomy=taxonomy,
+        )
         results.append(res)
         if res.get("error"):
             print(f"  {name}: FAILED - {res['error']} ({len(res.get('samples_bytes', []))} samples)")
@@ -274,7 +301,7 @@ def main() -> int:
             "machine": platform.machine(),
             "python": platform.python_version(),
         },
-        "idle_taxonomy": IDLE_TAXONOMY,
+        "idle_taxonomy": taxonomy,
         "taxonomies_declared": TAXONOMIES,
         "results": results,
     }

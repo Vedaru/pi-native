@@ -1,12 +1,12 @@
 {
   "schema": "pi.native.mem_bench.v1",
-  "generated_at": "2026-10-04T08:53:30.757728+00:00",
+  "generated_at": "2026-10-04T09:18:01.972364+00:00",
   "host": {
     "platform": "Linux-7.1.8-aw88399-x86_64-with-glibc2.43",
     "machine": "x86_64",
     "python": "3.14.4"
   },
-  "idle_taxonomy": "cold-idle",
+  "idle_taxonomy": "session-loaded",
   "taxonomies_declared": [
     "cold-idle",
     "warm-idle",
@@ -18,46 +18,24 @@
     {
       "target": "pi-node",
       "kind": "node",
-      "command": "/usr/local/bin/pi --mode rpc --no-session",
+      "command": "/usr/local/bin/pi --mode rpc --session /home/vedaru/.pi/agent/sessions/--home-vedaru--/2026-10-04T05-20-33-350Z_01a1055b-5246-75b5-aadf-3df82e0b9a99.jsonl",
       "binary": "/usr/local/bin/pi",
       "binary_sha256": "e79626f2dd6f94aa45d30f3fa63cd84319a6eefcd150b353cfaf274366926774",
-      "taxonomy": "cold-idle",
+      "taxonomy": "session-loaded",
       "settle_seconds": 5.0,
       "sample_interval_seconds": 1.0,
       "samples_bytes": [
-        117108736,
-        117112832,
-        117112832,
-        117112832,
-        99811328
+        130723840,
+        130727936,
+        130727936,
+        130727936,
+        130727936
       ],
       "sample_count": 5,
-      "rss_bytes": 117112832,
-      "rss_min_bytes": 99811328,
-      "rss_max_bytes": 117112832,
-      "rss_spread_bytes": 17301504
-    },
-    {
-      "target": "pi-rust",
-      "kind": "native",
-      "command": "/tmp/pi-rust/pi --rpc --no-session --provider anthropic --model claude-sonnet-4-5",
-      "binary": "/tmp/pi-rust/pi",
-      "binary_sha256": "980995334c6ee7e2ca70b9d3f9a4e49408b1069541ba912bf2b4d0c2b80fd027",
-      "taxonomy": "cold-idle",
-      "settle_seconds": 5.0,
-      "sample_interval_seconds": 1.0,
-      "samples_bytes": [
-        40742912,
-        40742912,
-        40742912,
-        40742912,
-        40742912
-      ],
-      "sample_count": 5,
-      "rss_bytes": 40742912,
-      "rss_min_bytes": 40742912,
-      "rss_max_bytes": 40742912,
-      "rss_spread_bytes": 0
+      "rss_bytes": 130727936,
+      "rss_min_bytes": 130723840,
+      "rss_max_bytes": 130727936,
+      "rss_spread_bytes": 4096
     }
   ]
 }

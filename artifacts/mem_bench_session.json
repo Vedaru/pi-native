@@ -1,0 +1,63 @@
+{
+  "schema": "pi.native.mem_bench.v1",
+  "generated_at": "2026-10-04T09:18:24.566302+00:00",
+  "host": {
+    "platform": "Linux-7.1.8-aw88399-x86_64-with-glibc2.43",
+    "machine": "x86_64",
+    "python": "3.14.4"
+  },
+  "idle_taxonomy": "session-loaded",
+  "taxonomies_declared": [
+    "cold-idle",
+    "warm-idle",
+    "post-conversation",
+    "post-compaction",
+    "post-tool-heavy"
+  ],
+  "results": [
+    {
+      "target": "pi-node",
+      "kind": "node",
+      "command": "/usr/local/bin/pi --mode rpc --session /home/vedaru/.pi/agent/sessions/--home-vedaru--/2026-10-04T05-20-33-350Z_01a1055b-5246-75b5-aadf-3df82e0b9a99.jsonl",
+      "binary": "/usr/local/bin/pi",
+      "binary_sha256": "e79626f2dd6f94aa45d30f3fa63cd84319a6eefcd150b353cfaf274366926774",
+      "taxonomy": "session-loaded",
+      "settle_seconds": 5.0,
+      "sample_interval_seconds": 1.0,
+      "samples_bytes": [
+        130867200,
+        130867200,
+        130867200,
+        130867200,
+        105340928
+      ],
+      "sample_count": 5,
+      "rss_bytes": 130867200,
+      "rss_min_bytes": 105340928,
+      "rss_max_bytes": 130867200,
+      "rss_spread_bytes": 25526272
+    },
+    {
+      "target": "pi-rust",
+      "kind": "native",
+      "command": "/tmp/pi-rust/pi --rpc --provider anthropic --model claude-sonnet-4-5 --session /home/vedaru/.pi/agent/sessions/--home-vedaru--/2026-10-04T05-20-33-350Z_01a1055b-5246-75b5-aadf-3df82e0b9a99.jsonl",
+      "binary": "/tmp/pi-rust/pi",
+      "binary_sha256": "980995334c6ee7e2ca70b9d3f9a4e49408b1069541ba912bf2b4d0c2b80fd027",
+      "taxonomy": "session-loaded",
+      "settle_seconds": 5.0,
+      "sample_interval_seconds": 1.0,
+      "samples_bytes": [
+        53166080,
+        53166080,
+        53166080,
+        53166080,
+        53166080
+      ],
+      "sample_count": 5,
+      "rss_bytes": 53166080,
+      "rss_min_bytes": 53166080,
+      "rss_max_bytes": 53166080,
+      "rss_spread_bytes": 0
+    }
+  ]
+}
