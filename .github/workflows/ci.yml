@@ -42,4 +42,4 @@ jobs:
       # Absolute baseline is a dev-machine measurement, so CI uses the
       # environment-independent ratio check (native <= 60% of Node).
       - name: Memory regression gate
-        run: python3 scripts/mem_gate.py --no-absolute --ratio-threshold 0.6
+        run: python3 scripts/mem_gate.py --no-absolute --ratio-threshold 0.6 --max-native-mb 25

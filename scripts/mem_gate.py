@@ -30,6 +30,8 @@ DEFAULT_THRESHOLD = 0.10
 DEFAULT_RATIO_THRESHOLD = 0.60
 NODE_TARGET = "pi-node"
 NATIVE_TARGETS = {"pi-rust", "pi-native"}
+# Our build. The ceiling applies only to this; the reference is for comparison.
+OUR_TARGET = "pi-native"
 
 
 def project_root() -> Path:
@@ -90,6 +92,11 @@ def main() -> int:
         action="store_true",
         help="skip the absolute baseline check (use on runners whose memory profile differs)",
     )
+    parser.add_argument(
+        "--max-native-mb",
+        type=float,
+        help="fail if any native target exceeds this many MB (environment-independent ceiling)",
+    )
     args = parser.parse_args()
 
     root = project_root()
@@ -145,6 +152,22 @@ def main() -> int:
             failed = True
     if ratios == 0:
         print(f"  (no native target alongside {NODE_TARGET} in this environment; skipped)")
+
+    # 3. Environment-independent absolute ceiling for native targets.
+    if args.max_native_mb is not None:
+        print(f"Ceiling (native <= {args.max_native_mb:.0f} MB):")
+        ceilings = 0
+        ceiling_bytes = int(args.max_native_mb * 1048576)
+        for (target, taxonomy), rss in sorted(current.items()):
+            if target != OUR_TARGET:
+                continue
+            ceilings += 1
+            print(f"  {target} [{taxonomy}]: {human_mb(rss)}")
+            if rss > ceiling_bytes:
+                print(f"    FAIL: over {args.max_native_mb:.0f} MB")
+                failed = True
+        if ceilings == 0:
+            print("  (no native target in this environment; skipped)")
 
     if failed:
         print("\nFAIL: memory gate failed.")

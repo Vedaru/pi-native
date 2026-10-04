@@ -1,6 +1,6 @@
 {
   "schema": "pi.native.mem_bench.v1",
-  "generated_at": "2026-10-04T11:25:55.770873+00:00",
+  "generated_at": "2026-10-04T12:08:39.359938+00:00",
   "host": {
     "platform": "Linux-7.1.8-aw88399-x86_64-with-glibc2.43",
     "machine": "x86_64",
@@ -16,26 +16,70 @@
   ],
   "results": [
     {
-      "target": "pi-native",
-      "kind": "native",
-      "command": "/tmp/heavy-pi --rpc --no-session",
-      "binary": "/tmp/heavy-pi",
-      "binary_sha256": "3a18958ec6909905006426a28076b858867aef5869402419158cc1b91edeb1a5",
+      "target": "pi-node",
+      "kind": "node",
+      "command": "/usr/local/bin/pi --mode rpc --no-session",
+      "binary": "/usr/local/bin/pi",
+      "binary_sha256": "e79626f2dd6f94aa45d30f3fa63cd84319a6eefcd150b353cfaf274366926774",
       "taxonomy": "cold-idle",
       "settle_seconds": 5.0,
       "sample_interval_seconds": 1.0,
       "samples_bytes": [
-        570040320,
-        570040320,
-        570040320,
-        570040320,
-        570056704
+        116826112,
+        116826112,
+        116826112,
+        116826112,
+        100278272
       ],
       "sample_count": 5,
-      "rss_bytes": 570040320,
-      "rss_min_bytes": 570040320,
-      "rss_max_bytes": 570056704,
-      "rss_spread_bytes": 16384
+      "rss_bytes": 116826112,
+      "rss_min_bytes": 100278272,
+      "rss_max_bytes": 116826112,
+      "rss_spread_bytes": 16547840
+    },
+    {
+      "target": "pi-rust",
+      "kind": "native",
+      "command": "/tmp/pi-rust/pi --rpc --no-session --provider anthropic --model claude-sonnet-4-5",
+      "binary": "/tmp/pi-rust/pi",
+      "binary_sha256": "980995334c6ee7e2ca70b9d3f9a4e49408b1069541ba912bf2b4d0c2b80fd027",
+      "taxonomy": "cold-idle",
+      "settle_seconds": 5.0,
+      "sample_interval_seconds": 1.0,
+      "samples_bytes": [
+        39718912,
+        39718912,
+        39718912,
+        39718912,
+        39718912
+      ],
+      "sample_count": 5,
+      "rss_bytes": 39718912,
+      "rss_min_bytes": 39718912,
+      "rss_max_bytes": 39718912,
+      "rss_spread_bytes": 0
+    },
+    {
+      "target": "pi-native",
+      "kind": "native",
+      "command": "/home/vedaru/Projects/pi-native/target/release/pi-native --rpc --no-session",
+      "binary": "/home/vedaru/Projects/pi-native/target/release/pi-native",
+      "binary_sha256": "7fe00df374796cf3df2a2b551e80749990e8cbc0eb469ebb72fce82b4ad5c027",
+      "taxonomy": "cold-idle",
+      "settle_seconds": 5.0,
+      "sample_interval_seconds": 1.0,
+      "samples_bytes": [
+        4063232,
+        4063232,
+        4063232,
+        4063232,
+        4063232
+      ],
+      "sample_count": 5,
+      "rss_bytes": 4063232,
+      "rss_min_bytes": 4063232,
+      "rss_max_bytes": 4063232,
+      "rss_spread_bytes": 0
     }
   ]
 }

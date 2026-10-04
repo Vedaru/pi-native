@@ -4,3 +4,4 @@ __pycache__/
 .venv/
 /target/
 artifacts/mem_bench.current.json
+artifacts/mem_bench.last.json

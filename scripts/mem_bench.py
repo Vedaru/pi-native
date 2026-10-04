@@ -309,7 +309,7 @@ def main() -> int:
         "results": results,
     }
 
-    out_path = Path(args.json) if args.json else project_root() / "artifacts" / "mem_bench.json"
+    out_path = Path(args.json) if args.json else project_root() / "artifacts" / "mem_bench.last.json"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(artifact, indent=2) + "\n")
     print(f"\nArtifact: {out_path}")
