@@ -9,6 +9,7 @@
 //! `convertMessages`).
 
 pub mod anthropic;
+pub mod anthropic_stream;
 pub mod convert;
 pub mod google;
 pub mod openai_completions;
@@ -19,6 +20,7 @@ pub use anthropic::{
     resolve_thinking, AnthropicBuildOptions, AnthropicMessage, AnthropicParams,
     AnthropicSystemBlock, AnthropicTool, ContentBlock, MessageContent, ThinkingOptions, ToolSpec,
 };
+pub use anthropic_stream::{collect_content, AnthropicStream, AnthropicStreamEvent, Usage};
 pub use convert::{convert_messages, AssistantBlock, ContentPart, TranscriptMessage};
 pub use google::{build_google_params, GoogleBuildOptions};
 pub use openai_completions::{
