@@ -6,7 +6,7 @@
 //! it does. Implemented with the pure-Rust `image` crate, so there is no photon
 //! WASM and no worker process.
 //!
-//! Not yet handled: EXIF orientation (pi rotates from EXIF before resizing).
+//! EXIF orientation is read and applied before resizing, as pi does.
 
 use base64::Engine as _;
 use image::codecs::jpeg::JpegEncoder;
@@ -102,6 +102,30 @@ fn candidates(img: &DynamicImage, quality: u8, max_bytes: usize) -> Vec<Candidat
     out
 }
 
+/// Apply an EXIF orientation (1-8) to an image. Unknown values are a no-op.
+pub fn apply_orientation(image: DynamicImage, orientation: u16) -> DynamicImage {
+    match orientation {
+        2 => image.fliph(),
+        3 => image.rotate180(),
+        4 => image.flipv(),
+        5 => image.rotate90().fliph(),
+        6 => image.rotate90(),
+        7 => image.rotate90().flipv(),
+        8 => image.rotate270(),
+        _ => image,
+    }
+}
+
+/// Read the EXIF orientation tag, if present.
+pub fn read_orientation(bytes: &[u8]) -> Option<u16> {
+    let mut cursor = Cursor::new(bytes);
+    let exif = exif::Reader::new().read_from_container(&mut cursor).ok()?;
+    exif.get_field(exif::Tag::Orientation, exif::In::PRIMARY)?
+        .value
+        .get_uint(0)
+        .map(|value| value as u16)
+}
+
 /// Scale dimensions to fit the limits, preserving aspect ratio.
 fn fit(width: u32, height: u32, limits: &ImageLimits) -> (u32, u32) {
     let mut target_width = width;
@@ -127,6 +151,12 @@ pub fn resize_image(input: &[u8], limits: &ImageLimits) -> Option<ResizedImage> 
         .ok()?
         .decode()
         .ok()?;
+    // EXIF orientation is metadata; apply it so the pixels match what the user
+    // sees before any dimension math.
+    let decoded = match read_orientation(input) {
+        Some(orientation) => apply_orientation(decoded, orientation),
+        None => decoded,
+    };
     let original_width = decoded.width();
     let original_height = decoded.height();
 
@@ -261,5 +291,24 @@ mod tests {
     #[test]
     fn invalid_input_is_none() {
         assert!(resize_image(b"not an image", &ImageLimits::default()).is_none());
+    }
+
+    #[test]
+    fn orientation_6_rotates_and_swaps_dimensions() {
+        let image = DynamicImage::new_rgb8(40, 20);
+        let rotated = apply_orientation(image, 6);
+        assert_eq!((rotated.width(), rotated.height()), (20, 40));
+    }
+
+    #[test]
+    fn orientation_1_is_identity() {
+        let image = DynamicImage::new_rgb8(10, 30);
+        let same = apply_orientation(image, 1);
+        assert_eq!((same.width(), same.height()), (10, 30));
+    }
+
+    #[test]
+    fn plain_images_have_no_orientation() {
+        assert_eq!(read_orientation(&png(8, 8)), None);
     }
 }
