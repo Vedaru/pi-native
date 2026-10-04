@@ -31,8 +31,9 @@ fn read_missing_file_is_an_error() {
 fn read_honors_offset_and_limit() {
     let ctx = temp_ctx();
     std::fs::write(ctx.cwd.join("a.txt"), "1\n2\n3\n4\n5\n").expect("write");
+    // pi's offset is 1-indexed: offset 2 starts at the second line.
     let result = ReadTool.run(
-        &serde_json::json!({ "path": "a.txt", "offset": 1, "limit": 2 }),
+        &serde_json::json!({ "path": "a.txt", "offset": 2, "limit": 2 }),
         &ctx,
     );
     assert_eq!(result.content, "2\n3\n");
@@ -162,4 +163,95 @@ fn grep_streams_a_large_file() {
     let result = GrepTool.run(&serde_json::json!({ "pattern": "needle" }), &ctx);
     assert!(!result.is_error, "{result:?}");
     assert!(result.content.contains("big.txt:2: needle"), "{result:?}");
+}
+
+/// The default tools must declare exactly pi's name, description, and schema
+/// (captured from `createAllToolDefinitions`, pi 1.0.2).
+#[test]
+fn default_tool_specs_match_pi() {
+    let specs: Vec<serde_json::Value> = default_tools()
+        .iter()
+        .map(|tool| {
+            serde_json::json!({
+                "name": tool.name(),
+                "description": tool.description(),
+                "input_schema": tool.input_schema(),
+            })
+        })
+        .collect();
+    let expected: serde_json::Value =
+        serde_json::from_str(include_str!("../fixtures/default_tools.json")).expect("fixture");
+    assert_eq!(serde_json::Value::Array(specs), expected);
+}
+
+#[test]
+fn edit_accepts_pi_edits_array_and_rejects_overlap() {
+    let ctx = temp_ctx();
+    std::fs::write(ctx.cwd.join("a.txt"), "alpha beta gamma\n").expect("write");
+    let result = EditTool.run(
+        &serde_json::json!({
+            "path": "a.txt",
+            "edits": [
+                { "oldText": "alpha", "newText": "ALPHA" },
+                { "oldText": "gamma", "newText": "GAMMA" }
+            ]
+        }),
+        &ctx,
+    );
+    assert!(!result.is_error, "{result:?}");
+    assert_eq!(
+        std::fs::read_to_string(ctx.cwd.join("a.txt")).unwrap(),
+        "ALPHA beta GAMMA\n"
+    );
+
+    let overlap = EditTool.run(
+        &serde_json::json!({
+            "path": "a.txt",
+            "edits": [
+                { "oldText": "ALPHA beta", "newText": "x" },
+                { "oldText": "beta GAMMA", "newText": "y" }
+            ]
+        }),
+        &ctx,
+    );
+    assert!(overlap.is_error);
+}
+
+#[test]
+fn grep_supports_literal_case_and_context() {
+    let ctx = temp_ctx();
+    std::fs::write(ctx.cwd.join("g.txt"), "a.b\naxb\nBETA\nbeta\ngamma").expect("write");
+
+    let regex = GrepTool.run(&serde_json::json!({ "pattern": "a.b" }), &ctx);
+    assert_eq!(regex.content.lines().count(), 2);
+    let literal = GrepTool.run(
+        &serde_json::json!({ "pattern": "a.b", "literal": true }),
+        &ctx,
+    );
+    assert_eq!(literal.content, "g.txt:1: a.b");
+
+    let insensitive = GrepTool.run(
+        &serde_json::json!({ "pattern": "beta", "ignoreCase": true }),
+        &ctx,
+    );
+    assert_eq!(insensitive.content, "g.txt:3: BETA\ng.txt:4: beta");
+
+    // Context lines use `path-line- text`; the match uses `path:line: text`.
+    let context = GrepTool.run(
+        &serde_json::json!({ "pattern": "gamma", "context": 1 }),
+        &ctx,
+    );
+    assert_eq!(context.content, "g.txt-4- beta\ng.txt:5: gamma");
+}
+
+#[test]
+fn find_and_ls_honor_limit() {
+    let ctx = temp_ctx();
+    for name in ["a.txt", "b.txt", "c.txt"] {
+        std::fs::write(ctx.cwd.join(name), "x").expect("write");
+    }
+    let found = FindTool.run(&serde_json::json!({ "pattern": "*.txt", "limit": 2 }), &ctx);
+    assert_eq!(found.content.lines().count(), 2);
+    let listed = LsTool.run(&serde_json::json!({ "limit": 2 }), &ctx);
+    assert_eq!(listed.content.lines().count(), 2);
 }
