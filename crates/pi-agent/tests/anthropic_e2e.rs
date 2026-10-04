@@ -2,7 +2,7 @@
 //! mock server. Proves prompt -> SSE tool call -> tool execution -> second
 //! request -> final text, with no Node and no network provider.
 
-use pi_agent::{Agent, AgentEvent, AnthropicProvider};
+use pi_agent::{anthropic_provider, Agent, AgentEvent};
 use pi_tools::{default_tools, ToolContext};
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -61,7 +61,7 @@ fn agent_executes_a_tool_then_finishes() {
     let cwd = std::env::temp_dir().join(format!("pi-agent-e2e-{}", std::process::id()));
     std::fs::create_dir_all(&cwd).expect("temp cwd");
 
-    let provider = AnthropicProvider::new(base_url, "test-key", "claude-sonnet-4-5");
+    let provider = anthropic_provider(base_url, "test-key", "claude-sonnet-4-5");
     let mut agent = Agent::new(
         Box::new(provider),
         default_tools(),

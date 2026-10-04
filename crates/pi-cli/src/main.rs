@@ -5,7 +5,7 @@
 //! lands in later milestones.
 
 use clap::{Parser, Subcommand, ValueEnum};
-use pi_agent::{Agent, AgentEvent, AnthropicProvider};
+use pi_agent::{anthropic_provider, Agent, AgentEvent};
 use pi_cache::{
     clamp_openai_prompt_cache_key, get_cache_control, openai_completions_prompt_cache_key,
     openai_responses_prompt_cache_key, resolve_cache_retention, CacheRetention,
@@ -157,7 +157,7 @@ fn run_print(prompt: &str, model: &str) {
     }
     let base_url = std::env::var("ANTHROPIC_BASE_URL")
         .unwrap_or_else(|_| "https://api.anthropic.com".to_string());
-    let provider = AnthropicProvider::new(base_url, api_key, model);
+    let provider = anthropic_provider(base_url, api_key, model);
     let cwd = std::env::current_dir().unwrap_or_default();
     let mut agent = Agent::new(
         Box::new(provider),
@@ -197,7 +197,7 @@ fn run_serve(model: &str) {
     }
     let base_url = std::env::var("ANTHROPIC_BASE_URL")
         .unwrap_or_else(|_| "https://api.anthropic.com".to_string());
-    let provider = AnthropicProvider::new(base_url, api_key, model);
+    let provider = anthropic_provider(base_url, api_key, model);
     let cwd = std::env::current_dir().unwrap_or_default();
     let mut agent = Agent::new(
         Box::new(provider),

@@ -12,11 +12,13 @@ use pi_providers::{AssistantBlock, ContentPart, ToolSpec, TranscriptMessage, Usa
 use pi_tools::{Tool, ToolResult};
 use serde_json::Value;
 
-pub mod anthropic;
+pub mod providers;
 pub mod session;
 
-pub use anthropic::{turn_from_stream, AnthropicProvider};
 pub use pi_tools::ToolContext;
+pub use providers::{
+    anthropic_provider, google_provider, openai_responses_provider, turn_from_stream, HttpProvider,
+};
 pub use session::{append_messages, messages_from_session};
 
 /// A tool call requested by the model.

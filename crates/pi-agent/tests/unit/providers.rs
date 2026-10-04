@@ -46,3 +46,13 @@ fn tool_use_becomes_a_tool_call() {
     assert_eq!(turn.tool_calls[0].arguments["command"], json!("ls"));
     assert_eq!(turn.stop_reason.as_deref(), Some("tool_use"));
 }
+
+#[test]
+fn all_providers_share_the_generic_type() {
+    // Each factory returns the same `HttpProvider<P>` mechanism with a different
+    // protocol; no per-provider adapter type exists.
+    fn assert_provider<P: SseProtocol + 'static>(_: &HttpProvider<P>) {}
+    assert_provider(&anthropic_provider("http://x", "k", "claude-sonnet-4-5"));
+    assert_provider(&openai_responses_provider("http://x", "k", "gpt-5"));
+    assert_provider(&google_provider("http://x", "k", "gemini-2.5-flash"));
+}
