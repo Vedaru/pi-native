@@ -58,6 +58,7 @@ fn all_providers_share_the_generic_type() {
         "deepseek-flash",
         None,
         ThinkingFormat::None,
+        None,
     ));
     assert_provider(&openai_responses_provider("http://x", "k", "gpt-5"));
 }

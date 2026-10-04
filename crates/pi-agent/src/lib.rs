@@ -403,7 +403,11 @@ impl Agent {
     /// message-count window, then the byte budget. Returns a `Compacted` event
     /// when compaction happened.
     pub fn push_user(&mut self, text: impl Into<String>) {
-        self.push(TranscriptMessage::UserText(text.into()));
+        // pi's agent stores a prompt as a content block array, which its OpenAI
+        // builder serializes as `content: [{type:"text", ...}]`.
+        self.push(TranscriptMessage::UserParts(vec![ContentPart::Text {
+            text: text.into(),
+        }]));
     }
 
     /// Seed the transcript from existing messages (e.g. a loaded session),

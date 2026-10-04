@@ -114,6 +114,7 @@ pub fn openai_completions_provider(
     model: impl Into<String>,
     max_tokens: Option<i64>,
     thinking_format: ThinkingFormat,
+    reasoning_effort: Option<String>,
 ) -> HttpProvider<OpenAiCompletionsProtocol> {
     let model = model.into();
     let requires_reasoning = matches!(thinking_format, ThinkingFormat::Deepseek);
@@ -138,7 +139,7 @@ pub fn openai_completions_provider(
                 thinking_format,
                 max_tokens,
                 off_supported: true,
-                reasoning_effort: None,
+                reasoning_effort: reasoning_effort.clone(),
             },
         )
     })

@@ -70,6 +70,9 @@ struct Cli {
     /// Reasoning format: `none` (default) or `deepseek`.
     #[arg(long)]
     thinking_format: Option<String>,
+    /// Reasoning effort for providers that accept one (e.g. `high`).
+    #[arg(long)]
+    reasoning_effort: Option<String>,
     /// Token context window for compaction; 0 disables (reserve is 16,384).
     #[arg(long, default_value_t = 200000)]
     context_window: usize,
@@ -558,6 +561,7 @@ struct ProviderConfig {
     api_key: String,
     max_tokens: Option<i64>,
     thinking_format: ThinkingFormat,
+    reasoning_effort: Option<String>,
 }
 
 fn missing(what: &str) -> ! {
@@ -597,6 +601,7 @@ impl Cli {
             api_key,
             max_tokens: self.max_tokens,
             thinking_format,
+            reasoning_effort: self.reasoning_effort.clone(),
         }
     }
 }
@@ -610,6 +615,7 @@ fn make_provider(config: &ProviderConfig) -> Box<dyn ModelProvider> {
             config.model.clone(),
             config.max_tokens,
             config.thinking_format,
+            config.reasoning_effort.clone(),
         )),
         "openai-responses" => Box::new(openai_responses_provider(
             config.base_url.clone(),
@@ -727,6 +733,9 @@ fn run_client(
     }
     if matches!(config.thinking_format, ThinkingFormat::Deepseek) {
         command.arg("--thinking-format").arg("deepseek");
+    }
+    if let Some(effort) = &config.reasoning_effort {
+        command.arg("--reasoning-effort").arg(effort);
     }
     if yolo {
         command.arg("--yolo");

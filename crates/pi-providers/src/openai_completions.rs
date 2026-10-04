@@ -357,6 +357,9 @@ pub fn build_openai_completions_params(
     if let Some(thinking) = resolve_thinking(options) {
         params.insert("thinking".into(), thinking);
     }
+    if let Some(effort) = &options.reasoning_effort {
+        params.insert("reasoning_effort".into(), json!(effort));
+    }
 
     Value::Object(params)
 }

@@ -48,7 +48,10 @@ fn get_state_reports_the_resolved_context() {
     assert_eq!(*messages, 1);
     assert_eq!(system, "system");
     assert_eq!(transcript[0]["role"], serde_json::json!("user"));
-    assert_eq!(transcript[0]["content"], serde_json::json!("hello"));
+    assert_eq!(
+        transcript[0]["content"],
+        serde_json::json!([{ "type": "text", "text": "hello" }])
+    );
 }
 
 #[test]
