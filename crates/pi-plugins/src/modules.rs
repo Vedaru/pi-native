@@ -136,6 +136,8 @@ pub fn virtual_module_source(canonical: &str) -> Option<String> {
         "node:fs/promises" => Some(FS_PROMISES_MODULE.to_string()),
         "node:crypto" => Some(CRYPTO_MODULE.to_string()),
         "node:events" => Some(EVENTS_MODULE.to_string()),
+        "node:child_process" => Some(CHILD_PROCESS_MODULE.to_string()),
+        "node:buffer" => Some(BUFFER_MODULE.to_string()),
         _ => None,
     }
 }
@@ -337,6 +339,53 @@ export function once(emitter, name) { return new Promise((resolve) => emitter.on
 export default EventEmitter;
 "#;
 
+const CHILD_PROCESS_MODULE: &str = r#"
+const host = globalThis.__pi_host.child_process;
+export function execSync(command, _options) { return host.execShell(String(command)); }
+export function exec(command, options, callback) {
+  let cb = callback;
+  if (typeof options === "function") { cb = options; }
+  queueMicrotask(() => {
+    try { const stdout = host.execShell(String(command)); if (cb) cb(null, stdout, ""); }
+    catch (error) { if (cb) cb(error, "", ""); }
+  });
+  return { pid: 0, kill() {} };
+}
+export function spawnSync(command, args, _options) {
+  const result = JSON.parse(host.spawnSync(String(command), (args || []).map(String)));
+  return { status: result.status, stdout: result.stdout, stderr: result.stderr, pid: 0 };
+}
+export function spawn(command, args, _options) {
+  const listeners = { stdout: [], stderr: [], exit: [], error: [], close: [] };
+  const child = {
+    pid: 0,
+    stdout: { on: (n, f) => listeners.stdout.push(f), setEncoding() {} },
+    stderr: { on: (n, f) => listeners.stderr.push(f), setEncoding() {} },
+    on: (n, f) => { (listeners[n] = listeners[n] || []).push(f); return child; },
+    once: (n, f) => { (listeners[n] = listeners[n] || []).push(f); return child; },
+    kill() {},
+  };
+  queueMicrotask(() => {
+    const result = JSON.parse(host.spawnSync(String(command), (args || []).map(String)));
+    if (result.stdout) for (const f of listeners.stdout) f(result.stdout);
+    if (result.stderr) for (const f of listeners.stderr) f(result.stderr);
+    for (const f of listeners.exit) f(result.status, null);
+    for (const f of listeners.close) f(result.status, null);
+  });
+  return child;
+}
+export function execFileSync(file, args, _options) {
+  return host.execShell([file].concat(args || []).join(" "));
+}
+export default { exec, execSync, spawn, spawnSync, execFileSync };
+"#;
+
+const BUFFER_MODULE: &str = r#"
+const Buffer = globalThis.Buffer;
+export { Buffer };
+export default { Buffer };
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -366,6 +415,8 @@ mod tests {
         assert!(virtual_module_source("node:fs/promises").is_some());
         assert!(virtual_module_source("node:crypto").is_some());
         assert!(virtual_module_source("node:events").is_some());
+        assert!(virtual_module_source("node:child_process").is_some());
+        assert!(virtual_module_source("node:buffer").is_some());
         assert!(virtual_module_source("node:zlib").is_none());
     }
 

@@ -13,6 +13,7 @@
 //! Stage 2: module resolver + virtual Node built-ins (`path`, `os`, `process`).
 
 pub mod crypto;
+pub mod globals;
 pub mod modules;
 
 use rquickjs::{Context, Ctx, Function, Module, Object, Runtime};
@@ -153,7 +154,9 @@ impl PluginHost {
             self.install_pi_global(&ctx)?;
             self.install_host_fs(&ctx)?;
             self.install_host_crypto(&ctx)?;
+            self.install_host_child_process(&ctx)?;
             install_env(&ctx)?;
+            ctx.eval::<(), _>(globals::PRELUDE.as_bytes())?;
             let entry = Module::declare(ctx.clone(), name, prepared.as_bytes())?;
             // Module bodies run synchronously; top-level await is not supported yet.
             let _ = entry.eval()?;
@@ -550,6 +553,98 @@ impl PluginHost {
         host.set("crypto", crypto)?;
         Ok(())
     }
+
+    /// Install `__pi_host.child_process`, gated by the `exec` capability.
+    fn install_host_child_process(&self, ctx: &Ctx<'_>) -> Result<(), PluginError> {
+        let globals = ctx.globals();
+        let host: Object = globals.get("__pi_host")?;
+        let cp = Object::new(ctx.clone())?;
+
+        let (calls, denials, policy) = (
+            self.calls.clone(),
+            self.denials.clone(),
+            self.policy.clone(),
+        );
+        cp.set(
+            "execShell",
+            Function::new(ctx.clone(), move |command: String| -> String {
+                let allowed = record(
+                    &policy,
+                    &calls,
+                    &denials,
+                    Capability::Exec,
+                    "child_process.exec",
+                    serde_json::json!({ "command": command }),
+                );
+                if allowed {
+                    run_shell(&command)
+                } else {
+                    String::new()
+                }
+            }),
+        )?;
+
+        let (calls, denials, policy) = (
+            self.calls.clone(),
+            self.denials.clone(),
+            self.policy.clone(),
+        );
+        cp.set(
+            "spawnSync",
+            Function::new(
+                ctx.clone(),
+                move |command: String, args: Vec<String>| -> String {
+                    let allowed = record(
+                        &policy,
+                        &calls,
+                        &denials,
+                        Capability::Exec,
+                        "child_process.spawnSync",
+                        serde_json::json!({ "command": command, "args": args }),
+                    );
+                    if allowed {
+                        run_command(&command, &args)
+                    } else {
+                        serde_json::json!({ "status": null, "stdout": "", "stderr": "denied" })
+                            .to_string()
+                    }
+                },
+            ),
+        )?;
+
+        host.set("child_process", cp)?;
+        Ok(())
+    }
+}
+
+/// Run a shell command, returning stdout (lossy).
+fn run_shell(command: &str) -> String {
+    match std::process::Command::new("sh")
+        .arg("-c")
+        .arg(command)
+        .output()
+    {
+        Ok(output) => String::from_utf8_lossy(&output.stdout).to_string(),
+        Err(_) => String::new(),
+    }
+}
+
+/// Run a command directly, returning JSON `{status, stdout, stderr}`.
+fn run_command(command: &str, args: &[String]) -> String {
+    match std::process::Command::new(command).args(args).output() {
+        Ok(output) => serde_json::json!({
+            "status": output.status.code(),
+            "stdout": String::from_utf8_lossy(&output.stdout),
+            "stderr": String::from_utf8_lossy(&output.stderr),
+        })
+        .to_string(),
+        Err(error) => serde_json::json!({
+            "status": serde_json::Value::Null,
+            "stdout": "",
+            "stderr": error.to_string(),
+        })
+        .to_string(),
+    }
 }
 
 fn platform_name() -> &'static str {
@@ -843,5 +938,37 @@ mod tests {
             )
             .expect("runs");
         assert_eq!(calls[0].args, serde_json::json!("got 5"));
+    }
+
+    #[test]
+    fn plugin_can_run_exec_sync() {
+        let host = PluginHost::new(PluginPolicy::permissive());
+        let calls = host
+            .run(r#"import { execSync } from "node:child_process"; pi.log(execSync("echo hi").trim());"#)
+            .expect("runs");
+        assert_eq!(calls.last().unwrap().args, serde_json::json!("hi"));
+    }
+
+    #[test]
+    fn child_process_is_denied_by_default_policy() {
+        let host = PluginHost::new(PluginPolicy::default());
+        let result =
+            host.run(r#"import { execSync } from "node:child_process"; execSync("echo hi");"#);
+        match result {
+            Err(PluginError::Denied { capability, .. }) => assert_eq!(capability, Capability::Exec),
+            other => panic!("expected exec denial, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn plugin_can_use_buffer_hex_and_base64() {
+        let host = PluginHost::new(PluginPolicy::permissive());
+        let calls = host
+            .run(
+                r#"pi.log(Buffer.from("hello").toString("hex")); pi.log(Buffer.from("hi").toString("base64"));"#,
+            )
+            .expect("runs");
+        assert_eq!(calls[0].args, serde_json::json!("68656c6c6f"));
+        assert_eq!(calls[1].args, serde_json::json!("aGk="));
     }
 }
