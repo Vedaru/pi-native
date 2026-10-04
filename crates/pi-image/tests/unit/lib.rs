@@ -85,3 +85,19 @@ fn orientation_1_is_identity() {
 fn plain_images_have_no_orientation() {
     assert_eq!(read_orientation(&png(8, 8)), None);
 }
+
+#[test]
+fn resized_output_decodes_to_the_target_dimensions() {
+    let input = png(3000, 1500);
+    let limits = ImageLimits {
+        max_width: 1000,
+        max_height: 1000,
+        ..ImageLimits::default()
+    };
+    let result = resize_image(&input, &limits).expect("resizes");
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(&result.data_base64)
+        .expect("valid base64");
+    let decoded = image::load_from_memory(&bytes).expect("output decodes");
+    assert_eq!((decoded.width(), decoded.height()), (1000, 500));
+}

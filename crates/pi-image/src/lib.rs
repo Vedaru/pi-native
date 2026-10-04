@@ -74,32 +74,51 @@ struct Candidate {
 }
 
 /// Try PNG and several JPEG qualities, returning the encodings that fit.
-fn candidates(img: &DynamicImage, quality: u8, max_bytes: usize) -> Vec<Candidate> {
-    let mut out = Vec::new();
-    if let Some(bytes) = encode(img, ImageFormat::Png, quality) {
-        if base64_len(bytes.len()) < max_bytes {
-            out.push(Candidate {
-                bytes,
-                mime: "image/png",
-            });
-        }
-    }
+/// The smallest encoding under the limit, or `None`.
+///
+/// Encodings are produced one at a time and only the current best is retained,
+/// so peak memory is one encoded buffer rather than all candidates at once.
+fn best_candidate(img: &DynamicImage, quality: u8, max_bytes: usize) -> Option<Candidate> {
+    let mut best: Option<Candidate> = None;
+    consider(
+        &mut best,
+        encode(img, ImageFormat::Png, quality).map(|bytes| Candidate {
+            bytes,
+            mime: "image/png",
+        }),
+        max_bytes,
+    );
     let mut quality = quality;
     loop {
-        if let Some(bytes) = encode(img, ImageFormat::Jpeg, quality) {
-            if base64_len(bytes.len()) < max_bytes {
-                out.push(Candidate {
-                    bytes,
-                    mime: "image/jpeg",
-                });
-            }
-        }
+        consider(
+            &mut best,
+            encode(img, ImageFormat::Jpeg, quality).map(|bytes| Candidate {
+                bytes,
+                mime: "image/jpeg",
+            }),
+            max_bytes,
+        );
         if quality <= 25 {
             break;
         }
         quality = quality.saturating_sub(15).max(25);
     }
-    out
+    best
+}
+
+fn consider(best: &mut Option<Candidate>, candidate: Option<Candidate>, max_bytes: usize) {
+    let Some(candidate) = candidate else {
+        return;
+    };
+    if base64_len(candidate.bytes.len()) >= max_bytes {
+        return;
+    }
+    if best
+        .as_ref()
+        .is_none_or(|current| candidate.bytes.len() < current.bytes.len())
+    {
+        *best = Some(candidate);
+    }
 }
 
 /// Apply an EXIF orientation (1-8) to an image. Unknown values are a no-op.
@@ -177,22 +196,22 @@ pub fn resize_image(input: &[u8], limits: &ImageLimits) -> Option<ResizedImage> 
     }
 
     let (mut target_width, mut target_height) = fit(original_width, original_height, limits);
+    let mut scaled: Option<DynamicImage> = None;
 
     loop {
-        let scaled = if target_width == original_width && target_height == original_height {
-            decoded.clone()
-        } else {
-            decoded.resize_exact(
-                target_width,
-                target_height,
-                image::imageops::FilterType::Lanczos3,
-            )
-        };
+        let current = scaled.get_or_insert_with(|| {
+            if target_width == original_width && target_height == original_height {
+                decoded.clone()
+            } else {
+                decoded.resize_exact(
+                    target_width,
+                    target_height,
+                    image::imageops::FilterType::Lanczos3,
+                )
+            }
+        });
 
-        let mut fitting = candidates(&scaled, limits.jpeg_quality, limits.max_bytes);
-        if !fitting.is_empty() {
-            fitting.sort_by_key(|candidate| candidate.bytes.len());
-            let best = fitting.remove(0);
+        if let Some(best) = best_candidate(current, limits.jpeg_quality, limits.max_bytes) {
             return Some(ResizedImage {
                 data_base64: base64::engine::general_purpose::STANDARD.encode(&best.bytes),
                 mime_type: best.mime.to_string(),
@@ -209,6 +228,7 @@ pub fn resize_image(input: &[u8], limits: &ImageLimits) -> Option<ResizedImage> 
         }
         target_width = (target_width * 9 / 10).max(1);
         target_height = (target_height * 9 / 10).max(1);
+        scaled = None;
     }
 }
 
