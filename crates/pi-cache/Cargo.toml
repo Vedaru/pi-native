@@ -1,0 +1,13 @@
+[package]
+name = "pi-cache"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Provider prompt-cache primitives ported from pi (byte-for-byte parity)"
+
+[dependencies]
+serde = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

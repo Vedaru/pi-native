@@ -1,0 +1,16 @@
+[package]
+name = "pi-native"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Native Rust runtime for pi (work in progress)"
+
+[[bin]]
+name = "pi-native"
+path = "src/main.rs"
+
+[dependencies]
+pi-cache = { path = "../pi-cache" }
+serde_json = { workspace = true }
+clap = { workspace = true }

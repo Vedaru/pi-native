@@ -18,11 +18,45 @@ a pi-compatible implementation.
 ## Layout
 
 ```
+crates/pi-cache/       provider prompt-cache primitives, ported from pi (VED-314)
+crates/pi-cli/         `pi-native` CLI (early scaffold)
 scripts/mem_bench.py   runtime memory benchmark (VED-302)
 config/                target and benchmark configuration
 artifacts/             generated measurement artifacts (committed for history)
 docs/                  decisions and notes
 ```
+
+## Build and test
+
+```bash
+cargo build --workspace
+cargo test --workspace
+cargo clippy --workspace --all-targets
+```
+
+## Prompt-cache primitives (`pi-cache`)
+
+The provider-parity gate (VED-315) requires exact cache behavior. `pi-cache`
+ports the primitives from pi and is unit-tested against pi's semantics:
+
+- retention resolution and Anthropic `cache_control` markers,
+- OpenAI `prompt_cache_key` clamping and wiring,
+- cache-miss detection and waste accounting,
+- cache-warming delay, replayability, and economics.
+
+```bash
+cargo run -q -p pi-native -- cache-control --retention long
+# {"cache_control":{"ttl":"1h","type":"ephemeral"},"retention":"long"}
+
+cargo run -q -p pi-native -- prompt-cache-key --session-id sess-123 --responses
+# {"prompt_cache_key":"sess-123","retention":"short"}
+```
+
+## Attribution
+
+Derived in part from pi (<https://github.com/earendil-works/pi>), MIT. See
+`LICENSE`.
+
 
 ## Memory benchmark
 
