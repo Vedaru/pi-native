@@ -152,3 +152,20 @@ Comparison on a 6000x4000 PNG (`harness/compare-image-resize.mjs` vs
 | base64 size | 2,405,452 B | 2,405,532 B |
 | time | 1,485 ms | 336 ms |
 | peak RSS | 493 MB | 207 MB |
+
+## Pressure (`--stress`)
+
+`pi-native --stress N` runs a deterministic in-process workload (N turns of an
+`ls` tool call, no network, no subprocesses). `scripts/stress_gate.py` fails CI
+if peak RSS exceeds a ceiling or the run does not finish in time.
+
+| Turns | Wall | Peak RSS |
+| --- | --- | --- |
+| 1,000 | 0.08 s | 5.6 MB |
+| 10,000 | 0.15 s | 16.4 MB |
+| 50,000 | 3.2 s | 67.2 MB |
+
+Growth is proportional to the retained transcript (~1.3 KB/turn), with no leak.
+The first pressure run found an **O(n²) bug**: the loop cloned the whole
+transcript every iteration. It now borrows (`CompletionRequest` holds slices),
+which took 10k turns from 9.7 s to 0.15 s and 50k turns from a timeout to 3.2 s.
