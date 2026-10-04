@@ -20,10 +20,10 @@ pub enum Op {
     Set { path: Path, value: Value },
     /// Remove the key at `path`.
     Delete { path: Path },
-    /// Append a value to the array at `path`.
-    Push { path: Path, value: Value },
-    /// Truncate the array at `path` to `length`.
-    Truncate { path: Path, length: usize },
+    /// Append items to the array at `path` (chord's `a`).
+    Append { path: Path, items: Vec<Value> },
+    /// Remove `remove` items from the end of the array at `path` (chord's `t`).
+    Truncate { path: Path, remove: usize },
     /// Replace `delete_count` items at `start` with `items` in the array at `path`.
     Splice {
         path: Path,
@@ -76,18 +76,16 @@ fn diff_into(before: &Value, after: &Value, path: &mut Path, ops: &mut Vec<Op>) 
             if after_items.len() >= before_items.len()
                 && after_items[..before_items.len()] == before_items[..]
             {
-                for item in &after_items[before_items.len()..] {
-                    ops.push(Op::Push {
-                        path: path.clone(),
-                        value: item.clone(),
-                    });
-                }
+                ops.push(Op::Append {
+                    path: path.clone(),
+                    items: after_items[before_items.len()..].to_vec(),
+                });
             } else if before_items.len() > after_items.len()
                 && before_items[..after_items.len()] == after_items[..]
             {
                 ops.push(Op::Truncate {
                     path: path.clone(),
-                    length: after_items.len(),
+                    remove: before_items.len() - after_items.len(),
                 });
             } else if let Some(permutation) = permutation(before_items, after_items) {
                 ops.push(Op::Move {
@@ -134,14 +132,15 @@ pub fn apply(base: &Value, ops: &[Op]) -> Value {
         match op {
             Op::Set { path, value } => set_at(&mut root, path, value.clone()),
             Op::Delete { path } => delete_at(&mut root, path),
-            Op::Push { path, value } => {
+            Op::Append { path, items } => {
                 if let Some(array) = array_at_mut(&mut root, path) {
-                    array.push(value.clone());
+                    array.extend(items.iter().cloned());
                 }
             }
-            Op::Truncate { path, length } => {
+            Op::Truncate { path, remove } => {
                 if let Some(array) = array_at_mut(&mut root, path) {
-                    array.truncate(*length);
+                    let keep = array.len().saturating_sub(*remove);
+                    array.truncate(keep);
                 }
             }
             Op::Splice {

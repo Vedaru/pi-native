@@ -68,8 +68,8 @@ fn append_becomes_push_ops() {
     let before = json!({"list": [1, 2]});
     let after = json!({"list": [1, 2, 3, 4]});
     let ops = diff(&before, &after);
-    assert_eq!(ops.len(), 2);
-    assert!(matches!(&ops[0], Op::Push { value, .. } if value == &json!(3)));
+    assert_eq!(ops.len(), 1);
+    assert!(matches!(&ops[0], Op::Append { items, .. } if items == &vec![json!(3), json!(4)]));
     assert_eq!(apply(&before, &ops), after);
 }
 
@@ -82,7 +82,7 @@ fn shrinking_a_prefix_becomes_truncate() {
         ops,
         vec![Op::Truncate {
             path: vec!["list".to_string()],
-            length: 2
+            remove: 1
         }]
     );
     assert_eq!(apply(&before, &ops), after);
