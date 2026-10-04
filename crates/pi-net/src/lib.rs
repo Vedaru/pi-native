@@ -7,8 +7,9 @@
 use std::io::Read;
 
 use pi_providers::{
-    collect_content, collect_response, AnthropicParams, AnthropicStream, AnthropicStreamEvent,
-    ContentBlock, OpenAiResponsesParams, OpenAiResponsesStream, OpenAiResponsesStreamEvent, Usage,
+    collect_content, collect_google, collect_response, AnthropicParams, AnthropicStream,
+    AnthropicStreamEvent, ContentBlock, GoogleParams, GoogleStream, GoogleStreamEvent,
+    OpenAiResponsesParams, OpenAiResponsesStream, OpenAiResponsesStreamEvent, Usage,
 };
 use pi_sse::SseParser;
 
@@ -124,8 +125,11 @@ pub type AnthropicResult = StreamResult;
 /// A provider SSE protocol: where to POST, how to authenticate, and how to turn
 /// events into a result. Implementations are stateful parsers.
 pub trait SseProtocol: Default {
-    /// Full request URL for a model base URL.
-    fn endpoint(base_url: &str) -> String;
+    /// The request params type this protocol serializes.
+    type Params: serde::Serialize;
+    /// Full request URL for a model base URL and params (some providers put the
+    /// model in the path).
+    fn endpoint(base_url: &str, params: &Self::Params) -> String;
     /// Auth and version headers; the transport adds `content-type` and `accept`.
     fn headers(api_key: &str) -> Vec<(&'static str, String)>;
     /// Consume one SSE frame.
@@ -140,14 +144,17 @@ pub trait SseProtocol: Default {
 /// the protocol, and return its result. There is exactly one transport loop for
 /// every provider; providers contribute only their endpoint, headers, and event
 /// handling.
-pub fn stream_sse<P, T>(base_url: &str, api_key: &str, params: &T) -> Result<StreamResult, NetError>
+pub fn stream_sse<P>(
+    base_url: &str,
+    api_key: &str,
+    params: &P::Params,
+) -> Result<StreamResult, NetError>
 where
     P: SseProtocol,
-    T: serde::Serialize,
 {
     let body =
         serde_json::to_string(params).map_err(|error| NetError::Encode(error.to_string()))?;
-    let url = P::endpoint(base_url);
+    let url = P::endpoint(base_url, params);
     let mut headers = P::headers(api_key);
     headers.push(("accept", "text/event-stream".to_string()));
     let response = post_json(&url, &headers, &body)?;
@@ -166,7 +173,8 @@ pub struct AnthropicProtocol {
 }
 
 impl SseProtocol for AnthropicProtocol {
-    fn endpoint(base_url: &str) -> String {
+    type Params = AnthropicParams;
+    fn endpoint(base_url: &str, _params: &AnthropicParams) -> String {
         format!("{}/v1/messages", base_url.trim_end_matches('/'))
     }
     fn headers(api_key: &str) -> Vec<(&'static str, String)> {
@@ -197,7 +205,8 @@ pub struct OpenAiResponsesProtocol {
 }
 
 impl SseProtocol for OpenAiResponsesProtocol {
-    fn endpoint(base_url: &str) -> String {
+    type Params = OpenAiResponsesParams;
+    fn endpoint(base_url: &str, _params: &OpenAiResponsesParams) -> String {
         format!("{}/responses", base_url.trim_end_matches('/'))
     }
     fn headers(api_key: &str) -> Vec<(&'static str, String)> {
@@ -217,13 +226,55 @@ impl SseProtocol for OpenAiResponsesProtocol {
     }
 }
 
+/// Google Generative AI (Gemini) protocol. The model id lives in the path.
+#[derive(Default)]
+pub struct GoogleProtocol {
+    stream: GoogleStream,
+    events: Vec<GoogleStreamEvent>,
+}
+
+impl SseProtocol for GoogleProtocol {
+    type Params = GoogleParams;
+    fn endpoint(base_url: &str, params: &GoogleParams) -> String {
+        format!(
+            "{}/models/{}:streamGenerateContent?alt=sse",
+            base_url.trim_end_matches('/'),
+            params.model
+        )
+    }
+    fn headers(api_key: &str) -> Vec<(&'static str, String)> {
+        vec![("x-goog-api-key", api_key.to_string())]
+    }
+    fn ingest(&mut self, _event_type: &str, data: &str) {
+        self.events.extend(self.stream.handle(data));
+    }
+    fn into_result(self) -> StreamResult {
+        let (text, content) = collect_google(&self.events);
+        StreamResult {
+            message_id: None,
+            content,
+            text,
+            usage: self.stream.usage().clone(),
+        }
+    }
+}
+
+/// Stream a Gemini `generateContent` request.
+pub fn stream_google(
+    base_url: &str,
+    api_key: &str,
+    params: &GoogleParams,
+) -> Result<StreamResult, NetError> {
+    stream_sse::<GoogleProtocol>(base_url, api_key, params)
+}
+
 /// Stream an Anthropic Messages request.
 pub fn stream_anthropic(
     base_url: &str,
     api_key: &str,
     params: &AnthropicParams,
 ) -> Result<StreamResult, NetError> {
-    stream_sse::<AnthropicProtocol, _>(base_url, api_key, params)
+    stream_sse::<AnthropicProtocol>(base_url, api_key, params)
 }
 
 /// Stream an OpenAI Responses request. `base_url` includes the version path.
@@ -232,7 +283,7 @@ pub fn stream_openai_responses(
     api_key: &str,
     params: &OpenAiResponsesParams,
 ) -> Result<StreamResult, NetError> {
-    stream_sse::<OpenAiResponsesProtocol, _>(base_url, api_key, params)
+    stream_sse::<OpenAiResponsesProtocol>(base_url, api_key, params)
 }
 
 #[cfg(test)]
@@ -349,5 +400,33 @@ mod tests {
         assert_eq!(result.usage.cache_read, 60);
         assert_eq!(result.usage.output, 7);
         assert_eq!(result.usage.cache_hit_rate(), Some(0.6));
+    }
+    const GOOGLE_SSE: &str = concat!(
+        "event: message\n",
+        "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Hi\"}],\"role\":\"model\"}}]}\n\n",
+        "event: message\n",
+        "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"!\"}],\"role\":\"model\"},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":100,\"candidatesTokenCount\":5,\"cachedContentTokenCount\":80}}\n\n",
+    );
+
+    #[test]
+    fn streams_google_sse_with_usage() {
+        let base = serve_once(GOOGLE_SSE);
+        let params = pi_providers::build_google_params(
+            "gemini-2.5-flash".into(),
+            "system",
+            &[],
+            &[pi_providers::TranscriptMessage::UserText("hi".into())],
+            &pi_providers::GoogleBuildOptions {
+                max_tokens: Some(1024),
+                reasoning: true,
+                thinking_disabled: true,
+            },
+        );
+        let result = stream_google(&base, "test-key", &params).expect("streams");
+        assert_eq!(result.text, "Hi!");
+        assert_eq!(result.usage.input, 20);
+        assert_eq!(result.usage.cache_read, 80);
+        assert_eq!(result.usage.output, 5);
+        assert_eq!(result.usage.cache_hit_rate(), Some(0.8));
     }
 }

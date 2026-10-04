@@ -12,6 +12,7 @@ pub mod anthropic;
 pub mod anthropic_stream;
 pub mod convert;
 pub mod google;
+pub mod google_stream;
 pub mod openai_completions;
 pub mod openai_responses;
 pub mod openai_responses_stream;
@@ -25,7 +26,8 @@ pub use anthropic::{
 };
 pub use anthropic_stream::{collect_content, AnthropicStream, AnthropicStreamEvent, Usage};
 pub use convert::{convert_messages, AssistantBlock, ContentPart, TranscriptMessage};
-pub use google::{build_google_params, GoogleBuildOptions};
+pub use google::{build_google_params, GoogleBuildOptions, GoogleParams};
+pub use google_stream::{collect_google, GoogleStream, GoogleStreamEvent};
 pub use openai_completions::{
     build_openai_completions_params, MaxTokensField, OpenAiCompletionsBuildOptions, ThinkingFormat,
 };

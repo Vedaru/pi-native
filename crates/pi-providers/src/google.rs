@@ -9,7 +9,22 @@
 
 use crate::anthropic::ToolSpec;
 use crate::convert::{AssistantBlock, ContentPart, TranscriptMessage};
+use serde::Serialize;
 use serde_json::{json, Map, Value};
+
+/// A Gemini request: the model id (carried in the URL path) plus the body.
+#[derive(Debug, Clone)]
+pub struct GoogleParams {
+    pub model: String,
+    pub body: Value,
+}
+
+impl Serialize for GoogleParams {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        // Only the body goes over the wire; the model is in the path.
+        self.body.serialize(serializer)
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct GoogleBuildOptions {
@@ -108,7 +123,7 @@ pub fn build_google_params(
     tools: &[ToolSpec],
     messages: &[TranscriptMessage],
     options: &GoogleBuildOptions,
-) -> Value {
+) -> GoogleParams {
     let mut body = Map::new();
     body.insert(
         "contents".into(),
@@ -137,11 +152,11 @@ pub fn build_google_params(
         body.insert("tools".into(), convert_tools(tools));
     }
 
-    // `model` is carried in the URL for Gemini, not the body; kept for symmetry
-    // with the other builders but omitted from the serialized wire shape.
-    let _ = model;
-
-    Value::Object(body)
+    // `model` is carried in the URL for Gemini, not the body.
+    GoogleParams {
+        model,
+        body: Value::Object(body),
+    }
 }
 
 #[cfg(test)]
@@ -187,13 +202,14 @@ mod tests {
         let expected: Value =
             serde_json::from_str(include_str!("../../../harness/fixtures/google-basic.json"))
                 .expect("fixture parses");
-        let actual = build_google_params(
+        let actual = serde_json::to_value(build_google_params(
             "gemini-2.5-flash".into(),
             "You are pi, a coding agent. Be concise.",
             &tools(),
             &[TranscriptMessage::UserText("hello".into())],
             &options(),
-        );
+        ))
+        .expect("serializes");
         assert_eq!(actual, expected, "google basic differs from pi");
     }
 
@@ -221,13 +237,14 @@ mod tests {
             },
             TranscriptMessage::UserText("summarize it".into()),
         ];
-        let actual = build_google_params(
+        let actual = serde_json::to_value(build_google_params(
             "gemini-2.5-flash".into(),
             "You are pi, a coding agent. Be concise.",
             &tools(),
             &transcript,
             &options(),
-        );
+        ))
+        .expect("serializes");
         assert_eq!(actual, expected, "google tool-use differs from pi");
     }
 
@@ -241,7 +258,8 @@ mod tests {
             &[],
             &[TranscriptMessage::UserText("hi".into())],
             &opts,
-        );
+        )
+        .body;
         assert!(value["generationConfig"].get("thinkingConfig").is_none());
     }
 }
