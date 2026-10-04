@@ -1,8 +1,8 @@
 //! Anthropic Messages request construction with pi's cache-breakpoint rules.
 //!
 //! Sources mirrored: `packages/ai/src/api/anthropic-messages.ts`
-//! (`buildParams`, `convertTools`, the conversation breakpoint at the end of
-//! `convertMessages`, and the `thinking` block).
+//! (`buildParams`, `convertMessages`, `convertContentBlocks`, `convertTools`,
+//! and the `thinking` block).
 
 use pi_cache::{get_cache_control, CacheControlEphemeral, CacheRetention};
 use serde::Serialize;
@@ -52,9 +52,8 @@ pub enum ContentBlock {
     },
     ToolResult {
         tool_use_id: String,
-        content: Value,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        is_error: Option<bool>,
+        content: MessageContent,
+        is_error: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
         cache_control: Option<CacheControlEphemeral>,
     },
@@ -67,10 +66,19 @@ pub enum ContentBlock {
     },
 }
 
+/// Message content: pi emits a bare string for text-only content and a block
+/// array otherwise (`convertContentBlocks`).
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(untagged)]
+pub enum MessageContent {
+    Text(String),
+    Blocks(Vec<ContentBlock>),
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct AnthropicMessage {
     pub role: &'static str,
-    pub content: Vec<ContentBlock>,
+    pub content: MessageContent,
 }
 
 /// A tool spec as supplied by the tool registry.
@@ -197,14 +205,17 @@ pub fn resolve_thinking(
     }
 }
 
-fn eligible_for_cache_marker(block: &ContentBlock) -> bool {
-    matches!(
-        block,
-        ContentBlock::Text { .. } | ContentBlock::Image { .. } | ContentBlock::ToolResult { .. }
-    )
+fn cache_slot(block: &mut ContentBlock) -> Option<&mut Option<CacheControlEphemeral>> {
+    match block {
+        ContentBlock::Text { cache_control, .. }
+        | ContentBlock::Image { cache_control, .. }
+        | ContentBlock::ToolResult { cache_control, .. } => Some(cache_control),
+        _ => None,
+    }
 }
 
-/// Mark the last user/system message's final eligible block.
+/// Mark the last user/system message's final eligible block, converting a bare
+/// string to a marked block array like pi's `convertMessages` does.
 pub fn apply_conversation_cache_breakpoint(
     messages: &mut [AnthropicMessage],
     cache_control: &Option<CacheControlEphemeral>,
@@ -218,28 +229,20 @@ pub fn apply_conversation_cache_breakpoint(
     if last_message.role != "user" && last_message.role != "system" {
         return;
     }
-    let Some(last_block) = last_message.content.last_mut() else {
-        return;
-    };
-    if !eligible_for_cache_marker(last_block) {
-        return;
-    }
-    match last_block {
-        ContentBlock::Text {
-            cache_control: slot,
-            ..
+    match &mut last_message.content {
+        MessageContent::Text(text) => {
+            last_message.content = MessageContent::Blocks(vec![ContentBlock::Text {
+                text: std::mem::take(text),
+                cache_control: Some(cache_control.clone()),
+            }]);
         }
-        | ContentBlock::Image {
-            cache_control: slot,
-            ..
+        MessageContent::Blocks(blocks) => {
+            if let Some(block) = blocks.last_mut() {
+                if let Some(slot) = cache_slot(block) {
+                    *slot = Some(cache_control.clone());
+                }
+            }
         }
-        | ContentBlock::ToolResult {
-            cache_control: slot,
-            ..
-        } => {
-            *slot = Some(cache_control.clone());
-        }
-        _ => {}
     }
 }
 
@@ -292,9 +295,19 @@ pub fn build_anthropic_params(
 }
 
 #[cfg(test)]
+pub(crate) fn block_has_cache_marker(block: &ContentBlock) -> bool {
+    match block {
+        ContentBlock::Text { cache_control, .. }
+        | ContentBlock::Image { cache_control, .. }
+        | ContentBlock::ToolResult { cache_control, .. } => cache_control.is_some(),
+        _ => false,
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    use crate::convert::{convert_messages, AssistantBlock, ContentPart, TranscriptMessage};
 
     fn options() -> AnthropicBuildOptions {
         AnthropicBuildOptions {
@@ -326,10 +339,14 @@ mod tests {
     fn user_text(text: &str) -> AnthropicMessage {
         AnthropicMessage {
             role: "user",
-            content: vec![ContentBlock::Text {
-                text: text.to_string(),
-                cache_control: None,
-            }],
+            content: MessageContent::Text(text.to_string()),
+        }
+    }
+
+    fn user_blocks(blocks: Vec<ContentBlock>) -> AnthropicMessage {
+        AnthropicMessage {
+            role: "user",
+            content: MessageContent::Blocks(blocks),
         }
     }
 
@@ -377,29 +394,19 @@ mod tests {
     }
 
     #[test]
-    fn last_user_text_block_is_marked() {
-        let mut messages = vec![
-            AnthropicMessage {
-                role: "assistant",
-                content: vec![ContentBlock::Text {
-                    text: "a".into(),
-                    cache_control: None,
-                }],
-            },
-            user_text("b"),
-        ];
+    fn bare_string_is_converted_to_marked_block() {
+        let mut messages = vec![user_text("hi")];
         let marker = Some(CacheControlEphemeral {
             r#type: "ephemeral",
             ttl: None,
         });
         apply_conversation_cache_breakpoint(&mut messages, &marker);
-        match &messages[1].content[0] {
-            ContentBlock::Text { cache_control, .. } => assert!(cache_control.is_some()),
-            _ => panic!("expected text"),
-        }
-        match &messages[0].content[0] {
-            ContentBlock::Text { cache_control, .. } => assert!(cache_control.is_none()),
-            _ => panic!("expected text"),
+        match &messages[0].content {
+            MessageContent::Blocks(blocks) => match &blocks[0] {
+                ContentBlock::Text { cache_control, .. } => assert!(cache_control.is_some()),
+                _ => panic!("expected text"),
+            },
+            _ => panic!("expected blocks"),
         }
     }
 
@@ -411,38 +418,39 @@ mod tests {
             &[],
             vec![AnthropicMessage {
                 role: "assistant",
-                content: vec![ContentBlock::Text {
+                content: MessageContent::Blocks(vec![ContentBlock::Text {
                     text: "a".into(),
                     cache_control: None,
-                }],
+                }]),
             }],
             &options(),
         );
-        match &params.messages[0].content[0] {
-            ContentBlock::Text { cache_control, .. } => assert!(cache_control.is_none()),
-            _ => panic!("expected text"),
+        match &params.messages[0].content {
+            MessageContent::Blocks(blocks) => {
+                assert!(!block_has_cache_marker(&blocks[0]));
+            }
+            _ => panic!("expected blocks"),
         }
     }
 
     #[test]
     fn tool_result_block_is_marked() {
-        let mut messages = vec![AnthropicMessage {
-            role: "user",
-            content: vec![ContentBlock::ToolResult {
-                tool_use_id: "t1".into(),
-                content: json!("ok"),
-                is_error: None,
-                cache_control: None,
-            }],
-        }];
+        let mut messages = vec![user_blocks(vec![ContentBlock::ToolResult {
+            tool_use_id: "t1".into(),
+            content: MessageContent::Text("ok".into()),
+            is_error: false,
+            cache_control: None,
+        }])];
         let marker = Some(CacheControlEphemeral {
             r#type: "ephemeral",
             ttl: None,
         });
         apply_conversation_cache_breakpoint(&mut messages, &marker);
-        match &messages[0].content[0] {
-            ContentBlock::ToolResult { cache_control, .. } => assert!(cache_control.is_some()),
-            _ => panic!("expected tool_result"),
+        match &messages[0].content {
+            MessageContent::Blocks(blocks) => {
+                assert!(block_has_cache_marker(&blocks[0]));
+            }
+            _ => panic!("expected blocks"),
         }
     }
 
@@ -459,9 +467,9 @@ mod tests {
         );
         assert!(params.system.unwrap()[0].cache_control.is_none());
         assert!(params.tools.unwrap()[0].cache_control.is_none());
-        match &params.messages[0].content[0] {
-            ContentBlock::Text { cache_control, .. } => assert!(cache_control.is_none()),
-            _ => panic!("expected text"),
+        match &params.messages[0].content {
+            MessageContent::Text(_) => {}
+            MessageContent::Blocks(blocks) => assert!(!block_has_cache_marker(&blocks[0])),
         }
     }
 
@@ -550,56 +558,91 @@ mod tests {
         ]
     }
 
+    fn assert_parity(fixture: &str, built: AnthropicParams, label: &str) {
+        let expected: Value = serde_json::from_str(fixture).expect("fixture parses");
+        let actual = serde_json::to_value(built).expect("params serialize");
+        assert_eq!(actual, expected, "{label} differs from pi");
+    }
+
     /// End-to-end parity against requests captured from pi itself (VED-313).
     /// Regenerate fixtures with `./scripts/parity-check.sh`.
     #[test]
     fn matches_captured_pi_basic() {
-        let expected: Value = serde_json::from_str(include_str!(
-            "../../../harness/fixtures/anthropic-basic.json"
-        ))
-        .expect("fixture parses");
-        let actual = serde_json::to_value(build_anthropic_params(
+        let built = build_anthropic_params(
             "claude-sonnet-4-5".into(),
             "You are pi, a coding agent. Be concise.",
             &parity_tools(),
             vec![user_text("hello")],
             &parity_options(CacheRetention::Short),
-        ))
-        .expect("params serialize");
-        assert_eq!(actual, expected, "basic request differs from pi");
+        );
+        assert_parity(
+            include_str!("../../../harness/fixtures/anthropic-basic.json"),
+            built,
+            "basic",
+        );
     }
 
     #[test]
     fn matches_captured_pi_long_retention() {
-        let expected: Value = serde_json::from_str(include_str!(
-            "../../../harness/fixtures/anthropic-long-retention.json"
-        ))
-        .expect("fixture parses");
-        let actual = serde_json::to_value(build_anthropic_params(
+        let built = build_anthropic_params(
             "claude-sonnet-4-5".into(),
             "You are pi, a coding agent. Be concise.",
             &parity_tools(),
             vec![user_text("hello")],
             &parity_options(CacheRetention::Long),
-        ))
-        .expect("params serialize");
-        assert_eq!(actual, expected, "long-retention request differs from pi");
+        );
+        assert_parity(
+            include_str!("../../../harness/fixtures/anthropic-long-retention.json"),
+            built,
+            "long-retention",
+        );
     }
 
     #[test]
     fn matches_captured_pi_no_tools() {
-        let expected: Value = serde_json::from_str(include_str!(
-            "../../../harness/fixtures/anthropic-no-tools.json"
-        ))
-        .expect("fixture parses");
-        let actual = serde_json::to_value(build_anthropic_params(
+        let built = build_anthropic_params(
             "claude-sonnet-4-5".into(),
             "You are pi.",
             &[],
             vec![user_text("hi")],
             &parity_options(CacheRetention::Short),
-        ))
-        .expect("params serialize");
-        assert_eq!(actual, expected, "no-tools request differs from pi");
+        );
+        assert_parity(
+            include_str!("../../../harness/fixtures/anthropic-no-tools.json"),
+            built,
+            "no-tools",
+        );
+    }
+
+    #[test]
+    fn matches_captured_pi_tool_use() {
+        let transcript = vec![
+            TranscriptMessage::UserText("read package.json".into()),
+            TranscriptMessage::Assistant(vec![AssistantBlock::ToolCall {
+                id: "toolu_1".into(),
+                name: "read".into(),
+                arguments: json!({"path": "package.json"}),
+            }]),
+            TranscriptMessage::ToolResult {
+                tool_call_id: "toolu_1".into(),
+                content: vec![ContentPart::Text {
+                    text: "{\"name\":\"x\"}".into(),
+                }],
+                is_error: false,
+            },
+            TranscriptMessage::UserText("summarize it".into()),
+        ];
+        let built = build_anthropic_params(
+            "claude-sonnet-4-5".into(),
+            "You are pi, a coding agent. Be concise.",
+            &parity_tools(),
+            convert_messages(&transcript),
+            &parity_options(CacheRetention::Short),
+        );
+        assert_parity(
+            include_str!("../../../harness/fixtures/anthropic-tool-use.json"),
+            built,
+            "tool-use",
+        );
     }
 }

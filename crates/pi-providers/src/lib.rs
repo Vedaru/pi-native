@@ -9,9 +9,11 @@
 //! `convertMessages`).
 
 pub mod anthropic;
+pub mod convert;
 
 pub use anthropic::{
     apply_conversation_cache_breakpoint, build_anthropic_params, build_system, convert_tools,
     resolve_thinking, AnthropicBuildOptions, AnthropicMessage, AnthropicParams,
-    AnthropicSystemBlock, AnthropicTool, ContentBlock, ThinkingOptions, ToolSpec,
+    AnthropicSystemBlock, AnthropicTool, ContentBlock, MessageContent, ThinkingOptions, ToolSpec,
 };
+pub use convert::{convert_messages, AssistantBlock, ContentPart, TranscriptMessage};
