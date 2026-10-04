@@ -2,15 +2,14 @@
 //!
 //! Provider streaming: build the request with `pi-providers`, POST it, and feed
 //! the response body through `pi-sse` into a provider stream parser. No SDKs and
-//! no Node.
+//! no Node. Only the OpenAI wire formats are supported.
 
 use std::io::Read;
 
 use pi_providers::{
-    collect_completions, collect_content, collect_google, collect_response, AnthropicParams,
-    AnthropicStream, AnthropicStreamEvent, ContentBlock, GoogleParams, GoogleStream,
-    GoogleStreamEvent, OpenAiCompletionsStream, OpenAiCompletionsStreamEvent,
-    OpenAiResponsesParams, OpenAiResponsesStream, OpenAiResponsesStreamEvent, Usage,
+    collect_completions, collect_response, ContentBlock, OpenAiCompletionsStream,
+    OpenAiCompletionsStreamEvent, OpenAiResponsesParams, OpenAiResponsesStream,
+    OpenAiResponsesStreamEvent, Usage,
 };
 use pi_sse::SseParser;
 
@@ -120,9 +119,6 @@ pub struct StreamResult {
     pub usage: Usage,
 }
 
-/// Alias kept for the Anthropic path.
-pub type AnthropicResult = StreamResult;
-
 /// A provider SSE protocol: where to POST, how to authenticate, and how to turn
 /// events into a result. Implementations are stateful parsers.
 pub trait SseProtocol: Default {
@@ -166,29 +162,26 @@ where
     Ok(protocol.into_result())
 }
 
-/// Anthropic Messages protocol.
+/// OpenAI-compatible Chat Completions protocol (DeepSeek, Xiaomi, OpenAI).
 #[derive(Default)]
-pub struct AnthropicProtocol {
-    stream: AnthropicStream,
-    events: Vec<AnthropicStreamEvent>,
+pub struct OpenAiCompletionsProtocol {
+    stream: OpenAiCompletionsStream,
+    events: Vec<OpenAiCompletionsStreamEvent>,
 }
 
-impl SseProtocol for AnthropicProtocol {
-    type Params = AnthropicParams;
-    fn endpoint(base_url: &str, _params: &AnthropicParams) -> String {
-        format!("{}/v1/messages", base_url.trim_end_matches('/'))
+impl SseProtocol for OpenAiCompletionsProtocol {
+    type Params = serde_json::Value;
+    fn endpoint(base_url: &str, _params: &serde_json::Value) -> String {
+        format!("{}/chat/completions", base_url.trim_end_matches('/'))
     }
     fn headers(api_key: &str) -> Vec<(&'static str, String)> {
-        vec![
-            ("x-api-key", api_key.to_string()),
-            ("anthropic-version", "2023-06-01".to_string()),
-        ]
+        vec![("authorization", format!("Bearer {api_key}"))]
     }
-    fn ingest(&mut self, event_type: &str, data: &str) {
-        self.events.push(self.stream.handle(event_type, data));
+    fn ingest(&mut self, _event_type: &str, data: &str) {
+        self.events.push(self.stream.handle(data));
     }
     fn into_result(self) -> StreamResult {
-        let (content, text) = collect_content(&self.events);
+        let (text, content) = collect_completions(&self.events);
         StreamResult {
             message_id: self.stream.message_id().map(str::to_string),
             content,
@@ -227,68 +220,6 @@ impl SseProtocol for OpenAiResponsesProtocol {
     }
 }
 
-/// Google Generative AI (Gemini) protocol. The model id lives in the path.
-#[derive(Default)]
-pub struct GoogleProtocol {
-    stream: GoogleStream,
-    events: Vec<GoogleStreamEvent>,
-}
-
-impl SseProtocol for GoogleProtocol {
-    type Params = GoogleParams;
-    fn endpoint(base_url: &str, params: &GoogleParams) -> String {
-        format!(
-            "{}/models/{}:streamGenerateContent?alt=sse",
-            base_url.trim_end_matches('/'),
-            params.model
-        )
-    }
-    fn headers(api_key: &str) -> Vec<(&'static str, String)> {
-        vec![("x-goog-api-key", api_key.to_string())]
-    }
-    fn ingest(&mut self, _event_type: &str, data: &str) {
-        self.events.extend(self.stream.handle(data));
-    }
-    fn into_result(self) -> StreamResult {
-        let (text, content) = collect_google(&self.events);
-        StreamResult {
-            message_id: None,
-            content,
-            text,
-            usage: self.stream.usage().clone(),
-        }
-    }
-}
-
-/// OpenAI-compatible Chat Completions protocol (deepseek, xiaomi, openai).
-#[derive(Default)]
-pub struct OpenAiCompletionsProtocol {
-    stream: OpenAiCompletionsStream,
-    events: Vec<OpenAiCompletionsStreamEvent>,
-}
-
-impl SseProtocol for OpenAiCompletionsProtocol {
-    type Params = serde_json::Value;
-    fn endpoint(base_url: &str, _params: &serde_json::Value) -> String {
-        format!("{}/chat/completions", base_url.trim_end_matches('/'))
-    }
-    fn headers(api_key: &str) -> Vec<(&'static str, String)> {
-        vec![("authorization", format!("Bearer {api_key}"))]
-    }
-    fn ingest(&mut self, _event_type: &str, data: &str) {
-        self.events.push(self.stream.handle(data));
-    }
-    fn into_result(self) -> StreamResult {
-        let (text, content) = collect_completions(&self.events);
-        StreamResult {
-            message_id: self.stream.message_id().map(str::to_string),
-            content,
-            text,
-            usage: self.stream.usage().clone(),
-        }
-    }
-}
-
 /// Stream an OpenAI-compatible Chat Completions request.
 pub fn stream_openai_completions(
     base_url: &str,
@@ -296,24 +227,6 @@ pub fn stream_openai_completions(
     params: &serde_json::Value,
 ) -> Result<StreamResult, NetError> {
     stream_sse::<OpenAiCompletionsProtocol>(base_url, api_key, params)
-}
-
-/// Stream a Gemini `generateContent` request.
-pub fn stream_google(
-    base_url: &str,
-    api_key: &str,
-    params: &GoogleParams,
-) -> Result<StreamResult, NetError> {
-    stream_sse::<GoogleProtocol>(base_url, api_key, params)
-}
-
-/// Stream an Anthropic Messages request.
-pub fn stream_anthropic(
-    base_url: &str,
-    api_key: &str,
-    params: &AnthropicParams,
-) -> Result<StreamResult, NetError> {
-    stream_sse::<AnthropicProtocol>(base_url, api_key, params)
 }
 
 /// Stream an OpenAI Responses request. `base_url` includes the version path.

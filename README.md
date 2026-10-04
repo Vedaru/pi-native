@@ -19,7 +19,7 @@ a pi-compatible implementation.
 
 ```
 crates/pi-cache/       provider prompt-cache primitives, ported from pi (VED-314)
-crates/pi-providers/   Anthropic/OpenAI request builders with pi's cache placement
+crates/pi-providers/   OpenAI request builders with pi's cache placement
 crates/pi-cli/         `pi-native` CLI
 scripts/               benchmark, stress, and parity harnesses
 artifacts/             committed measurement history
@@ -50,24 +50,27 @@ scripts/package.sh x86_64-unknown-linux-musl   # static build (needs musl-tools)
 are the same.
 
 ```bash
-# one-shot
-ANTHROPIC_API_KEY=… pi-native -p "summarize README.md"
+# one-shot (provider, base URL, model, and key are explicit — no baked-in defaults)
+OPENAI_API_KEY=… pi-native \
+  --provider openai-completions --base-url https://api.deepseek.com \
+  --model deepseek-flash --thinking-format deepseek -p "summarize README.md"
 
 # a unit: protocol on stdio (approval-required tools ask the client; --yolo allows all)
-ANTHROPIC_API_KEY=… pi-native --serve --provider anthropic
+pi-native --serve --provider openai-completions --base-url … --model …
 
 # drive a local unit from the terminal
 pi-native --client
 
-# openai / google
-OPENAI_API_KEY=…  pi-native --serve --provider openai-responses --model gpt-4o
-GEMINI_API_KEY=…  pi-native --serve --provider google       --model gemini-2.0-flash
+# OpenAI Responses
+pi-native --serve --provider openai-responses --base-url https://api.openai.com/v1 --model gpt-4o
 ```
 
-Flags: `--provider anthropic|openai-responses|google`, `--model`, `--session
-<path>` (seed the transcript), `--context-window <tokens>` (compaction; 0
-disables; dropped history is summarized by the model), `--yolo`. Events stream
-as the turn produces them. `--session <path>` seeds and persists the session.
+Flags: `--provider openai-completions|openai-responses`, `--base-url` (or
+`OPENAI_BASE_URL`), `--api-key` (or `OPENAI_API_KEY`), `--model`,
+`--max-tokens`, `--thinking-format none|deepseek`, `--session <path>` (seed and
+persist the transcript), `--context-window <tokens>` (compaction; 0 disables;
+dropped history is summarized by the model), `--yolo`. Events stream as the turn
+produces them.
 
 Load pi extensions/plugins with `--extension <path>` (repeatable). Tools they
 register via `pi.registerTool` are exposed to the agent and run in QuickJS:
@@ -106,7 +109,7 @@ against those fixtures.
 ```
 
 Scenarios live in `scripts/harness/scenarios/` and select a `provider`
-(`anthropic`, `openai-completions`, `openai-responses`). Fixtures live in
+(`openai-completions`, `openai-responses`). Fixtures live in
 each crate's `tests/fixtures/`. JSON key order is canonicalized so only semantic changes
 count. `PI_AI_DIST` overrides the installed pi-ai path.
 

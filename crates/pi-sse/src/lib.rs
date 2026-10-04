@@ -1,6 +1,6 @@
 //! Incremental Server-Sent Events (SSE) parser.
 //!
-//! Provider streaming (Anthropic, OpenAI, Google) delivers SSE frames over
+//! Provider streaming delivers SSE frames over
 //! chunked HTTP. This parser turns an arbitrary sequence of byte chunks into
 //! complete events, following the WHATWG event-stream rules:
 //!

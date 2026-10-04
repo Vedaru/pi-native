@@ -7,8 +7,8 @@
 //! (`thinkingFormat: "deepseek"`). Other `thinkingFormat` variants and
 //! assistant/tool message conversion are ported only where noted.
 
-use crate::anthropic::ToolSpec;
 use crate::convert::{AssistantBlock, ContentPart, TranscriptMessage};
+use crate::types::ToolSpec;
 use pi_cache::{openai_completions_prompt_cache_key, CacheRetention};
 use serde_json::{json, Map, Value};
 

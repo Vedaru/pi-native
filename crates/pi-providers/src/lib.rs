@@ -1,36 +1,21 @@
 //! Provider request builders.
 //!
-//! The cache marker placement here mirrors pi exactly:
-//! - Anthropic `cache_control` on the system block, the **last** tool, and the
-//!   last user/system message's final eligible content block.
-//!
-//! Sources mirrored: `packages/ai/src/api/anthropic-messages.ts`
-//! (`buildParams`, `convertTools`, the conversation breakpoint at the end of
-//! `convertMessages`).
+//! Only the OpenAI wire formats are built (Chat Completions and Responses);
+//! there is no Anthropic or Google model to validate against.
 
-pub mod anthropic;
-pub mod anthropic_stream;
 pub mod convert;
-pub mod google;
-pub mod google_stream;
 pub mod openai_completions;
 pub mod openai_completions_stream;
 pub mod openai_responses;
 pub mod openai_responses_stream;
+pub mod types;
 
 pub use pi_cache::CacheRetention;
 
-pub use anthropic::{
-    apply_conversation_cache_breakpoint, build_anthropic_params, build_system, convert_tools,
-    resolve_thinking, AnthropicBuildOptions, AnthropicMessage, AnthropicParams,
-    AnthropicSystemBlock, AnthropicTool, ContentBlock, MessageContent, ThinkingOptions, ToolSpec,
-};
-pub use anthropic_stream::{collect_content, AnthropicStream, AnthropicStreamEvent, Usage};
-pub use convert::{convert_messages, AssistantBlock, ContentPart, TranscriptMessage};
-pub use google::{build_google_params, GoogleBuildOptions, GoogleParams};
-pub use google_stream::{collect_google, GoogleStream, GoogleStreamEvent};
+pub use convert::{AssistantBlock, ContentPart, TranscriptMessage};
 pub use openai_completions::{
-    build_openai_completions_params, MaxTokensField, OpenAiCompletionsBuildOptions, ThinkingFormat,
+    build_openai_completions_params, make_strict_schema, MaxTokensField,
+    OpenAiCompletionsBuildOptions, ThinkingFormat,
 };
 pub use openai_completions_stream::{
     collect_completions, OpenAiCompletionsStream, OpenAiCompletionsStreamEvent,
@@ -42,3 +27,4 @@ pub use openai_responses::{
 pub use openai_responses_stream::{
     collect_response, OpenAiResponsesStream, OpenAiResponsesStreamEvent,
 };
+pub use types::{ContentBlock, MessageContent, ToolSpec, Usage};

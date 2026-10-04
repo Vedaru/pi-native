@@ -16,7 +16,7 @@ scope.
 | Tools: `read`, `bash`, `edit`, `write`, `grep`, `find`, `ls` | plus powershell on Windows |
 | Modes: interactive TUI, print, JSON, RPC | |
 | Sessions: JSONL with branching; context building; compaction | `pi-session` |
-| Providers and streaming | Anthropic, OpenAI Responses/Completions, Google — `pi-providers`, `pi-net` |
+| Providers and streaming | OpenAI Responses/Completions — `pi-providers`, `pi-net` |
 | Extensions, skills, prompt templates, themes, packages | the plugin wrapper (`pi-plugins`) |
 | MCP and codemode | as pi ships them |
 | Image resize/convert | `pi-image` |

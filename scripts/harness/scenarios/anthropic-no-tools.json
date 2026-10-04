@@ -1,8 +1,0 @@
-{
-  "model": "claude-sonnet-4-5",
-  "cacheRetention": "short",
-  "systemPrompt": "You are pi.",
-  "messages": [
-    { "role": "user", "content": "hi", "timestamp": 0 }
-  ]
-}

@@ -1,48 +1,6 @@
 use super::*;
-use pi_providers::{AnthropicBuildOptions, ThinkingOptions};
 use std::io::Write;
 use std::net::TcpListener;
-
-fn test_params() -> AnthropicParams {
-    pi_providers::build_anthropic_params(
-        "claude-sonnet-4-5".into(),
-        "system",
-        &[],
-        vec![pi_providers::AnthropicMessage {
-            role: "user",
-            content: pi_providers::MessageContent::Text("hi".into()),
-        }],
-        &AnthropicBuildOptions {
-            cache_retention: pi_providers::CacheRetention::Short,
-            supports_long_cache_retention: true,
-            supports_cache_control_on_tools: true,
-            supports_eager_tool_input_streaming: true,
-            strict_tools: false,
-            max_tokens: Some(1024),
-            default_max_tokens: 1024,
-            temperature: None,
-            reasoning: true,
-            force_adaptive_thinking: false,
-            thinking: ThinkingOptions {
-                enabled: Some(false),
-                ..Default::default()
-            },
-        },
-    )
-}
-
-const SSE_BODY: &str = concat!(
-    "event: message_start\n",
-    "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_42\",\"usage\":{\"input_tokens\":10,\"output_tokens\":1,\"cache_read_input_tokens\":90}}}\n\n",
-    "event: content_block_start\n",
-    "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
-    "event: content_block_delta\n",
-    "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello\"}}\n\n",
-    "event: message_delta\n",
-    "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":5}}\n\n",
-    "event: message_stop\n",
-    "data: {\"type\":\"message_stop\"}\n\n",
-);
 
 fn serve_once(body: &'static str) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
@@ -50,7 +8,7 @@ fn serve_once(body: &'static str) -> String {
     std::thread::spawn(move || {
         if let Ok((mut socket, _)) = listener.accept() {
             let mut request = [0u8; 4096];
-            let _ = socket.read(&mut request);
+            let _ = std::io::Read::read(&mut socket, &mut request);
             let response = format!(
                 "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
                 body.len(),
@@ -62,16 +20,46 @@ fn serve_once(body: &'static str) -> String {
     format!("http://{addr}")
 }
 
+const COMPLETIONS_SSE: &str = concat!(
+    "data: {\"id\":\"chatcmpl-1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hello\"},\"finish_reason\":null}]}\n\n",
+    "data: {\"id\":\"chatcmpl-1\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":5,\"prompt_tokens_details\":{\"cached_tokens\":60}}}\n\n",
+    "data: [DONE]\n\n",
+);
+
 #[test]
-fn streams_anthropic_sse_with_usage() {
-    let base = serve_once(SSE_BODY);
-    let result = stream_anthropic(&base, "test-key", &test_params()).expect("streams");
-    assert_eq!(result.message_id.as_deref(), Some("msg_42"));
+fn streams_openai_completions_sse_with_usage() {
+    let base = serve_once(COMPLETIONS_SSE);
+    let params = pi_providers::build_openai_completions_params(
+        "deepseek-flash".into(),
+        "system",
+        &[],
+        &[pi_providers::TranscriptMessage::UserText("hi".into())],
+        &pi_providers::OpenAiCompletionsBuildOptions {
+            cache_retention: pi_providers::CacheRetention::Short,
+            session_id: None,
+            base_url_is_openai_api: false,
+            supports_long_cache_retention: true,
+            supports_usage_in_streaming: true,
+            supports_store: false,
+            max_tokens_field: pi_providers::MaxTokensField::MaxTokens,
+            supports_developer_role: false,
+            supports_strict_mode: true,
+            requires_reasoning_content_on_assistant_messages: true,
+            reasoning: true,
+            thinking_format: pi_providers::ThinkingFormat::Deepseek,
+            max_tokens: Some(384_000),
+            off_supported: true,
+            reasoning_effort: None,
+        },
+    );
+    let result = stream_openai_completions(&base, "test-key", &params).expect("streams");
+    assert_eq!(result.message_id.as_deref(), Some("chatcmpl-1"));
     assert_eq!(result.text, "Hello");
-    assert_eq!(result.usage.input, 10);
+    // prompt_tokens includes cached tokens: input = 100 - 60.
+    assert_eq!(result.usage.input, 40);
+    assert_eq!(result.usage.cache_read, 60);
     assert_eq!(result.usage.output, 5);
-    assert_eq!(result.usage.cache_read, 90);
-    assert_eq!(result.usage.cache_hit_rate(), Some(0.9));
+    assert_eq!(result.usage.cache_hit_rate(), Some(0.6));
 }
 
 const RESPONSES_SSE: &str = concat!(
@@ -110,32 +98,4 @@ fn streams_openai_responses_sse_with_usage() {
     assert_eq!(result.usage.cache_read, 60);
     assert_eq!(result.usage.output, 7);
     assert_eq!(result.usage.cache_hit_rate(), Some(0.6));
-}
-const GOOGLE_SSE: &str = concat!(
-    "event: message\n",
-    "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Hi\"}],\"role\":\"model\"}}]}\n\n",
-    "event: message\n",
-    "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"!\"}],\"role\":\"model\"},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":100,\"candidatesTokenCount\":5,\"cachedContentTokenCount\":80}}\n\n",
-);
-
-#[test]
-fn streams_google_sse_with_usage() {
-    let base = serve_once(GOOGLE_SSE);
-    let params = pi_providers::build_google_params(
-        "gemini-2.5-flash".into(),
-        "system",
-        &[],
-        &[pi_providers::TranscriptMessage::UserText("hi".into())],
-        &pi_providers::GoogleBuildOptions {
-            max_tokens: Some(1024),
-            reasoning: true,
-            thinking_disabled: true,
-        },
-    );
-    let result = stream_google(&base, "test-key", &params).expect("streams");
-    assert_eq!(result.text, "Hi!");
-    assert_eq!(result.usage.input, 20);
-    assert_eq!(result.usage.cache_read, 80);
-    assert_eq!(result.usage.output, 5);
-    assert_eq!(result.usage.cache_hit_rate(), Some(0.8));
 }

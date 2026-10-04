@@ -8,8 +8,8 @@
 //! scenario). Assistant/tool-result conversion is ported but not yet covered by
 //! a captured fixture.
 
-use crate::anthropic::ToolSpec;
 use crate::convert::{AssistantBlock, ContentPart, TranscriptMessage};
+use crate::types::ToolSpec;
 use pi_cache::{openai_responses_prompt_cache_key, CacheRetention};
 use serde::Serialize;
 use serde_json::{json, Map, Value};

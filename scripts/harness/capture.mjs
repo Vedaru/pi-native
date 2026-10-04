@@ -6,10 +6,10 @@
 // writes a canonical-JSON fixture. The Rust builder must reproduce it.
 //
 // Usage:
-//   node scripts/harness/capture.mjs scripts/harness/scenarios/anthropic-basic.json <out-dir>
+//   node scripts/harness/capture.mjs scripts/harness/scenarios/openai-completions-basic.json <out-dir>
 //
-// Scenario `provider` (default "anthropic"):
-//   anthropic | openai-completions | openai-responses
+// Scenario `provider` (default "openai-completions"):
+//   openai-completions | openai-responses
 //
 // Env:
 //   PI_AI_DIST  override path to the installed pi-ai dist directory.
@@ -28,30 +28,26 @@ const PI_AI_DIST =
 const load = (rel) => import(pathToFileURL(join(PI_AI_DIST, rel)).href);
 
 const PROVIDERS = {
-  anthropic: {
-    api: "api/anthropic-messages.js",
-    models: "providers/anthropic.models.js",
-    export: "ANTHROPIC_MODELS",
-  },
   "openai-completions": {
     api: "api/openai-completions.js",
     models: "providers/openai.models.js",
     export: "OPENAI_MODELS",
   },
-  "openai-responses": {
-    api: "api/openai-responses.js",
-    models: "providers/openai.models.js",
-    export: "OPENAI_MODELS",
-  },
+  // DeepSeek/Xiaomi use the OpenAI Completions API with their own model catalog.
   deepseek: {
     api: "api/openai-completions.js",
     models: "providers/deepseek.models.js",
     export: "DEEPSEEK_MODELS",
   },
-  google: {
-    api: "api/google-generative-ai.js",
-    models: "providers/google.models.js",
-    export: "GOOGLE_MODELS",
+  xiaomi: {
+    api: "api/openai-completions.js",
+    models: "providers/xiaomi.models.js",
+    export: "XIAOMI_MODELS",
+  },
+  "openai-responses": {
+    api: "api/openai-responses.js",
+    models: "providers/openai.models.js",
+    export: "OPENAI_MODELS",
   },
 };
 
@@ -73,7 +69,7 @@ async function main() {
     process.exit(2);
   }
   const scenario = JSON.parse(readFileSync(scenarioPath, "utf8"));
-  const providerName = scenario.provider ?? "anthropic";
+  const providerName = scenario.provider ?? "openai-completions";
   const provider = scenario.apiModule
     ? { api: scenario.apiModule, models: scenario.modelsModule, export: scenario.modelsExport }
     : PROVIDERS[providerName];
@@ -102,12 +98,6 @@ async function main() {
     messages: scenario.messages,
   });
 
-  // Google's adapter rejects a custom `options.fetch`, so for it we replace the
-  // global fetch instead. Other providers get the injected fetch directly.
-  if (providerName === "google") {
-    globalThis.fetch = fakeFetch;
-  }
-
   const options = {
     apiKey: "harness-dummy-key",
     sessionId: scenario.sessionId,
@@ -116,9 +106,7 @@ async function main() {
       capturedParams = params;
     },
   };
-  if (providerName !== "google") {
-    options.fetch = fakeFetch;
-  }
+  options.fetch = fakeFetch;
 
   streamSimple(model, context, options);
   await new Promise((r) => setTimeout(r, 500));

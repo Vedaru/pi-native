@@ -7,14 +7,11 @@
 
 use crate::{AgentError, AssistantTurn, CompletionRequest, ModelProvider, ToolCall};
 use pi_net::{
-    stream_sse, AnthropicProtocol, GoogleProtocol, OpenAiCompletionsProtocol,
-    OpenAiResponsesProtocol, SseProtocol, StreamResult,
+    stream_sse, OpenAiCompletionsProtocol, OpenAiResponsesProtocol, SseProtocol, StreamResult,
 };
 use pi_providers::{
-    build_anthropic_params, build_google_params, build_openai_completions_params,
-    build_openai_responses_params, convert_messages, AnthropicBuildOptions, CacheRetention,
-    ContentBlock, GoogleBuildOptions, MaxTokensField, OpenAiCompletionsBuildOptions,
-    OpenAiResponsesBuildOptions, ThinkingFormat, ThinkingOptions,
+    build_openai_completions_params, build_openai_responses_params, CacheRetention, ContentBlock,
+    MaxTokensField, OpenAiCompletionsBuildOptions, OpenAiResponsesBuildOptions, ThinkingFormat,
 };
 
 /// Maps a streamed provider result to an `AssistantTurn`.
@@ -79,39 +76,6 @@ impl<P: SseProtocol + 'static> ModelProvider for HttpProvider<P> {
     }
 }
 
-/// Anthropic Messages provider.
-pub fn anthropic_provider(
-    base_url: impl Into<String>,
-    api_key: impl Into<String>,
-    model: impl Into<String>,
-) -> HttpProvider<AnthropicProtocol> {
-    let model = model.into();
-    HttpProvider::new(base_url, api_key, move |request| {
-        build_anthropic_params(
-            model.clone(),
-            request.system,
-            request.tools,
-            convert_messages(request.messages),
-            &AnthropicBuildOptions {
-                cache_retention: CacheRetention::Short,
-                supports_long_cache_retention: true,
-                supports_cache_control_on_tools: true,
-                supports_eager_tool_input_streaming: true,
-                strict_tools: false,
-                max_tokens: Some(4096),
-                default_max_tokens: 4096,
-                temperature: None,
-                reasoning: true,
-                force_adaptive_thinking: false,
-                thinking: ThinkingOptions {
-                    enabled: Some(false),
-                    ..Default::default()
-                },
-            },
-        )
-    })
-}
-
 /// OpenAI Responses provider.
 pub fn openai_responses_provider(
     base_url: impl Into<String>,
@@ -140,13 +104,19 @@ pub fn openai_responses_provider(
     })
 }
 
-/// OpenAI-compatible Chat Completions provider (DeepSeek, Xiaomi, OpenAI).
+/// OpenAI-compatible Chat Completions provider.
+///
+/// Everything vendor-specific (base URL, model id, output cap, thinking format)
+/// is supplied by the caller; nothing is assumed here.
 pub fn openai_completions_provider(
     base_url: impl Into<String>,
     api_key: impl Into<String>,
     model: impl Into<String>,
+    max_tokens: Option<i64>,
+    thinking_format: ThinkingFormat,
 ) -> HttpProvider<OpenAiCompletionsProtocol> {
     let model = model.into();
+    let requires_reasoning = matches!(thinking_format, ThinkingFormat::Deepseek);
     HttpProvider::new(base_url, api_key, move |request| {
         build_openai_completions_params(
             model.clone(),
@@ -163,34 +133,12 @@ pub fn openai_completions_provider(
                 max_tokens_field: MaxTokensField::MaxTokens,
                 supports_developer_role: false,
                 supports_strict_mode: true,
-                requires_reasoning_content_on_assistant_messages: true,
+                requires_reasoning_content_on_assistant_messages: requires_reasoning,
                 reasoning: true,
-                thinking_format: ThinkingFormat::Deepseek,
-                max_tokens: Some(384_000),
+                thinking_format,
+                max_tokens,
                 off_supported: true,
                 reasoning_effort: None,
-            },
-        )
-    })
-}
-
-/// Google Gemini provider.
-pub fn google_provider(
-    base_url: impl Into<String>,
-    api_key: impl Into<String>,
-    model: impl Into<String>,
-) -> HttpProvider<GoogleProtocol> {
-    let model = model.into();
-    HttpProvider::new(base_url, api_key, move |request| {
-        build_google_params(
-            model.clone(),
-            request.system,
-            request.tools,
-            request.messages,
-            &GoogleBuildOptions {
-                max_tokens: Some(4096),
-                reasoning: true,
-                thinking_disabled: true,
             },
         )
     })

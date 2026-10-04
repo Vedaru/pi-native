@@ -3,7 +3,7 @@
 //! Ties a model provider, tools, and a transcript into a turn: ask the model,
 //! run any tool calls, append the results, and repeat until it stops. The
 //! provider is a trait so the loop is testable without a network; the native
-//! Anthropic/OpenAI/Google implementations live in `pi-net`.
+//! OpenAI provider implementations live in `pi-net`.
 //!
 //! Events are produced for the protocol layer (VED-324): streamed text is
 //! reported as assistant text, and each tool call emits start/end.
@@ -18,10 +18,10 @@ pub mod prompt;
 pub mod providers;
 pub mod session;
 
+pub use pi_providers::ThinkingFormat;
 pub use pi_tools::ToolContext;
 pub use providers::{
-    anthropic_provider, google_provider, openai_completions_provider, openai_responses_provider,
-    turn_from_stream, HttpProvider,
+    openai_completions_provider, openai_responses_provider, turn_from_stream, HttpProvider,
 };
 pub use session::{
     append_compaction, append_messages, message_value, messages_from_session, transcript_values,

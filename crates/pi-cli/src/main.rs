@@ -7,9 +7,9 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use pi_agent::prompt::{build_system_prompt, load_project_context_files, SystemPromptOptions};
 use pi_agent::{
-    anthropic_provider, google_provider, openai_completions_provider, openai_responses_provider,
-    Agent, AgentEvent, AllowAll, Approval, Approver, AssistantTurn, DenyAll, FnProvider,
-    ModelProvider, ProviderSummarizer, SessionJournal, ToolCall, DEFAULT_RESERVE_TOKENS,
+    openai_completions_provider, openai_responses_provider, Agent, AgentEvent, AllowAll, Approval,
+    Approver, AssistantTurn, DenyAll, FnProvider, ModelProvider, ProviderSummarizer,
+    SessionJournal, ThinkingFormat, ToolCall, DEFAULT_RESERVE_TOKENS,
 };
 use pi_cache::{
     clamp_openai_prompt_cache_key, get_cache_control, openai_completions_prompt_cache_key,
@@ -52,12 +52,24 @@ struct Cli {
     /// Non-interactive: run one prompt through the agent and print the result.
     #[arg(short = 'p', long = "print")]
     print: Option<String>,
-    /// Model id (defaults to an Anthropic Claude model).
-    #[arg(long, default_value = "claude-sonnet-4-5")]
-    model: String,
-    /// Provider protocol: anthropic, openai-responses, or google.
-    #[arg(long, default_value = "anthropic")]
-    provider: String,
+    /// Model id (required for agent modes).
+    #[arg(long)]
+    model: Option<String>,
+    /// Provider protocol: openai-completions or openai-responses.
+    #[arg(long)]
+    provider: Option<String>,
+    /// Provider base URL (falls back to OPENAI_BASE_URL).
+    #[arg(long)]
+    base_url: Option<String>,
+    /// Provider API key (falls back to OPENAI_API_KEY).
+    #[arg(long)]
+    api_key: Option<String>,
+    /// Request output-token cap; omitted from the request when unset.
+    #[arg(long)]
+    max_tokens: Option<i64>,
+    /// Reasoning format: `none` (default) or `deepseek`.
+    #[arg(long)]
+    thinking_format: Option<String>,
     /// Token context window for compaction; 0 disables (reserve is 16,384).
     #[arg(long, default_value_t = 200000)]
     context_window: usize,
@@ -152,8 +164,7 @@ fn main() {
     }
     if cli.serve {
         run_serve(
-            &cli.model,
-            &cli.provider,
+            &cli.provider_config(),
             cli.yolo,
             cli.context_window,
             cli.session.as_deref(),
@@ -163,8 +174,7 @@ fn main() {
     }
     if cli.client {
         run_client(
-            &cli.model,
-            &cli.provider,
+            &cli.provider_config(),
             cli.yolo,
             cli.context_window,
             cli.session.as_deref(),
@@ -185,11 +195,10 @@ fn main() {
         }
         return;
     }
-    if let Some(prompt) = cli.print {
+    if let Some(prompt) = cli.print.clone() {
         run_print(
             &prompt,
-            &cli.model,
-            &cli.provider,
+            &cli.provider_config(),
             cli.yolo,
             cli.context_window,
             cli.session.as_deref(),
@@ -241,8 +250,7 @@ fn run_rpc() {
 /// Run one prompt through the agent and print the result.
 fn run_print(
     prompt: &str,
-    model: &str,
-    provider: &str,
+    config: &ProviderConfig,
     yolo: bool,
     context_window: usize,
     session: Option<&std::path::Path>,
@@ -250,15 +258,7 @@ fn run_print(
 ) {
     let cwd = std::env::current_dir().unwrap_or_default();
     let system = system_prompt_for(&cwd);
-    let mut agent = resolve_agent(
-        model,
-        provider,
-        yolo,
-        true,
-        context_window,
-        &system,
-        extensions,
-    );
+    let mut agent = resolve_agent(config, yolo, true, context_window, &system, extensions);
     let mut journal = open_session(&mut agent, session, &cwd);
     agent.push_user(prompt);
     match agent.run() {
@@ -550,66 +550,75 @@ fn system_prompt_for(cwd: &std::path::Path) -> String {
 /// Build an agent for the selected provider, with compaction when enabled.
 ///
 /// One generic path: the provider is chosen here, the loop/tools are the same.
+/// Resolved provider settings. Nothing vendor-specific is assumed.
+struct ProviderConfig {
+    provider: String,
+    model: String,
+    base_url: String,
+    api_key: String,
+    max_tokens: Option<i64>,
+    thinking_format: ThinkingFormat,
+}
+
+fn missing(what: &str) -> ! {
+    eprintln!("pi-native: set {what}");
+    std::process::exit(2);
+}
+
+impl Cli {
+    fn provider_config(&self) -> ProviderConfig {
+        let provider = self
+            .provider
+            .clone()
+            .unwrap_or_else(|| missing("--provider (openai-completions or openai-responses)"));
+        let model = self.model.clone().unwrap_or_else(|| missing("--model"));
+        let base_url = self
+            .base_url
+            .clone()
+            .or_else(|| std::env::var("OPENAI_BASE_URL").ok())
+            .unwrap_or_else(|| missing("--base-url or OPENAI_BASE_URL"));
+        let api_key = self
+            .api_key
+            .clone()
+            .or_else(|| std::env::var("OPENAI_API_KEY").ok())
+            .unwrap_or_else(|| missing("--api-key or OPENAI_API_KEY"));
+        let thinking_format = match self.thinking_format.as_deref() {
+            Some("deepseek") => ThinkingFormat::Deepseek,
+            Some("none") | None => ThinkingFormat::None,
+            Some(other) => {
+                eprintln!("pi-native: unknown thinking format `{other}` (none, deepseek)");
+                std::process::exit(2);
+            }
+        };
+        ProviderConfig {
+            provider,
+            model,
+            base_url,
+            api_key,
+            max_tokens: self.max_tokens,
+            thinking_format,
+        }
+    }
+}
+
 /// Build a provider instance for the selected protocol.
-fn make_provider(model: &str, provider: &str) -> Box<dyn ModelProvider> {
-    match provider {
-        "anthropic" => {
-            let base = std::env::var("ANTHROPIC_BASE_URL")
-                .unwrap_or_else(|_| "https://api.anthropic.com".to_string());
-            Box::new(anthropic_provider(
-                base,
-                env_key(&["ANTHROPIC_API_KEY"]),
-                model,
-            ))
-        }
-        "openai-responses" | "openai" => {
-            let base = std::env::var("OPENAI_BASE_URL")
-                .unwrap_or_else(|_| "https://api.openai.com/v1".to_string());
-            Box::new(openai_responses_provider(
-                base,
-                env_key(&["OPENAI_API_KEY"]),
-                model,
-            ))
-        }
-        "google" => {
-            let base = std::env::var("GOOGLE_BASE_URL")
-                .unwrap_or_else(|_| "https://generativelanguage.googleapis.com".to_string());
-            Box::new(google_provider(
-                base,
-                env_key(&["GEMINI_API_KEY", "GOOGLE_API_KEY"]),
-                model,
-            ))
-        }
-        "openai-completions" => {
-            let base = std::env::var("OPENAI_BASE_URL")
-                .unwrap_or_else(|_| "https://api.openai.com/v1".to_string());
-            Box::new(openai_completions_provider(
-                base,
-                env_key(&["OPENAI_API_KEY"]),
-                model,
-            ))
-        }
-        "deepseek" => {
-            let base = std::env::var("DEEPSEEK_BASE_URL")
-                .unwrap_or_else(|_| "https://api.deepseek.com".to_string());
-            Box::new(openai_completions_provider(
-                base,
-                env_key(&["DEEPSEEK_API_KEY"]),
-                model,
-            ))
-        }
-        "xiaomi" => {
-            let base = std::env::var("XIAOMI_BASE_URL")
-                .unwrap_or_else(|_| "https://api.xiaomimimo.com/v1".to_string());
-            Box::new(openai_completions_provider(
-                base,
-                env_key(&["XIAOMI_API_KEY"]),
-                model,
-            ))
-        }
+fn make_provider(config: &ProviderConfig) -> Box<dyn ModelProvider> {
+    match config.provider.as_str() {
+        "openai-completions" => Box::new(openai_completions_provider(
+            config.base_url.clone(),
+            config.api_key.clone(),
+            config.model.clone(),
+            config.max_tokens,
+            config.thinking_format,
+        )),
+        "openai-responses" => Box::new(openai_responses_provider(
+            config.base_url.clone(),
+            config.api_key.clone(),
+            config.model.clone(),
+        )),
         other => {
             eprintln!(
-                "pi-native: unknown provider `{other}` (anthropic, openai-responses, openai-completions, deepseek, xiaomi, google)"
+                "pi-native: unknown provider `{other}` (openai-completions, openai-responses)"
             );
             std::process::exit(2);
         }
@@ -617,8 +626,7 @@ fn make_provider(model: &str, provider: &str) -> Box<dyn ModelProvider> {
 }
 
 fn resolve_agent(
-    model: &str,
-    provider: &str,
+    config: &ProviderConfig,
     yolo: bool,
     interactive: bool,
     context_window: usize,
@@ -635,35 +643,15 @@ fn resolve_agent(
     let cwd = std::env::current_dir().unwrap_or_default();
     let mut tools = default_tools();
     tools.extend(load_extension_tools(extensions));
-    let mut agent = Agent::new(
-        make_provider(model, provider),
-        tools,
-        system,
-        ToolContext::new(cwd),
-    )
-    .with_approver(approver);
+    let mut agent = Agent::new(make_provider(config), tools, system, ToolContext::new(cwd))
+        .with_approver(approver);
     if context_window > 0 {
         // Compaction summarizes dropped history with the model (pi's behavior).
         agent = agent
             .with_compaction(context_window, DEFAULT_RESERVE_TOKENS)
-            .with_summarizer(Arc::new(ProviderSummarizer::new(make_provider(
-                model, provider,
-            ))));
+            .with_summarizer(Arc::new(ProviderSummarizer::new(make_provider(config))));
     }
     agent
-}
-
-/// First set, non-empty env var, or exit with a helpful message.
-fn env_key(names: &[&str]) -> String {
-    for name in names {
-        if let Ok(value) = std::env::var(name) {
-            if !value.is_empty() {
-                return value;
-            }
-        }
-    }
-    eprintln!("pi-native: set {}", names.join(" or "));
-    std::process::exit(2);
 }
 
 /// Seed the transcript from `--session` (if given) and return a journal that
@@ -688,8 +676,7 @@ fn open_session(
 
 /// Serve the RPC protocol over stdio with the selected provider.
 fn run_serve(
-    model: &str,
-    provider: &str,
+    config: &ProviderConfig,
     yolo: bool,
     context_window: usize,
     session: Option<&std::path::Path>,
@@ -697,15 +684,7 @@ fn run_serve(
 ) {
     let cwd = std::env::current_dir().unwrap_or_default();
     let system = system_prompt_for(&cwd);
-    let mut agent = resolve_agent(
-        model,
-        provider,
-        yolo,
-        false,
-        context_window,
-        &system,
-        extensions,
-    );
+    let mut agent = resolve_agent(config, yolo, false, context_window, &system, extensions);
     let path = session.map(|path| path.to_path_buf());
     let cwd_string = cwd.to_string_lossy().into_owned();
     // Without `--yolo`, approval-required tools ask the connected client over
@@ -723,8 +702,7 @@ fn run_serve(
 
 /// A minimal terminal client: spawn a unit serving the protocol and drive it.
 fn run_client(
-    model: &str,
-    provider: &str,
+    config: &ProviderConfig,
     yolo: bool,
     context_window: usize,
     session: Option<&std::path::Path>,
@@ -734,12 +712,22 @@ fn run_client(
     let mut command = ProcessCommand::new(exe);
     command
         .arg("--serve")
-        .arg("--model")
-        .arg(model)
         .arg("--provider")
-        .arg(provider)
+        .arg(&config.provider)
+        .arg("--model")
+        .arg(&config.model)
+        .arg("--base-url")
+        .arg(&config.base_url)
         .arg("--context-window")
         .arg(context_window.to_string());
+    // Pass the key by environment, not argv.
+    command.env("OPENAI_API_KEY", &config.api_key);
+    if let Some(max_tokens) = config.max_tokens {
+        command.arg("--max-tokens").arg(max_tokens.to_string());
+    }
+    if matches!(config.thinking_format, ThinkingFormat::Deepseek) {
+        command.arg("--thinking-format").arg("deepseek");
+    }
     if yolo {
         command.arg("--yolo");
     }

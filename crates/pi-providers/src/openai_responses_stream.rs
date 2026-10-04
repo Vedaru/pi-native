@@ -3,8 +3,8 @@
 //! Consumes SSE frames and produces typed events, including usage. Mirrors
 //! `packages/ai/src/api/openai-responses-shared.ts`.
 
-use crate::anthropic::ContentBlock;
-use crate::anthropic_stream::Usage;
+use crate::types::ContentBlock;
+use crate::types::Usage;
 use serde_json::{json, Value};
 
 /// A parsed OpenAI Responses stream event.

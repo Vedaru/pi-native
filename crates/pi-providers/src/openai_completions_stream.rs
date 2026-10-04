@@ -4,8 +4,8 @@
 //! including usage. Mirrors the delta handling in pi
 //! `packages/ai/src/api/openai-completions.ts`.
 
-use crate::anthropic::ContentBlock;
-use crate::anthropic_stream::Usage;
+use crate::types::ContentBlock;
+use crate::types::Usage;
 use serde_json::Value;
 
 /// A parsed Chat Completions stream event.

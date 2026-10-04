@@ -52,7 +52,12 @@ fn all_providers_share_the_generic_type() {
     // Each factory returns the same `HttpProvider<P>` mechanism with a different
     // protocol; no per-provider adapter type exists.
     fn assert_provider<P: SseProtocol + 'static>(_: &HttpProvider<P>) {}
-    assert_provider(&anthropic_provider("http://x", "k", "claude-sonnet-4-5"));
+    assert_provider(&openai_completions_provider(
+        "http://x",
+        "k",
+        "deepseek-flash",
+        None,
+        ThinkingFormat::None,
+    ));
     assert_provider(&openai_responses_provider("http://x", "k", "gpt-5"));
-    assert_provider(&google_provider("http://x", "k", "gemini-2.5-flash"));
 }
