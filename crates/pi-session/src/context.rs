@@ -118,11 +118,48 @@ fn entry_messages(entry: &SessionEntry) -> Vec<ContextMessage> {
     }
 }
 
-/// Build the finalized model context for the leaf branch.
+/// Build the finalized model context for the leaf branch, applying
+/// `context_edit` entries (latest edit for a target wins; a null replacement
+/// omits the target from context).
 pub fn build_context(session: &SessionFile, leaf_id: Option<&str>) -> Vec<ContextMessage> {
-    build_context_entries(session, leaf_id)
+    let entries = build_context_entries(session, leaf_id);
+
+    let mut edits: std::collections::HashMap<&str, Option<&Value>> =
+        std::collections::HashMap::new();
+    for entry in &entries {
+        if entry.kind == "context_edit" {
+            if let Some(target) = entry.get("targetId").and_then(Value::as_str) {
+                edits.insert(target, entry.get("replacement"));
+            }
+        }
+    }
+
+    entries
         .iter()
-        .flat_map(entry_messages)
+        .flat_map(|entry| apply_edit(entry_messages(entry), edits.get(entry.id.as_str()).copied()))
+        .collect()
+}
+
+/// Apply a `context_edit` replacement to an entry's messages.
+fn apply_edit(messages: Vec<ContextMessage>, edit: Option<Option<&Value>>) -> Vec<ContextMessage> {
+    let Some(Some(replacement)) = edit else {
+        return messages;
+    };
+    // A JSON null replacement omits the target entirely.
+    if replacement.is_null() {
+        return Vec::new();
+    }
+    let Some(content) = replacement.get("content") else {
+        return messages;
+    };
+    messages
+        .into_iter()
+        .map(|mut message| {
+            if let Some(object) = message.message.as_object_mut() {
+                object.insert("content".to_string(), content.clone());
+            }
+            message
+        })
         .collect()
 }
 
@@ -194,5 +231,44 @@ mod tests {
             contents.contains(&"new"),
             "post-compaction entry missing: {contents:?}"
         );
+    }
+
+    #[test]
+    fn context_edit_omits_a_target() {
+        let header = header("s1", "/tmp");
+        let lines = [
+            r#"{"type":"message","id":"a","parentId":null,"timestamp":"t","message":{"role":"user","content":"secret"}}"#,
+            r#"{"type":"context_edit","id":"e1","parentId":"a","timestamp":"t","targetId":"a","replacement":null}"#,
+        ];
+        let jsonl = format!(
+            "{}\n{}\n",
+            serde_json::to_string(&header).unwrap(),
+            lines.join("\n")
+        );
+        let session = SessionFile::parse(&jsonl).expect("parses");
+        let context = build_context(&session, None);
+        assert!(
+            context
+                .iter()
+                .all(|m| m.message.get("content") != Some(&json!("secret"))),
+            "edited-out target should be omitted: {context:?}"
+        );
+    }
+
+    #[test]
+    fn context_edit_replaces_content() {
+        let header = header("s1", "/tmp");
+        let lines = [
+            r#"{"type":"message","id":"a","parentId":null,"timestamp":"t","message":{"role":"user","content":"original"}}"#,
+            r#"{"type":"context_edit","id":"e1","parentId":"a","timestamp":"t","targetId":"a","replacement":{"content":"redacted"}}"#,
+        ];
+        let jsonl = format!(
+            "{}\n{}\n",
+            serde_json::to_string(&header).unwrap(),
+            lines.join("\n")
+        );
+        let session = SessionFile::parse(&jsonl).expect("parses");
+        let context = build_context(&session, None);
+        assert_eq!(context[0].message["content"], json!("redacted"));
     }
 }

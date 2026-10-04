@@ -145,12 +145,29 @@ pub struct SessionFile {
 impl SessionFile {
     /// Parse a JSONL session file from a string.
     pub fn parse(input: &str) -> Result<Self, SessionError> {
-        let mut lines = input.lines().filter(|line| !line.trim().is_empty());
-        let header_line = lines.next().ok_or(SessionError::MissingHeader)?;
-        let header: SessionHeader = serde_json::from_str(header_line)?;
+        Self::parse_reader(input.as_bytes())
+    }
+
+    /// Parse from any buffered reader, line by line, so the whole file is never
+    /// held in memory as one string.
+    pub fn parse_reader<R: std::io::BufRead>(reader: R) -> Result<Self, SessionError> {
+        let mut lines = reader.lines();
+        let header_line = loop {
+            match lines.next() {
+                Some(Ok(line)) if !line.trim().is_empty() => break line,
+                Some(Ok(_)) => continue,
+                Some(Err(error)) => return Err(SessionError::Io(error)),
+                None => return Err(SessionError::MissingHeader),
+            }
+        };
+        let header: SessionHeader = serde_json::from_str(&header_line)?;
         let mut entries = Vec::new();
         for line in lines {
-            entries.push(serde_json::from_str(line)?);
+            let line = line?;
+            if line.trim().is_empty() {
+                continue;
+            }
+            entries.push(serde_json::from_str(&line)?);
         }
         Ok(SessionFile { header, entries })
     }
@@ -168,7 +185,8 @@ impl SessionFile {
     }
 
     pub fn read(path: &std::path::Path) -> Result<Self, SessionError> {
-        Self::parse(&std::fs::read_to_string(path)?)
+        let file = std::fs::File::open(path)?;
+        Self::parse_reader(std::io::BufReader::new(file))
     }
 
     pub fn write(&self, path: &std::path::Path) -> Result<(), SessionError> {
@@ -221,6 +239,20 @@ mod tests {
         );
         let round = serde_json::to_value(&entry).expect("serializes");
         assert_eq!(round["payload"]["deep"], serde_json::json!([1, 2, 3]));
+    }
+
+    /// Opt-in: point `PI_SESSION_SAMPLE` at a real session file to round-trip it.
+    #[test]
+    fn round_trips_a_full_session_when_provided() {
+        let Ok(path) = std::env::var("PI_SESSION_SAMPLE") else {
+            return;
+        };
+        let session = SessionFile::read(std::path::Path::new(&path)).expect("reads");
+        let jsonl = session.to_jsonl().expect("serializes");
+        let reparsed = SessionFile::parse(&jsonl).expect("reparses");
+        assert_eq!(session.header, reparsed.header);
+        assert_eq!(session.entries.len(), reparsed.entries.len());
+        assert_eq!(session.entries, reparsed.entries);
     }
 
     #[test]
