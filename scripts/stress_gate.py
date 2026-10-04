@@ -18,6 +18,7 @@ import argparse
 import resource
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 
@@ -29,6 +30,9 @@ def main() -> int:
     parser.add_argument("--session", action="store_true", help="run the agent session loop (compaction) instead of direct tool calls")
     parser.add_argument("--max-mb", type=float, default=150.0)
     parser.add_argument("--timeout", type=float, default=60.0)
+    parser.add_argument("--max-cpu", type=float, default=5.0, help="max CPU seconds per tool run")
+    parser.add_argument("--max-idle-cpu", type=float, default=0.2, help="max CPU seconds while idle")
+    parser.add_argument("--skip-idle", action="store_true")
     args = parser.parse_args()
 
     binary = Path(args.binary)
@@ -42,11 +46,16 @@ def main() -> int:
             command = [str(binary), "--stress", str(args.turns), "--stress-tool", tool]
             if args.session:
                 command.append("--stress-session")
+            usage_before = resource.getrusage(resource.RUSAGE_CHILDREN)
             proc = subprocess.run(
                 command,
                 capture_output=True,
                 text=True,
                 timeout=args.timeout,
+            )
+            usage_after = resource.getrusage(resource.RUSAGE_CHILDREN)
+            cpu = (usage_after.ru_utime - usage_before.ru_utime) + (
+                usage_after.ru_stime - usage_before.ru_stime
             )
         except subprocess.TimeoutExpired:
             print(f"FAIL[{tool}]: did not finish within {args.timeout:.0f}s ({args.turns} turns).")
@@ -67,9 +76,33 @@ def main() -> int:
         if peak_mb is None:
             # Fall back to the child high-water mark (monotonic across children).
             peak_mb = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss / 1024
-        print(f"{tool}: {line.splitlines()[0] if line else ''} | peak {peak_mb:.1f} MB")
+        print(
+            f"{tool}: {line.splitlines()[0] if line else ''} | peak {peak_mb:.1f} MB | cpu {cpu:.2f}s"
+        )
+        if cpu > args.max_cpu:
+            print(f"FAIL[{tool}]: CPU {cpu:.2f}s over {args.max_cpu:.1f}s.")
+            failed = True
         if peak_mb is not None and peak_mb > args.max_mb:
             print(f"FAIL[{tool}]: peak RSS over {args.max_mb:.0f} MB.")
+            failed = True
+
+    # Idle CPU must be ~0: no busy-wait or polling.
+    if not args.skip_idle:
+        before = resource.getrusage(resource.RUSAGE_CHILDREN)
+        child = subprocess.Popen(
+            [str(binary), "--rpc"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        time.sleep(3.0)
+        child.kill()
+        child.wait()
+        after = resource.getrusage(resource.RUSAGE_CHILDREN)
+        idle_cpu = (after.ru_utime - before.ru_utime) + (after.ru_stime - before.ru_stime)
+        print(f"idle cpu over 3s: {idle_cpu:.3f}s (ceiling {args.max_idle_cpu:.2f}s)")
+        if idle_cpu > args.max_idle_cpu:
+            print("FAIL: idle CPU too high (busy-wait?).")
             failed = True
 
     if failed:

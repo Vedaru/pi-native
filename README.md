@@ -177,6 +177,11 @@ Tool mode, 20,000 calls:
 | `edit` | 0.06 s | 4.0 MB |
 | `read` (40 KB each, 819 MB total) | 0.37 s | 4.0 MB |
 
+CPU is gated too: each tool run must stay under a CPU-second ceiling, and the
+idle process must use ~0 CPU. Measured idle CPU over 3 s: **0.001 s** (no
+busy-wait). Per-tool CPU for 20,000 calls ranges 0.03 s (`ls`) to 0.41 s
+(`find`).
+
 Without the window, 50,000 `ls` turns: 0.08 s / 39 MB (and 1M turns stay flat
 at ~5 MB with the window).
 

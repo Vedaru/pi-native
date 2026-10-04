@@ -298,6 +298,7 @@ fn run_stress_tool(turns: usize, tool: &str) {
         std::process::exit(2);
     };
 
+    let cpu_before = cpu_times();
     let started = std::time::Instant::now();
     let mut bytes = 0usize;
     let mut errors = 0usize;
@@ -309,11 +310,18 @@ fn run_stress_tool(turns: usize, tool: &str) {
         }
     }
     let elapsed = started.elapsed();
+    let cpu = match (cpu_before, cpu_times()) {
+        (Some((ub, sb)), Some((ua, sa))) => Some((ua - ub, sa - sb)),
+        _ => None,
+    };
 
     println!(
         "tool-stress[{tool}]: {turns} calls, {bytes} bytes out, {errors} errors, {:.2}s",
         elapsed.as_secs_f64()
     );
+    if let Some((user, sys)) = cpu {
+        println!("cpu: user {user:.2}s sys {sys:.2}s");
+    }
     if let Some(peak) = peak_rss_mb() {
         println!("peak RSS: {peak:.1} MB");
     }
@@ -361,6 +369,7 @@ fn run_stress_session(turns: usize, tool: &str, byte_limit_mb: usize, context_to
     };
     agent.push_user("stress");
 
+    let cpu_before = cpu_times();
     let mut tool_results = 0usize;
     let mut tool_errors = 0usize;
     let mut compactions = 0usize;
@@ -380,6 +389,12 @@ fn run_stress_session(turns: usize, tool: &str, byte_limit_mb: usize, context_to
                 "session-stress[{tool}]: {turns} turns, {} messages, {tool_results} tool results, {tool_errors} errors, {compactions} compactions",
                 agent.messages().len()
             );
+            if let Some((user, sys)) = match (cpu_before, cpu_times()) {
+                (Some((ub, sb)), Some((ua, sa))) => Some((ua - ub, sa - sb)),
+                _ => None,
+            } {
+                println!("cpu: user {user:.2}s sys {sys:.2}s");
+            }
             if let Some(peak) = peak_rss_mb() {
                 println!("peak RSS: {peak:.1} MB");
             }
@@ -390,6 +405,17 @@ fn run_stress_session(turns: usize, tool: &str, byte_limit_mb: usize, context_to
         }
     }
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// User and system CPU time of this process in seconds, from `/proc` (Linux).
+fn cpu_times() -> Option<(f64, f64)> {
+    let stat = std::fs::read_to_string("/proc/self/stat").ok()?;
+    let after_comm = &stat[stat.rfind(')')? + 1..];
+    let fields: Vec<&str> = after_comm.split_whitespace().collect();
+    // After comm: field 3 is index 0, so utime (field 14) is index 11, stime 12.
+    let utime: f64 = fields.get(11)?.parse().ok()?;
+    let stime: f64 = fields.get(12)?.parse().ok()?;
+    Some((utime / 100.0, stime / 100.0))
 }
 
 /// Peak resident set size of this process in MB, from `/proc` when available.
