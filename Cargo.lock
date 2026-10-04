@@ -855,6 +855,7 @@ version = "0.0.1"
 dependencies = [
  "pi-providers",
  "pi-sse",
+ "serde",
  "serde_json",
  "ureq",
 ]

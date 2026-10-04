@@ -7,8 +7,8 @@
 use std::io::Read;
 
 use pi_providers::{
-    collect_content, collect_response, AnthropicParams, AnthropicStream, ContentBlock,
-    OpenAiResponsesParams, OpenAiResponsesStream, Usage,
+    collect_content, collect_response, AnthropicParams, AnthropicStream, AnthropicStreamEvent,
+    ContentBlock, OpenAiResponsesParams, OpenAiResponsesStream, OpenAiResponsesStreamEvent, Usage,
 };
 use pi_sse::SseParser;
 
@@ -109,7 +109,7 @@ pub fn read_sse(
     Ok(())
 }
 
-/// The result of consuming an Anthropic message stream.
+/// The result of consuming a provider stream.
 #[derive(Debug, Clone)]
 pub struct StreamResult {
     pub message_id: Option<String>,
@@ -121,65 +121,118 @@ pub struct StreamResult {
 /// Alias kept for the Anthropic path.
 pub type AnthropicResult = StreamResult;
 
-/// Build, POST, and consume an Anthropic Messages streaming request.
+/// A provider SSE protocol: where to POST, how to authenticate, and how to turn
+/// events into a result. Implementations are stateful parsers.
+pub trait SseProtocol: Default {
+    /// Full request URL for a model base URL.
+    fn endpoint(base_url: &str) -> String;
+    /// Auth and version headers; the transport adds `content-type` and `accept`.
+    fn headers(api_key: &str) -> Vec<(&'static str, String)>;
+    /// Consume one SSE frame.
+    fn ingest(&mut self, event_type: &str, data: &str);
+    /// Finish and produce the result.
+    fn into_result(self) -> StreamResult;
+}
+
+/// Generic provider streaming.
 ///
-/// `base_url` is what pi calls `model.baseUrl` (e.g. `https://api.anthropic.com`);
-/// the `/v1/messages` path is appended.
+/// Serialize the params, POST to the protocol endpoint, feed SSE frames into
+/// the protocol, and return its result. There is exactly one transport loop for
+/// every provider; providers contribute only their endpoint, headers, and event
+/// handling.
+pub fn stream_sse<P, T>(base_url: &str, api_key: &str, params: &T) -> Result<StreamResult, NetError>
+where
+    P: SseProtocol,
+    T: serde::Serialize,
+{
+    let body =
+        serde_json::to_string(params).map_err(|error| NetError::Encode(error.to_string()))?;
+    let url = P::endpoint(base_url);
+    let mut headers = P::headers(api_key);
+    headers.push(("accept", "text/event-stream".to_string()));
+    let response = post_json(&url, &headers, &body)?;
+    let mut protocol = P::default();
+    read_sse(response.into_reader(), |event_type, data| {
+        protocol.ingest(event_type, data);
+    })?;
+    Ok(protocol.into_result())
+}
+
+/// Anthropic Messages protocol.
+#[derive(Default)]
+pub struct AnthropicProtocol {
+    stream: AnthropicStream,
+    events: Vec<AnthropicStreamEvent>,
+}
+
+impl SseProtocol for AnthropicProtocol {
+    fn endpoint(base_url: &str) -> String {
+        format!("{}/v1/messages", base_url.trim_end_matches('/'))
+    }
+    fn headers(api_key: &str) -> Vec<(&'static str, String)> {
+        vec![
+            ("x-api-key", api_key.to_string()),
+            ("anthropic-version", "2023-06-01".to_string()),
+        ]
+    }
+    fn ingest(&mut self, event_type: &str, data: &str) {
+        self.events.push(self.stream.handle(event_type, data));
+    }
+    fn into_result(self) -> StreamResult {
+        let (content, text) = collect_content(&self.events);
+        StreamResult {
+            message_id: self.stream.message_id().map(str::to_string),
+            content,
+            text,
+            usage: self.stream.usage().clone(),
+        }
+    }
+}
+
+/// OpenAI Responses protocol.
+#[derive(Default)]
+pub struct OpenAiResponsesProtocol {
+    stream: OpenAiResponsesStream,
+    events: Vec<OpenAiResponsesStreamEvent>,
+}
+
+impl SseProtocol for OpenAiResponsesProtocol {
+    fn endpoint(base_url: &str) -> String {
+        format!("{}/responses", base_url.trim_end_matches('/'))
+    }
+    fn headers(api_key: &str) -> Vec<(&'static str, String)> {
+        vec![("authorization", format!("Bearer {api_key}"))]
+    }
+    fn ingest(&mut self, event_type: &str, data: &str) {
+        self.events.push(self.stream.handle(event_type, data));
+    }
+    fn into_result(self) -> StreamResult {
+        let (text, content) = collect_response(&self.events);
+        StreamResult {
+            message_id: self.stream.message_id().map(str::to_string),
+            content,
+            text,
+            usage: self.stream.usage().clone(),
+        }
+    }
+}
+
+/// Stream an Anthropic Messages request.
 pub fn stream_anthropic(
     base_url: &str,
     api_key: &str,
     params: &AnthropicParams,
 ) -> Result<StreamResult, NetError> {
-    let body =
-        serde_json::to_string(params).map_err(|error| NetError::Encode(error.to_string()))?;
-    let url = format!("{}/v1/messages", base_url.trim_end_matches('/'));
-    let headers = [
-        ("x-api-key", api_key.to_string()),
-        ("anthropic-version", "2023-06-01".to_string()),
-        ("accept", "text/event-stream".to_string()),
-    ];
-    let response = post_json(&url, &headers, &body)?;
-    let mut stream = AnthropicStream::new();
-    let mut events = Vec::new();
-    read_sse(response.into_reader(), |event_type, data| {
-        events.push(stream.handle(event_type, data));
-    })?;
-    let (content, text) = collect_content(&events);
-    Ok(StreamResult {
-        message_id: stream.message_id().map(str::to_string),
-        content,
-        text,
-        usage: stream.usage().clone(),
-    })
+    stream_sse::<AnthropicProtocol, _>(base_url, api_key, params)
 }
 
-/// Build, POST, and consume an OpenAI Responses streaming request.
-/// `base_url` includes the version path (e.g. `https://api.openai.com/v1`).
+/// Stream an OpenAI Responses request. `base_url` includes the version path.
 pub fn stream_openai_responses(
     base_url: &str,
     api_key: &str,
     params: &OpenAiResponsesParams,
 ) -> Result<StreamResult, NetError> {
-    let body =
-        serde_json::to_string(params).map_err(|error| NetError::Encode(error.to_string()))?;
-    let url = format!("{}/responses", base_url.trim_end_matches('/'));
-    let headers = [
-        ("authorization", format!("Bearer {api_key}")),
-        ("accept", "text/event-stream".to_string()),
-    ];
-    let response = post_json(&url, &headers, &body)?;
-    let mut stream = OpenAiResponsesStream::new();
-    let mut events = Vec::new();
-    read_sse(response.into_reader(), |event_type, data| {
-        events.push(stream.handle(event_type, data));
-    })?;
-    let (text, content) = collect_response(&events);
-    Ok(StreamResult {
-        message_id: stream.message_id().map(str::to_string),
-        content,
-        text,
-        usage: stream.usage().clone(),
-    })
+    stream_sse::<OpenAiResponsesProtocol, _>(base_url, api_key, params)
 }
 
 #[cfg(test)]
