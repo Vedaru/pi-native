@@ -290,6 +290,7 @@ impl Agent {
             if !blocks.is_empty() {
                 self.messages.push(TranscriptMessage::Assistant(blocks));
             }
+            self.trim_context();
 
             if turn.tool_calls.is_empty() {
                 on_event(&AgentEvent::Done {
