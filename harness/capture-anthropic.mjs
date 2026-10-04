@@ -12,7 +12,7 @@
 //   PI_AI_DIST  override path to the installed pi-ai dist directory.
 
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -88,7 +88,7 @@ async function main() {
   const parsed = JSON.parse(capturedBody);
   const fixture = canonicalize(parsed);
 
-  const outPath = join(repoRoot, "harness", "fixtures", `anthropic-${scenario.model}.json`);
+  const outPath = join(repoRoot, "harness", "fixtures", `${basename(scenarioPath, ".json")}.json`);
   mkdirSync(dirname(outPath), { recursive: true });
   writeFileSync(outPath, JSON.stringify(fixture, null, 2) + "\n");
 

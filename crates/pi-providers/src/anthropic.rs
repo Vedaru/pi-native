@@ -508,17 +508,27 @@ mod tests {
         );
     }
 
-    /// End-to-end parity against a request captured from pi itself (VED-313).
-    /// Regenerate the fixture with `node harness/capture-anthropic.mjs
-    /// harness/scenarios/anthropic-basic.json`.
-    #[test]
-    fn matches_captured_pi_request() {
-        let expected: Value = serde_json::from_str(include_str!(
-            "../../../harness/fixtures/anthropic-claude-sonnet-4-5.json"
-        ))
-        .expect("fixture parses");
+    fn parity_options(cache_retention: CacheRetention) -> AnthropicBuildOptions {
+        AnthropicBuildOptions {
+            cache_retention,
+            supports_long_cache_retention: true,
+            supports_cache_control_on_tools: true,
+            supports_eager_tool_input_streaming: true,
+            strict_tools: false,
+            max_tokens: Some(64_000),
+            default_max_tokens: 64_000,
+            temperature: None,
+            reasoning: true,
+            force_adaptive_thinking: false,
+            thinking: ThinkingOptions {
+                enabled: Some(false),
+                ..Default::default()
+            },
+        }
+    }
 
-        let tools = vec![
+    fn parity_tools() -> Vec<ToolSpec> {
+        vec![
             ToolSpec {
                 name: "read".into(),
                 description: "Read a file".into(),
@@ -537,37 +547,59 @@ mod tests {
                     "required": ["command"]
                 }),
             },
-        ];
+        ]
+    }
 
-        let opts = AnthropicBuildOptions {
-            cache_retention: CacheRetention::Short,
-            supports_long_cache_retention: true,
-            supports_cache_control_on_tools: true,
-            supports_eager_tool_input_streaming: true,
-            strict_tools: false,
-            max_tokens: Some(64_000),
-            default_max_tokens: 64_000,
-            temperature: None,
-            reasoning: true,
-            force_adaptive_thinking: false,
-            thinking: ThinkingOptions {
-                enabled: Some(false),
-                ..Default::default()
-            },
-        };
-
+    /// End-to-end parity against requests captured from pi itself (VED-313).
+    /// Regenerate fixtures with `./scripts/parity-check.sh`.
+    #[test]
+    fn matches_captured_pi_basic() {
+        let expected: Value = serde_json::from_str(include_str!(
+            "../../../harness/fixtures/anthropic-basic.json"
+        ))
+        .expect("fixture parses");
         let actual = serde_json::to_value(build_anthropic_params(
             "claude-sonnet-4-5".into(),
             "You are pi, a coding agent. Be concise.",
-            &tools,
+            &parity_tools(),
             vec![user_text("hello")],
-            &opts,
+            &parity_options(CacheRetention::Short),
         ))
         .expect("params serialize");
+        assert_eq!(actual, expected, "basic request differs from pi");
+    }
 
-        assert_eq!(
-            actual, expected,
-            "native request differs from captured pi request"
-        );
+    #[test]
+    fn matches_captured_pi_long_retention() {
+        let expected: Value = serde_json::from_str(include_str!(
+            "../../../harness/fixtures/anthropic-long-retention.json"
+        ))
+        .expect("fixture parses");
+        let actual = serde_json::to_value(build_anthropic_params(
+            "claude-sonnet-4-5".into(),
+            "You are pi, a coding agent. Be concise.",
+            &parity_tools(),
+            vec![user_text("hello")],
+            &parity_options(CacheRetention::Long),
+        ))
+        .expect("params serialize");
+        assert_eq!(actual, expected, "long-retention request differs from pi");
+    }
+
+    #[test]
+    fn matches_captured_pi_no_tools() {
+        let expected: Value = serde_json::from_str(include_str!(
+            "../../../harness/fixtures/anthropic-no-tools.json"
+        ))
+        .expect("fixture parses");
+        let actual = serde_json::to_value(build_anthropic_params(
+            "claude-sonnet-4-5".into(),
+            "You are pi.",
+            &[],
+            vec![user_text("hi")],
+            &parity_options(CacheRetention::Short),
+        ))
+        .expect("params serialize");
+        assert_eq!(actual, expected, "no-tools request differs from pi");
     }
 }
