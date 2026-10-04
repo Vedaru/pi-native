@@ -147,31 +147,20 @@ pub fn virtual_module_source(canonical: &str) -> Option<String> {
     }
 }
 
-/// A proxy module for a stubbed npm package.
+/// Generic npm/package adapter.
 ///
-/// `__real` carries real behavior for the names we implement (`Type`,
-/// `uuidv7`, ...); every other property is a callable/constructable proxy, so
-/// code loads and registers even when the library behavior is absent. Static
-/// ESM named imports are handled by the transpiler's import rewrite.
+/// Any property access resolves to a callable and constructable proxy, so a
+/// plugin that imports a package we cannot run still loads and registers. This
+/// is deliberately name-agnostic: there are no per-package or per-export
+/// special cases. Static ESM named imports are handled by the transpiler's
+/// generic import rewrite.
 pub fn stub_module_source(spec: &str) -> String {
     let mut source = String::new();
-    source.push_str("// pi-native stub for ");
+    source.push_str("// pi-native generic package stub for ");
     source.push_str(spec);
-    source.push_str("\nconst __real = { ");
-    match spec {
-        "typebox"
-        | "@earendil-works/pi-ai"
-        | "@earendil-works/pi-ai/compat"
-        | "@mariozechner/pi-ai" => source.push_str(PI_OVERRIDES),
-        "@earendil-works/pi-coding-agent" | "@mariozechner/pi-coding-agent" => {
-            source.push_str(PI_CODING_AGENT_OVERRIDES)
-        }
-        _ => {}
-    }
     source.push_str(
-        " };\n\
-         const __stub = new Proxy(function () {}, {\n\
-           get: (_t, prop) => (prop in __real ? __real[prop] : __stub),\n\
+        "\nconst __stub = new Proxy(function () {}, {\n\
+           get: () => __stub,\n\
            apply: () => undefined,\n\
            construct: () => ({}),\n\
          });\n\
@@ -179,62 +168,6 @@ pub fn stub_module_source(spec: &str) -> String {
     );
     source
 }
-
-/// Real overrides for the pi-ai / typebox surface that plugins use as values.
-const PI_OVERRIDES: &str = r#"
-Type: {
-  Object: (properties, options) => Object.assign({ type: "object", properties: properties || {} }, options || {}),
-  String: (options) => Object.assign({ type: "string" }, options || {}),
-  Number: (options) => Object.assign({ type: "number" }, options || {}),
-  Integer: (options) => Object.assign({ type: "integer" }, options || {}),
-  Boolean: (options) => Object.assign({ type: "boolean" }, options || {}),
-  Null: (options) => Object.assign({ type: "null" }, options || {}),
-  Array: (items, options) => Object.assign({ type: "array", items }, options || {}),
-  Optional: (schema, options) => Object.assign({}, schema, options || {}),
-  Union: (schemas, options) => Object.assign({ anyOf: schemas }, options || {}),
-  Literal: (value, options) => Object.assign({ const: value }, options || {}),
-  Any: (options) => Object.assign({}, options || {}),
-  Unknown: (options) => Object.assign({}, options || {}),
-  Record: (_key, value, options) => Object.assign({ type: "object", additionalProperties: value }, options || {}),
-},
-Kind: {},
-StringEnum: (values, options) => Object.assign({ type: "string", enum: values }, options || {}),
-uuidv7: () => {
-  const bytes = globalThis.__pi_host.crypto.randomBytes(16);
-  const ts = Date.now();
-  bytes[0] = Math.floor(ts / 2 ** 40) & 0xff; bytes[1] = Math.floor(ts / 2 ** 32) & 0xff;
-  bytes[2] = Math.floor(ts / 2 ** 24) & 0xff; bytes[3] = Math.floor(ts / 2 ** 16) & 0xff;
-  bytes[4] = Math.floor(ts / 2 ** 8) & 0xff; bytes[5] = ts & 0xff;
-  bytes[6] = (bytes[6] & 0x0f) | 0x70; bytes[8] = (bytes[8] & 0x3f) | 0x80;
-  const hex = bytes.map((b) => b.toString(16).padStart(2, "0"));
-  return hex[0]+hex[1]+hex[2]+hex[3]+"-"+hex[4]+hex[5]+"-"+hex[6]+hex[7]+"-"+hex[8]+hex[9]+"-"+hex[10]+hex[11]+hex[12]+hex[13]+hex[14]+hex[15];
-},
-calculateCost: () => 0,
-collapseSystemMessages: (messages) => messages,
-getCurrentSystemPrompt: () => "",
-getCurrentTools: () => [],
-getSystemMessageText: (message) => (message && typeof message.content === "string" ? message.content : ""),
-contentText: () => "",
-registerApiProvider: () => {},
-stream: () => ({}),
-streamSimple: () => ({}),
-anthropicMessagesApi: () => ({ stream: () => ({}), streamSimple: () => ({}) }),
-openAICompletionsApi: () => ({ stream: () => ({}), streamSimple: () => ({}) }),
-openAIResponsesApi: () => ({ stream: () => ({}), streamSimple: () => ({}) }),
-googleGenerativeAIApi: () => ({ stream: () => ({}), streamSimple: () => ({}) }),
-piMessagesApi: () => ({ stream: () => ({}), streamSimple: () => ({}) }),
-createAssistantMessageEventStream: class {
-  constructor() { this.events = []; this.done = false; }
-  push(event) { this.events.push(event); }
-  end() { this.done = true; }
-  async *[Symbol.asyncIterator]() { for (const event of this.events) yield event; }
-},
-"#;
-
-const PI_CODING_AGENT_OVERRIDES: &str = r#"
-CONFIG_DIR_NAME: ".pi",
-VERSION: "0.0.0",
-"#;
 
 const PATH_MODULE: &str = r#"
 function normalize(parts) {
@@ -617,22 +550,18 @@ mod tests {
     }
 
     #[test]
-    fn bare_specifier_gets_a_proxy_stub() {
+    fn bare_specifier_gets_a_generic_proxy_stub() {
         let source = stub_module_source("some-npm-pkg");
         assert!(source.contains("export default __stub"));
+        // Generic: no per-package or per-export branches.
+        assert!(!source.contains("Type:"));
+        assert!(!source.contains("StringEnum"));
     }
 
     #[test]
-    fn pi_ai_stub_exposes_real_type_and_uuid() {
-        let source = stub_module_source("@earendil-works/pi-ai");
-        assert!(source.contains("StringEnum"));
-        assert!(source.contains("uuidv7"));
-        assert!(source.contains("Type:"));
-    }
-
-    #[test]
-    fn typebox_is_now_a_stub_not_a_virtual_module() {
+    fn all_bare_packages_are_stubs() {
         assert!(virtual_module_source("typebox").is_none());
+        assert!(virtual_module_source("@earendil-works/pi-ai").is_none());
         assert!(virtual_module_source("node:events").is_some());
     }
 }
