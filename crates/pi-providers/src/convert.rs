@@ -7,14 +7,14 @@ use crate::anthropic::{AnthropicMessage, ContentBlock, MessageContent};
 use serde_json::{json, Value};
 
 /// A text or image part, used for user content and tool-result content.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ContentPart {
     Text { text: String },
     Image { data: String, mime_type: String },
 }
 
 /// An assistant content block, mirroring pi's message content union.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum AssistantBlock {
     Text {
         text: String,

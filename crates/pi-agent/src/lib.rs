@@ -13,9 +13,11 @@ use pi_tools::{Tool, ToolResult};
 use serde_json::Value;
 
 pub mod anthropic;
+pub mod session;
 
 pub use anthropic::{turn_from_stream, AnthropicProvider};
 pub use pi_tools::ToolContext;
+pub use session::{append_messages, messages_from_session};
 
 /// A tool call requested by the model.
 #[derive(Debug, Clone, PartialEq)]
