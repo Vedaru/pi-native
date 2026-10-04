@@ -159,16 +159,23 @@ Comparison on a 6000x4000 PNG (`harness/compare-image-resize.mjs` vs
 `ls` tool call, no network, no subprocesses). `scripts/stress_gate.py` fails CI
 if peak RSS exceeds a ceiling or the run does not finish in time.
 
-`--stress-tool <ls|grep|find|edit>` selects the tool (20,000 turns, 4096-message
-window):
+Two modes:
+
+- **Tool** (default): `--stress N --stress-tool <ls|grep|find|edit|read>` calls
+  the tool directly, no agent loop and no transcript, so the numbers are the
+  tool's own memory/CPU.
+- **Session**: add `--stress-session` to run the agent loop over one growing
+  transcript with token-based compaction (where compaction is exercised).
+
+Tool mode, 20,000 calls:
 
 | Tool | Wall | Peak RSS |
 | --- | --- | --- |
-| `ls` | 0.15 s | 5.4 MB |
-| `grep` | 0.50 s | 8.5 MB |
-| `find` | 0.56 s | 8.5 MB |
-| `edit` | 0.17 s | 6.9 MB |
-| `read` (40 KB results) | 0.29 s | 20.6 MB |
+| `ls` | 0.03 s | 3.9 MB |
+| `grep` | 0.35 s | 5.2 MB |
+| `find` | 0.43 s | 5.2 MB |
+| `edit` | 0.06 s | 4.0 MB |
+| `read` (40 KB each, 819 MB total) | 0.37 s | 4.0 MB |
 
 Without the window, 50,000 `ls` turns: 0.08 s / 39 MB (and 1M turns stay flat
 at ~5 MB with the window).

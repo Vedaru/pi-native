@@ -26,6 +26,7 @@ def main() -> int:
     parser.add_argument("--binary", default="target/release/pi-native")
     parser.add_argument("--turns", type=int, default=50000)
     parser.add_argument("--tools", nargs="+", default=["ls"])
+    parser.add_argument("--session", action="store_true", help="run the agent session loop (compaction) instead of direct tool calls")
     parser.add_argument("--max-mb", type=float, default=150.0)
     parser.add_argument("--timeout", type=float, default=60.0)
     args = parser.parse_args()
@@ -38,8 +39,11 @@ def main() -> int:
     failed = False
     for tool in args.tools:
         try:
+            command = [str(binary), "--stress", str(args.turns), "--stress-tool", tool]
+            if args.session:
+                command.append("--stress-session")
             proc = subprocess.run(
-                [str(binary), "--stress", str(args.turns), "--stress-tool", tool],
+                command,
                 capture_output=True,
                 text=True,
                 timeout=args.timeout,

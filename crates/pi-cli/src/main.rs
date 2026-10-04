@@ -43,9 +43,13 @@ struct Cli {
     /// Allow approval-required tools (bash/write/edit) without asking.
     #[arg(long)]
     yolo: bool,
-    /// Run a deterministic in-process stress workload of N tool-call turns.
+    /// Run a deterministic stress workload of N iterations.
     #[arg(long)]
     stress: Option<usize>,
+    /// With --stress: run the agent session loop (compaction) instead of calling
+    /// the tool directly.
+    #[arg(long)]
+    stress_session: bool,
     /// Tool used by --stress: ls (default), grep, find, edit, or read.
     #[arg(long, default_value = "ls")]
     stress_tool: String,
@@ -124,12 +128,16 @@ fn main() {
         return;
     }
     if let Some(turns) = cli.stress {
-        run_stress(
-            turns,
-            &cli.stress_tool,
-            cli.stress_byte_limit_mb,
-            cli.stress_context_tokens,
-        );
+        if cli.stress_session {
+            run_stress_session(
+                turns,
+                &cli.stress_tool,
+                cli.stress_byte_limit_mb,
+                cli.stress_context_tokens,
+            );
+        } else {
+            run_stress_tool(turns, &cli.stress_tool);
+        }
         return;
     }
     if let Some(prompt) = cli.print {
@@ -243,12 +251,8 @@ impl Approver for TerminalApprover {
     }
 }
 
-/// Deterministic in-process load: N turns of a `read` tool call with a fixed,
-/// tiny output, then a final message. No network, no subprocesses, and a
-/// constant per-tool-result size, so the measured memory is the harness
-/// overhead rather than the size of a directory listing.
-fn run_stress(turns: usize, tool: &str, byte_limit_mb: usize, context_tokens: usize) {
-    // A small workspace is created per run so each tool has a deterministic input.
+/// A small workspace per tool so each has a deterministic input.
+fn stress_workspace(tool: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!("pi-stress-{}-{tool}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::create_dir_all(&dir);
@@ -260,34 +264,75 @@ fn run_stress(turns: usize, tool: &str, byte_limit_mb: usize, context_tokens: us
         let _ = std::fs::write(dir.join("e.txt"), "A\n");
     }
     if tool == "read" {
-        // ~40 KB per read; with many reads, a message-count window alone would
-        // allow window x 40 KB of retained output.
         let _ = std::fs::write(dir.join("big.txt"), "x".repeat(40 * 1024));
     }
+    dir
+}
+
+fn stress_args(tool: &str, index: usize) -> serde_json::Value {
+    match tool {
+        "grep" => serde_json::json!({ "pattern": "needle" }),
+        "find" => serde_json::json!({ "pattern": "*.txt" }),
+        "read" => serde_json::json!({ "path": "big.txt" }),
+        "edit" => {
+            // Alternate A<->B so every edit targets unique text.
+            let (old, new) = if index % 2 == 0 {
+                ("A", "B")
+            } else {
+                ("B", "A")
+            };
+            serde_json::json!({ "path": "e.txt", "oldText": old, "newText": new })
+        }
+        _ => serde_json::json!({}),
+    }
+}
+
+/// Measure the tool itself: call it `turns` times directly, with no agent loop
+/// and no transcript, so the result is the tool's own memory and CPU.
+fn run_stress_tool(turns: usize, tool: &str) {
+    let dir = stress_workspace(tool);
+    let ctx = ToolContext::new(&dir);
+    let tools = default_tools();
+    let Some(selected) = tools.iter().find(|candidate| candidate.name() == tool) else {
+        eprintln!("pi-native --stress: unknown tool `{tool}`");
+        std::process::exit(2);
+    };
+
+    let started = std::time::Instant::now();
+    let mut bytes = 0usize;
+    let mut errors = 0usize;
+    for index in 0..turns {
+        let result = selected.run(&stress_args(tool, index), &ctx);
+        bytes += result.content.len();
+        if result.is_error {
+            errors += 1;
+        }
+    }
+    let elapsed = started.elapsed();
+
+    println!(
+        "tool-stress[{tool}]: {turns} calls, {bytes} bytes out, {errors} errors, {:.2}s",
+        elapsed.as_secs_f64()
+    );
+    if let Some(peak) = peak_rss_mb() {
+        println!("peak RSS: {peak:.1} MB");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Measure the session loop: N agent turns over one growing transcript, with
+/// token-based compaction enabled (this is where compaction is exercised).
+fn run_stress_session(turns: usize, tool: &str, byte_limit_mb: usize, context_tokens: usize) {
+    let dir = stress_workspace(tool);
 
     let tool_name = tool.to_string();
     let provider = FnProvider::new(move |index| {
         if index < turns {
-            let arguments = match tool_name.as_str() {
-                "grep" => serde_json::json!({ "pattern": "needle" }),
-                "read" => serde_json::json!({ "path": "big.txt" }),
-                "find" => serde_json::json!({ "pattern": "*.txt" }),
-                "edit" => {
-                    // Alternate A<->B so every edit targets unique text.
-                    let (old, new) = if index % 2 == 0 {
-                        ("A", "B")
-                    } else {
-                        ("B", "A")
-                    };
-                    serde_json::json!({ "path": "e.txt", "oldText": old, "newText": new })
-                }
-                _ => serde_json::json!({}),
-            };
             AssistantTurn {
                 tool_calls: vec![ToolCall {
                     id: format!("stress-{index}"),
                     name: tool_name.clone(),
-                    arguments,
+                    arguments: stress_args(&tool_name, index),
                 }],
                 stop_reason: Some("tool_use".to_string()),
                 ..Default::default()
@@ -316,8 +361,6 @@ fn run_stress(turns: usize, tool: &str, byte_limit_mb: usize, context_tokens: us
     };
     agent.push_user("stress");
 
-    // Stream events instead of collecting them, so a long run does not retain
-    // every event (which would duplicate tool output for the whole turn).
     let mut tool_results = 0usize;
     let mut tool_errors = 0usize;
     let mut compactions = 0usize;
@@ -334,11 +377,11 @@ fn run_stress(turns: usize, tool: &str, byte_limit_mb: usize, context_tokens: us
     match result {
         Ok(()) => {
             println!(
-                "stress[{tool}]: {turns} turns, {} messages, {tool_results} tool results, {tool_errors} errors, {compactions} compactions",
+                "session-stress[{tool}]: {turns} turns, {} messages, {tool_results} tool results, {tool_errors} errors, {compactions} compactions",
                 agent.messages().len()
             );
-            if let Some(peak_mb) = peak_rss_mb() {
-                println!("peak RSS: {peak_mb:.1} MB");
+            if let Some(peak) = peak_rss_mb() {
+                println!("peak RSS: {peak:.1} MB");
             }
         }
         Err(error) => {
