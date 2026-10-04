@@ -132,6 +132,8 @@ pub fn virtual_module_source(canonical: &str) -> Option<String> {
         "node:path" => Some(PATH_MODULE.to_string()),
         "node:os" => Some(OS_MODULE.to_string()),
         "node:process" => Some(PROCESS_MODULE.to_string()),
+        "node:fs" => Some(FS_MODULE.to_string()),
+        "node:fs/promises" => Some(FS_PROMISES_MODULE.to_string()),
         _ => None,
     }
 }
@@ -244,6 +246,38 @@ export const cwd = () => env.cwd;
 export default { platform, arch, cwd, env: env.env || {} };
 "#;
 
+const FS_MODULE: &str = r#"
+const host = globalThis.__pi_host.fs;
+export function readFileSync(path, options) {
+  const encoding = typeof options === "string" ? options : (options && options.encoding) || undefined;
+  return host.readFileSync(path, encoding);
+}
+export function writeFileSync(path, data, _options) {
+  const text = typeof data === "string" ? data : String(data);
+  host.writeFileSync(path, text);
+}
+export function existsSync(path) { return host.existsSync(path); }
+export function readdirSync(path, _options) { return host.readdirSync(path); }
+export function mkdirSync(path, options) {
+  host.mkdirSync(path, !!(options && options.recursive));
+}
+export function unlinkSync(path) { host.unlinkSync(path); }
+export const constants = {};
+export default { readFileSync, writeFileSync, existsSync, readdirSync, mkdirSync, unlinkSync, constants };
+"#;
+
+const FS_PROMISES_MODULE: &str = r#"
+const host = globalThis.__pi_host.fs;
+const enc = (options) => (typeof options === "string" ? options : (options && options.encoding) || undefined);
+export async function readFile(path, options) { return host.readFileSync(path, enc(options)); }
+export async function writeFile(path, data, _options) { host.writeFileSync(path, String(data)); }
+export async function readdir(path, _options) { return host.readdirSync(path); }
+export async function mkdir(path, options) { host.mkdirSync(path, !!(options && options.recursive)); }
+export async function unlink(path) { host.unlinkSync(path); }
+export async function access(path) { if (!host.existsSync(path)) throw new Error("ENOENT: " + path); }
+export default { readFile, writeFile, readdir, mkdir, unlink, access };
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -265,10 +299,13 @@ mod tests {
     }
 
     #[test]
-    fn provides_path_and_os_virtual_modules() {
+    fn provides_path_os_fs_and_process_virtual_modules() {
         assert!(virtual_module_source("node:path").is_some());
         assert!(virtual_module_source("node:os").is_some());
-        assert!(virtual_module_source("node:fs").is_none());
+        assert!(virtual_module_source("node:process").is_some());
+        assert!(virtual_module_source("node:fs").is_some());
+        assert!(virtual_module_source("node:fs/promises").is_some());
+        assert!(virtual_module_source("node:crypto").is_none());
     }
 
     #[test]

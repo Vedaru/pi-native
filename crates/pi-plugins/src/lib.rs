@@ -150,6 +150,7 @@ impl PluginHost {
 
         context.with(|ctx| {
             self.install_pi_global(&ctx)?;
+            self.install_host_fs(&ctx)?;
             install_env(&ctx)?;
             let entry = Module::declare(ctx.clone(), name, prepared.as_bytes())?;
             // Module bodies run synchronously; top-level await is not supported yet.
@@ -229,6 +230,167 @@ impl PluginHost {
         ctx.globals().set("pi", pi)?;
         Ok(())
     }
+
+    /// Install `__pi_host.fs`, the capability-gated filesystem the virtual
+    /// `node:fs` module delegates to.
+    fn install_host_fs(&self, ctx: &Ctx<'_>) -> Result<(), PluginError> {
+        let host = Object::new(ctx.clone())?;
+        let fs = Object::new(ctx.clone())?;
+
+        // readFileSync(path, encoding?) -> string
+        let (calls, denials, policy) = (
+            self.calls.clone(),
+            self.denials.clone(),
+            self.policy.clone(),
+        );
+        fs.set(
+            "readFileSync",
+            Function::new(
+                ctx.clone(),
+                move |path: String, _encoding: Option<String>| -> String {
+                    let allowed = record(
+                        &policy,
+                        &calls,
+                        &denials,
+                        Capability::Read,
+                        "fs.readFileSync",
+                        serde_json::json!({ "path": path }),
+                    );
+                    if allowed {
+                        std::fs::read_to_string(&path).unwrap_or_default()
+                    } else {
+                        String::new()
+                    }
+                },
+            ),
+        )?;
+
+        // writeFileSync(path, data)
+        let (calls, denials, policy) = (
+            self.calls.clone(),
+            self.denials.clone(),
+            self.policy.clone(),
+        );
+        fs.set(
+            "writeFileSync",
+            Function::new(ctx.clone(), move |path: String, data: String| {
+                if record(
+                    &policy,
+                    &calls,
+                    &denials,
+                    Capability::Write,
+                    "fs.writeFileSync",
+                    serde_json::json!({ "path": path }),
+                ) {
+                    let _ = std::fs::write(&path, data);
+                }
+            }),
+        )?;
+
+        // existsSync(path) -> bool
+        let (calls, denials, policy) = (
+            self.calls.clone(),
+            self.denials.clone(),
+            self.policy.clone(),
+        );
+        fs.set(
+            "existsSync",
+            Function::new(ctx.clone(), move |path: String| -> bool {
+                let allowed = record(
+                    &policy,
+                    &calls,
+                    &denials,
+                    Capability::Read,
+                    "fs.existsSync",
+                    serde_json::json!({ "path": path }),
+                );
+                allowed && std::path::Path::new(&path).exists()
+            }),
+        )?;
+
+        // readdirSync(path) -> string[]
+        let (calls, denials, policy) = (
+            self.calls.clone(),
+            self.denials.clone(),
+            self.policy.clone(),
+        );
+        fs.set(
+            "readdirSync",
+            Function::new(ctx.clone(), move |path: String| -> Vec<String> {
+                let allowed = record(
+                    &policy,
+                    &calls,
+                    &denials,
+                    Capability::Read,
+                    "fs.readdirSync",
+                    serde_json::json!({ "path": path }),
+                );
+                if !allowed {
+                    return Vec::new();
+                }
+                std::fs::read_dir(&path)
+                    .map(|entries| {
+                        entries
+                            .flatten()
+                            .map(|e| e.file_name().to_string_lossy().to_string())
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            }),
+        )?;
+
+        // mkdirSync(path, { recursive }?)
+        let (calls, denials, policy) = (
+            self.calls.clone(),
+            self.denials.clone(),
+            self.policy.clone(),
+        );
+        fs.set(
+            "mkdirSync",
+            Function::new(ctx.clone(), move |path: String, recursive: Option<bool>| {
+                if record(
+                    &policy,
+                    &calls,
+                    &denials,
+                    Capability::Write,
+                    "fs.mkdirSync",
+                    serde_json::json!({ "path": path }),
+                ) {
+                    let _ = if recursive.unwrap_or(false) {
+                        std::fs::create_dir_all(&path)
+                    } else {
+                        std::fs::create_dir(&path)
+                    };
+                }
+            }),
+        )?;
+
+        // unlinkSync(path)
+        let (calls, denials, policy) = (
+            self.calls.clone(),
+            self.denials.clone(),
+            self.policy.clone(),
+        );
+        fs.set(
+            "unlinkSync",
+            Function::new(ctx.clone(), move |path: String| {
+                if record(
+                    &policy,
+                    &calls,
+                    &denials,
+                    Capability::Write,
+                    "fs.unlinkSync",
+                    serde_json::json!({ "path": path }),
+                ) {
+                    let _ = std::fs::remove_file(&path);
+                }
+            }),
+        )?;
+
+        host.set("fs", fs)?;
+        ctx.globals().set("__pi_host", host)?;
+        Ok(())
+    }
 }
 
 fn platform_name() -> &'static str {
@@ -284,7 +446,7 @@ fn record(
     capability: Capability,
     method: &str,
     args: serde_json::Value,
-) {
+) -> bool {
     let call = HostCall {
         capability,
         method: method.to_string(),
@@ -292,8 +454,10 @@ fn record(
     };
     if policy.is_allowed(capability) {
         calls.lock().expect("calls lock").push(call);
+        true
     } else {
         denials.lock().expect("denials lock").push(call);
+        false
     }
 }
 
@@ -381,5 +545,36 @@ mod tests {
             )
             .expect("runs");
         assert_eq!(calls[0].args, serde_json::json!("n=42"));
+    }
+
+    fn temp_path(name: &str) -> std::path::PathBuf {
+        let mut path = std::env::temp_dir();
+        path.push(format!("pi-native-test-{}-{name}", std::process::id()));
+        path
+    }
+
+    #[test]
+    fn plugin_can_read_a_file_through_the_host() {
+        let path = temp_path("input.txt");
+        std::fs::write(&path, "file-contents").expect("write fixture");
+        let host = PluginHost::new(PluginPolicy::permissive());
+        let source = format!(
+            r#"import fs from "node:fs"; pi.log(fs.readFileSync({:?}, "utf8"));"#,
+            path.to_string_lossy()
+        );
+        let calls = host.run(&source).expect("runs");
+        let last = calls.last().expect("a call");
+        assert_eq!(last.args, serde_json::json!("file-contents"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn fs_read_is_denied_by_default_policy() {
+        let host = PluginHost::new(PluginPolicy::default());
+        let result = host.run(r#"import fs from "node:fs"; fs.readFileSync("/etc/hostname");"#);
+        match result {
+            Err(PluginError::Denied { capability, .. }) => assert_eq!(capability, Capability::Read),
+            other => panic!("expected read denial, got {other:?}"),
+        }
     }
 }
