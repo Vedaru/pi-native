@@ -86,6 +86,23 @@ do not have, the fix belongs in the native core that provides that module
 generically, not in a hand-written stub branch. (Removing such a branch left
 conformance unchanged at 84/87, which is the point.)
 
+### Engineering principle: generalize while writing
+
+The same rule applies everywhere, not only to plugins:
+
+- **One mechanism, many cases.** Provider streaming uses a single
+  `stream_sse<P: SseProtocol>` transport loop; each provider supplies only its
+  endpoint, headers, and event parser. Never copy the transport loop per
+  provider.
+- **Mapping tables over branches.** Node built-ins, platform names, and
+  specifier canonicalization are data, not `if`/`match` special cases.
+- **Provider wire formats are the one legitimate exception.** An event parser is
+  inherently format-specific; that is not an edge case, and its orchestration
+  still goes through the generic mechanism.
+- **Prefer the general fix.** If two cases differ, first ask whether one
+  parameterized mechanism covers both. Only add a special case when the general
+  mechanism genuinely cannot express it, and say why in a comment.
+
 A Node sidecar is explicitly **not** part of the design. If a plugin needs real
 Node/npm behavior that the shim layer cannot provide, it is out of scope until
 the shim is extended.
