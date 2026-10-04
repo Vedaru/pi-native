@@ -70,6 +70,22 @@ We adopt the same model as `Dicklesworthstone/pi_agent_rust`:
 - **Capability policy** replaces Node's ambient authority: every side effect
   goes through an audited hostcall.
 
+### Adapter principle: generic, never per-case
+
+The plugin adapter must be **generic**. It handles any plugin, any package, and
+any export through one mechanism:
+
+- one import-rewrite rule for all bare packages (named imports -> property reads)
+- one name-agnostic proxy stub for all packages we cannot run
+- one `pi` API proxy that records unknown methods instead of enumerating them
+- one mapping table for Node built-ins
+
+Do **not** add per-package or per-export special cases (e.g. a curated list of
+`pi-ai` exports, or a `typebox` branch). If an extension needs real behavior we
+do not have, the fix belongs in the native core that provides that module
+generically, not in a hand-written stub branch. (Removing such a branch left
+conformance unchanged at 84/87, which is the point.)
+
 A Node sidecar is explicitly **not** part of the design. If a plugin needs real
 Node/npm behavior that the shim layer cannot provide, it is out of scope until
 the shim is extended.
