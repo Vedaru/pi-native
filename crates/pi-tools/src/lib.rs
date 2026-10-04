@@ -11,9 +11,24 @@ use std::process::Command;
 use pi_providers::ToolSpec;
 use serde_json::{json, Value};
 
+pub mod io;
 pub mod truncate;
 
 pub use truncate::{truncate_head, truncate_tail, DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES};
+
+/// Max bytes buffered per line while grepping.
+const GREP_MAX_LINE_BYTES: usize = 64 * 1024;
+/// Max characters of a grep match shown in output.
+const GREP_MAX_LINE_LENGTH: usize = 500;
+
+/// Human-readable byte size, matching pi's `formatSize`.
+fn format_size(bytes: usize) -> String {
+    if bytes >= 1024 * 1024 {
+        format!("{}MB", bytes / (1024 * 1024))
+    } else {
+        format!("{}KB", bytes / 1024)
+    }
+}
 
 /// The environment a tool runs in.
 #[derive(Debug, Clone)]
@@ -112,44 +127,62 @@ impl Tool for ReadTool {
             return ToolResult::error("read: missing required field `path`");
         };
         let resolved = ctx.resolve(path);
-        let contents = match std::fs::read(&resolved) {
-            Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+        // Stream line by line; never load the whole file.
+        let file = match std::fs::File::open(&resolved) {
+            Ok(file) => file,
             Err(error) => return ToolResult::error(format!("read: {path}: {error}")),
         };
+        let mut reader = std::io::BufReader::new(file);
 
-        // `offset` and `limit` select a window before truncation.
         let offset = input.get("offset").and_then(Value::as_u64).unwrap_or(0) as usize;
         let limit = input
             .get("limit")
             .and_then(Value::as_u64)
             .map(|v| v as usize);
-        let window: String;
-        let selected: &str = if offset > 0 || limit.is_some() {
-            let lines: Vec<&str> = contents.lines().collect();
-            let start = offset.min(lines.len());
-            let end = limit
-                .map(|l| (start + l).min(lines.len()))
-                .unwrap_or(lines.len());
-            let mut slice = lines[start..end].join("\n");
-            if end < lines.len() {
-                slice.push('\n');
-            }
-            window = slice;
-            window.as_str()
-        } else {
-            contents.as_str()
-        };
 
-        let truncated = truncate_head(selected, DEFAULT_MAX_LINES, DEFAULT_MAX_BYTES);
-        if truncated.truncated {
+        let max_line = 1024 * 1024;
+        let mut buffer: Vec<u8> = Vec::new();
+        let mut output = String::new();
+        let mut bytes = 0usize;
+        let mut line_number = 0usize;
+        let mut taken = 0usize;
+        let mut byte_truncated = false;
+
+        loop {
+            match io::read_line_capped(&mut reader, &mut buffer, max_line) {
+                Ok(false) => break,
+                Ok(true) => {}
+                Err(error) => return ToolResult::error(format!("read: {path}: {error}")),
+            }
+            line_number += 1;
+            if line_number <= offset {
+                continue;
+            }
+            if let Some(limit) = limit {
+                if taken >= limit {
+                    break;
+                }
+            }
+            let line = String::from_utf8_lossy(&buffer);
+            if bytes + line.len() > DEFAULT_MAX_BYTES {
+                let remaining = DEFAULT_MAX_BYTES.saturating_sub(bytes);
+                output.push_str(&line[..remaining.min(line.len())]);
+                byte_truncated = true;
+                break;
+            }
+            output.push_str(&line);
+            bytes += line.len();
+            taken += 1;
+        }
+
+        if byte_truncated {
             ToolResult::ok(format!(
-                "{}\n\n[Showing the first {} lines of {} (50KB limit). Use offset to continue.]",
-                truncated.content.trim_end_matches('\n'),
-                truncated.content.lines().count(),
-                truncated.total_lines
+                "{}\n\n[Output truncated at {}. Use offset to continue.]",
+                output.trim_end_matches('\n'),
+                format_size(DEFAULT_MAX_BYTES)
             ))
         } else {
-            ToolResult::ok(truncated.content)
+            ToolResult::ok(output)
         }
     }
 }
@@ -423,17 +456,28 @@ impl Tool for GrepTool {
             {
                 continue;
             }
-            let Ok(contents) = std::fs::read_to_string(entry.path()) else {
+            let Ok(file) = std::fs::File::open(entry.path()) else {
                 continue;
             };
+            let mut reader = std::io::BufReader::new(file);
             let display = entry
                 .path()
                 .strip_prefix(&ctx.cwd)
                 .unwrap_or(entry.path())
                 .display();
-            for (index, line) in contents.lines().enumerate() {
+            let mut buffer: Vec<u8> = Vec::new();
+            let mut line_number = 0usize;
+            loop {
+                match io::read_line_capped(&mut reader, &mut buffer, GREP_MAX_LINE_BYTES) {
+                    Ok(false) | Err(_) => break,
+                    Ok(true) => {}
+                }
+                line_number += 1;
+                let raw = String::from_utf8_lossy(&buffer);
+                let line = raw.trim_end_matches(['\n', '\r']);
                 if regex.is_match(line) {
-                    matches.push(format!("{display}:{}: {}", index + 1, line.trim_end()));
+                    let shown = &line[..line.len().min(GREP_MAX_LINE_LENGTH)];
+                    matches.push(format!("{display}:{line_number}: {shown}"));
                     if matches.len() >= max {
                         break;
                     }

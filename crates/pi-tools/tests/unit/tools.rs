@@ -139,3 +139,27 @@ fn find_matches_a_glob() {
     assert!(!result.is_error, "{result:?}");
     assert_eq!(result.content, "a.rs");
 }
+
+#[test]
+fn read_bounds_a_large_file() {
+    let ctx = temp_ctx();
+    std::fs::write(ctx.cwd.join("big.txt"), "x".repeat(2 * 1024 * 1024)).expect("write");
+    let result = ReadTool.run(&serde_json::json!({ "path": "big.txt" }), &ctx);
+    assert!(!result.is_error, "{result:?}");
+    assert!(
+        result.content.len() < DEFAULT_MAX_BYTES + 256,
+        "read did not bound output: {}",
+        result.content.len()
+    );
+}
+
+#[test]
+fn grep_streams_a_large_file() {
+    let ctx = temp_ctx();
+    let mut content = "x".repeat(1024 * 1024);
+    content.push_str("\nneedle\n");
+    std::fs::write(ctx.cwd.join("big.txt"), content).expect("write");
+    let result = GrepTool.run(&serde_json::json!({ "pattern": "needle" }), &ctx);
+    assert!(!result.is_error, "{result:?}");
+    assert!(result.content.contains("big.txt:2: needle"), "{result:?}");
+}
