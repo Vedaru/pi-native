@@ -13,8 +13,15 @@ use pi_cache::{
 #[derive(Parser)]
 #[command(name = "pi-native", version, about = "Native Rust runtime for pi")]
 struct Cli {
+    /// Start in RPC mode and idle on stdin (used by the memory benchmark).
+    #[arg(long)]
+    rpc: bool,
+    /// Accepted for parity with pi's benchmark invocation; sessions are not
+    /// implemented yet, so this is a no-op.
+    #[arg(long = "no-session")]
+    no_session: bool,
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 #[derive(Subcommand)]
@@ -68,7 +75,53 @@ impl From<RetentionArg> for CacheRetention {
 
 fn main() {
     let cli = Cli::parse();
+    if cli.rpc {
+        run_rpc();
+        return;
+    }
     match cli.command {
+        Some(command) => run_command(command),
+        None => {
+            eprintln!("pi-native: no command given (try --help, or --rpc to idle)");
+            std::process::exit(2);
+        }
+    }
+}
+
+/// Idle RPC loop: keep the process alive reading stdin so the memory benchmark
+/// can sample a steady state, and answer `get_state` like pi's RPC mode.
+fn run_rpc() {
+    use std::io::{BufRead, Write};
+
+    let stdin = std::io::stdin();
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    for line in stdin.lock().lines() {
+        let Ok(line) = line else {
+            break;
+        };
+        if line.trim().is_empty() {
+            continue;
+        }
+        let Ok(request) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
+        if request.get("type").and_then(serde_json::Value::as_str) == Some("get_state") {
+            let response = serde_json::json!({
+                "type": "response",
+                "id": request.get("id").cloned().unwrap_or(serde_json::Value::Null),
+                "command": "get_state",
+                "success": true,
+                "state": { "native": true },
+            });
+            let _ = writeln!(out, "{response}");
+            let _ = out.flush();
+        }
+    }
+}
+
+fn run_command(command: Command) {
+    match command {
         Command::CacheControl {
             retention,
             supports_long,

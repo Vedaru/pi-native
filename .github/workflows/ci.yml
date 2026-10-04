@@ -34,6 +34,11 @@ jobs:
           mkdir -p /tmp/pi-rust
           tar -xJf /tmp/pi-rust.tar.xz -C /tmp/pi-rust
           echo "PI_RUST_BIN=/tmp/pi-rust/pi" >> "$GITHUB_ENV"
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build our native target
+        run: |
+          cargo build --release -p pi-native
+          echo "PI_NATIVE_BIN=$PWD/target/release/pi-native" >> "$GITHUB_ENV"
       # Absolute baseline is a dev-machine measurement, so CI uses the
       # environment-independent ratio check (native <= 60% of Node).
       - name: Memory regression gate

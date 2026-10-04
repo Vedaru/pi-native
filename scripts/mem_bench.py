@@ -120,6 +120,9 @@ def resolve_targets() -> dict[str, dict]:
         }
 
     if rust_pi and Path(rust_pi).exists():
+        # `pi-rust` is the THIRD-PARTY reference port
+        # (Dicklesworthstone/pi_agent_rust), not this project. Our build is the
+        # `pi-native` target below (PI_NATIVE_BIN).
         targets["pi-rust"] = {
             "kind": "native",
             "argv": [

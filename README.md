@@ -119,11 +119,21 @@ states are declared in the artifact schema so it does not churn later.
 
 | Target | cold-idle RSS | session-loaded (3.2 MB JSONL) |
 | --- | --- | --- |
-| `pi-node` | 111.7 MB | 124.8 MB |
-| `pi-rust` (reference) | 38.9 MB | 50.7 MB |
+| `pi-node` (headless RPC) | 111.7 MB | 124.8 MB |
+| `pi-rust` (reference port, headless) | 38.9 MB | 50.7 MB |
+| **`pi-native` (our build, headless)** | **2.6 MB** | — |
+| `pi-node` (interactive TUI) | 117.2 MB | **207.1 MB** |
 
-A 3.2 MB session costs roughly 12-13 MB in both runtimes. Target for our build:
-**<= 25 MB idle headless**.
+`pi-native` is the idle floor of our binary today (it only idles); it will grow
+as the runtime lands. The reference `pi-rust` is the third-party port, included
+only for comparison — our build is `pi-native` (`PI_NATIVE_BIN`).
+
+Headless, a 3.2 MB session costs ~12-13 MB. The **interactive TUI adds ~90 MB**
+for the same session (retained rendered transcript components) — the variable
+cost the native renderer and windowed transcript must remove. Target for our
+build: **<= 25 MB idle headless**, and a bounded TUI transcript.
+
+TUI numbers: `python3 scripts/measure_tui.py [--session ...]` (pty-based).
 
 ## Image pipeline (`pi-image`)
 

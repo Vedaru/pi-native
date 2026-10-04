@@ -1,6 +1,6 @@
 {
   "schema": "pi.native.mem_bench.v1",
-  "generated_at": "2026-10-04T10:14:37.501897+00:00",
+  "generated_at": "2026-10-04T11:20:10.949315+00:00",
   "host": {
     "platform": "Linux-7.1.8-aw88399-x86_64-with-glibc2.43",
     "machine": "x86_64",
@@ -25,17 +25,17 @@
       "settle_seconds": 5.0,
       "sample_interval_seconds": 1.0,
       "samples_bytes": [
-        117215232,
-        117215232,
-        117215232,
-        117215232,
-        99872768
+        117465088,
+        117473280,
+        117473280,
+        117473280,
+        117473280
       ],
       "sample_count": 5,
-      "rss_bytes": 117215232,
-      "rss_min_bytes": 99872768,
-      "rss_max_bytes": 117215232,
-      "rss_spread_bytes": 17342464
+      "rss_bytes": 117473280,
+      "rss_min_bytes": 117465088,
+      "rss_max_bytes": 117473280,
+      "rss_spread_bytes": 8192
     },
     {
       "target": "pi-rust",
@@ -47,16 +47,38 @@
       "settle_seconds": 5.0,
       "sample_interval_seconds": 1.0,
       "samples_bytes": [
-        39854080,
-        39854080,
-        39854080,
-        39854080,
-        39854080
+        40022016,
+        40022016,
+        40022016,
+        40022016,
+        40022016
       ],
       "sample_count": 5,
-      "rss_bytes": 39854080,
-      "rss_min_bytes": 39854080,
-      "rss_max_bytes": 39854080,
+      "rss_bytes": 40022016,
+      "rss_min_bytes": 40022016,
+      "rss_max_bytes": 40022016,
+      "rss_spread_bytes": 0
+    },
+    {
+      "target": "pi-native",
+      "kind": "native",
+      "command": "/home/vedaru/Projects/pi-native/target/release/pi-native --rpc --no-session",
+      "binary": "/home/vedaru/Projects/pi-native/target/release/pi-native",
+      "binary_sha256": "ab78f4c3d4caf761756a68302df7e927d7b8ccbdf6f3b0816097db0c4dc546a1",
+      "taxonomy": "cold-idle",
+      "settle_seconds": 5.0,
+      "sample_interval_seconds": 1.0,
+      "samples_bytes": [
+        2777088,
+        2777088,
+        2777088,
+        2777088,
+        2777088
+      ],
+      "sample_count": 5,
+      "rss_bytes": 2777088,
+      "rss_min_bytes": 2777088,
+      "rss_max_bytes": 2777088,
       "rss_spread_bytes": 0
     }
   ]
