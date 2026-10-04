@@ -1,0 +1,7 @@
+[package]
+name = "pi-sse"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Incremental Server-Sent Events parser for native provider streaming"

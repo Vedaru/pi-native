@@ -98,11 +98,12 @@ Targets are auto-detected:
 Idle taxonomy (VED-302): only `cold-idle` is implemented; the remaining four
 states are declared in the artifact schema so it does not churn later.
 
-## Baseline (2026-10-04, cold-idle)
+## Baseline (2026-10-04)
 
-| Target | RSS (median) | min | max |
-| --- | --- | --- | --- |
-| `pi-node` | 111.7 MB | 95.2 MB | 111.7 MB |
-| `pi-rust` (reference) | 38.9 MB | 38.9 MB | 38.9 MB |
+| Target | cold-idle RSS | session-loaded (3.2 MB JSONL) |
+| --- | --- | --- |
+| `pi-node` | 111.7 MB | 124.8 MB |
+| `pi-rust` (reference) | 38.9 MB | 50.7 MB |
 
-Target for our build: **<= 25 MB idle headless**.
+A 3.2 MB session costs roughly 12-13 MB in both runtimes. Target for our build:
+**<= 25 MB idle headless**.
