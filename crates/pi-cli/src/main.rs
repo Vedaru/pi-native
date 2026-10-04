@@ -5,7 +5,10 @@
 //! lands in later milestones.
 
 use clap::{Parser, Subcommand, ValueEnum};
-use pi_agent::{anthropic_provider, Agent, AgentEvent, AllowAll, Approval, Approver, DenyAll};
+use pi_agent::{
+    anthropic_provider, Agent, AgentEvent, AllowAll, Approval, Approver, AssistantTurn, DenyAll,
+    FauxProvider, ToolCall,
+};
 use pi_cache::{
     clamp_openai_prompt_cache_key, get_cache_control, openai_completions_prompt_cache_key,
     openai_responses_prompt_cache_key, resolve_cache_retention, CacheRetention,
@@ -40,6 +43,9 @@ struct Cli {
     /// Allow approval-required tools (bash/write/edit) without asking.
     #[arg(long)]
     yolo: bool,
+    /// Run a deterministic in-process stress workload of N tool-call turns.
+    #[arg(long)]
+    stress: Option<usize>,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -105,6 +111,10 @@ fn main() {
     }
     if cli.client {
         run_client(cli.yolo);
+        return;
+    }
+    if let Some(turns) = cli.stress {
+        run_stress(turns);
         return;
     }
     if let Some(prompt) = cli.print {
@@ -211,6 +221,55 @@ impl Approver for TerminalApprover {
             Approval::Allow
         } else {
             Approval::Deny
+        }
+    }
+}
+
+/// Deterministic in-process load: N turns of an `ls` tool call, then a final
+/// message. No network, no subprocesses, so memory growth is measured cleanly.
+fn run_stress(turns: usize) {
+    let mut scripted = Vec::with_capacity(turns + 1);
+    for index in 0..turns {
+        scripted.push(AssistantTurn {
+            tool_calls: vec![ToolCall {
+                id: format!("stress-{index}"),
+                name: "ls".to_string(),
+                arguments: serde_json::json!({}),
+            }],
+            stop_reason: Some("tool_use".to_string()),
+            ..Default::default()
+        });
+    }
+    scripted.push(AssistantTurn {
+        text: "done".to_string(),
+        stop_reason: Some("end_turn".to_string()),
+        ..Default::default()
+    });
+
+    let provider = FauxProvider::new(scripted);
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let mut agent = Agent::new(
+        Box::new(provider),
+        default_tools(),
+        SYSTEM_PROMPT,
+        ToolContext::new(cwd),
+    )
+    .with_max_iterations(turns + 2);
+    agent.push_user("stress");
+    match agent.run() {
+        Ok(events) => {
+            let tool_results = events
+                .iter()
+                .filter(|event| matches!(event, AgentEvent::ToolEnd { .. }))
+                .count();
+            println!(
+                "stress: {turns} turns, {} messages, {tool_results} tool results",
+                agent.messages().len()
+            );
+        }
+        Err(error) => {
+            eprintln!("pi-native --stress: {error}");
+            std::process::exit(1);
         }
     }
 }

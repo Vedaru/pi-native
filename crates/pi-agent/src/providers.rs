@@ -44,7 +44,7 @@ pub fn turn_from_stream(result: StreamResult) -> AssistantTurn {
 }
 
 /// Builds a protocol's params from a completion request.
-type ParamsBuilder<P> = Box<dyn Fn(&CompletionRequest) -> <P as SseProtocol>::Params>;
+type ParamsBuilder<P> = Box<dyn for<'a> Fn(&CompletionRequest<'a>) -> <P as SseProtocol>::Params>;
 
 /// A provider for any SSE protocol. `build` produces the protocol's params from
 /// a completion request; everything else is shared.
@@ -58,7 +58,7 @@ impl<P: SseProtocol> HttpProvider<P> {
     pub fn new(
         base_url: impl Into<String>,
         api_key: impl Into<String>,
-        build: impl Fn(&CompletionRequest) -> P::Params + 'static,
+        build: impl for<'a> Fn(&CompletionRequest<'a>) -> P::Params + 'static,
     ) -> Self {
         Self {
             base_url: base_url.into(),
@@ -87,9 +87,9 @@ pub fn anthropic_provider(
     HttpProvider::new(base_url, api_key, move |request| {
         build_anthropic_params(
             model.clone(),
-            &request.system,
-            &request.tools,
-            convert_messages(&request.messages),
+            request.system,
+            request.tools,
+            convert_messages(request.messages),
             &AnthropicBuildOptions {
                 cache_retention: CacheRetention::Short,
                 supports_long_cache_retention: true,
@@ -120,9 +120,9 @@ pub fn openai_responses_provider(
     HttpProvider::new(base_url, api_key, move |request| {
         build_openai_responses_params(
             model.clone(),
-            &request.system,
-            &request.tools,
-            &request.messages,
+            request.system,
+            request.tools,
+            request.messages,
             &OpenAiResponsesBuildOptions {
                 cache_retention: CacheRetention::Short,
                 session_id: None,
@@ -148,9 +148,9 @@ pub fn google_provider(
     HttpProvider::new(base_url, api_key, move |request| {
         build_google_params(
             model.clone(),
-            &request.system,
-            &request.tools,
-            &request.messages,
+            request.system,
+            request.tools,
+            request.messages,
             &GoogleBuildOptions {
                 max_tokens: Some(4096),
                 reasoning: true,

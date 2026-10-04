@@ -39,12 +39,14 @@ pub struct AssistantTurn {
     pub stop_reason: Option<String>,
 }
 
-/// Everything the provider needs for one completion.
-#[derive(Debug, Clone)]
-pub struct CompletionRequest {
-    pub system: String,
-    pub messages: Vec<TranscriptMessage>,
-    pub tools: Vec<ToolSpec>,
+/// Everything the provider needs for one completion. Borrows the transcript so
+/// the loop does not clone it every iteration (the pressure test showed that
+/// cloning was quadratic in the number of turns).
+#[derive(Debug, Clone, Copy)]
+pub struct CompletionRequest<'a> {
+    pub system: &'a str,
+    pub messages: &'a [TranscriptMessage],
+    pub tools: &'a [ToolSpec],
 }
 
 #[derive(Debug)]
@@ -104,7 +106,7 @@ impl Default for FauxProvider {
 }
 
 impl ModelProvider for FauxProvider {
-    fn complete(&self, _request: &CompletionRequest) -> Result<AssistantTurn, AgentError> {
+    fn complete(&self, _request: &CompletionRequest<'_>) -> Result<AssistantTurn, AgentError> {
         let mut turns = self.turns.lock().expect("faux lock");
         if turns.is_empty() {
             Ok(AssistantTurn::default())
@@ -116,7 +118,7 @@ impl ModelProvider for FauxProvider {
 
 /// A model backend. Returns a full turn; streaming is a provider concern.
 pub trait ModelProvider {
-    fn complete(&self, request: &CompletionRequest) -> Result<AssistantTurn, AgentError>;
+    fn complete(&self, request: &CompletionRequest<'_>) -> Result<AssistantTurn, AgentError>;
 }
 
 /// Whether a tool may run.
@@ -205,9 +207,9 @@ impl Agent {
 
         for _ in 0..self.max_iterations {
             let request = CompletionRequest {
-                system: self.system.clone(),
-                messages: self.messages.clone(),
-                tools: tools.clone(),
+                system: &self.system,
+                messages: &self.messages,
+                tools: &tools,
             };
             let turn = self.provider.complete(&request)?;
 

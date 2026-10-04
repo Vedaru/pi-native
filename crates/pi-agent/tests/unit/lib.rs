@@ -17,7 +17,7 @@ impl FakeProvider {
 }
 
 impl ModelProvider for FakeProvider {
-    fn complete(&self, _request: &CompletionRequest) -> Result<AssistantTurn, AgentError> {
+    fn complete(&self, _request: &CompletionRequest<'_>) -> Result<AssistantTurn, AgentError> {
         let mut turns = self.turns.borrow_mut();
         if turns.is_empty() {
             Ok(AssistantTurn::default())
