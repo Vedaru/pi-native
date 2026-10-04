@@ -14,6 +14,7 @@ pub mod convert;
 pub mod google;
 pub mod openai_completions;
 pub mod openai_responses;
+pub mod openai_responses_stream;
 
 pub use pi_cache::CacheRetention;
 
@@ -31,4 +32,7 @@ pub use openai_completions::{
 pub use openai_responses::{
     build_openai_responses_params, convert_responses_input, convert_responses_tools,
     OpenAiResponsesBuildOptions, OpenAiResponsesParams,
+};
+pub use openai_responses_stream::{
+    collect_response, OpenAiResponsesStream, OpenAiResponsesStreamEvent,
 };

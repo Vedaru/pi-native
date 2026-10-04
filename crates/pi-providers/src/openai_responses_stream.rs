@@ -1,0 +1,306 @@
+//! OpenAI Responses streaming events.
+//!
+//! Consumes SSE frames and produces typed events, including usage. Mirrors
+//! `packages/ai/src/api/openai-responses-shared.ts`.
+
+use crate::anthropic::ContentBlock;
+use crate::anthropic_stream::Usage;
+use serde_json::{json, Value};
+
+/// A parsed OpenAI Responses stream event.
+#[derive(Debug, Clone, PartialEq)]
+pub enum OpenAiResponsesStreamEvent {
+    Created {
+        id: Option<String>,
+    },
+    TextDelta {
+        delta: String,
+    },
+    ToolCallStart {
+        item_id: Option<String>,
+        call_id: String,
+        name: String,
+    },
+    ToolCallArgsDelta {
+        call_id: String,
+        delta: String,
+    },
+    Completed {
+        usage: Usage,
+        stop_reason: Option<String>,
+    },
+    Failed {
+        message: String,
+    },
+    Other {
+        event: String,
+    },
+}
+
+/// Stateful parser for one Responses stream.
+#[derive(Debug, Default)]
+pub struct OpenAiResponsesStream {
+    usage: Usage,
+    message_id: Option<String>,
+}
+
+impl OpenAiResponsesStream {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn usage(&self) -> &Usage {
+        &self.usage
+    }
+
+    pub fn message_id(&self) -> Option<&str> {
+        self.message_id.as_deref()
+    }
+
+    fn apply_usage(&mut self, response: &Value) {
+        let Some(usage) = response.get("usage") else {
+            return;
+        };
+        let input_tokens = usage
+            .get("input_tokens")
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
+        let details = usage.get("input_tokens_details");
+        let cached = details
+            .and_then(|d| d.get("cached_tokens"))
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
+        let cache_write = details
+            .and_then(|d| d.get("cache_write_tokens"))
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
+        self.usage.input = (input_tokens - cached - cache_write).max(0);
+        self.usage.cache_read = cached;
+        self.usage.cache_write = cache_write;
+        self.usage.output = usage
+            .get("output_tokens")
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
+        self.usage.reasoning = usage
+            .get("output_tokens_details")
+            .and_then(|d| d.get("reasoning_tokens"))
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
+    }
+
+    /// Handle one SSE event, returning the typed event.
+    pub fn handle(&mut self, event_type: &str, data: &str) -> OpenAiResponsesStreamEvent {
+        let json: Value = match serde_json::from_str(data) {
+            Ok(value) => value,
+            Err(error) => {
+                return OpenAiResponsesStreamEvent::Failed {
+                    message: format!("invalid event JSON: {error}"),
+                }
+            }
+        };
+
+        match event_type {
+            "response.created" => {
+                if let Some(id) = json
+                    .get("response")
+                    .and_then(|r| r.get("id"))
+                    .and_then(Value::as_str)
+                {
+                    self.message_id = Some(id.to_string());
+                }
+                OpenAiResponsesStreamEvent::Created {
+                    id: self.message_id.clone(),
+                }
+            }
+            "response.output_text.delta" => OpenAiResponsesStreamEvent::TextDelta {
+                delta: json
+                    .get("delta")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+            },
+            "response.output_item.added" => {
+                let item = json.get("item");
+                match item.and_then(|i| i.get("type")).and_then(Value::as_str) {
+                    Some("function_call") => OpenAiResponsesStreamEvent::ToolCallStart {
+                        item_id: item
+                            .and_then(|i| i.get("id"))
+                            .and_then(Value::as_str)
+                            .map(str::to_string),
+                        call_id: item
+                            .and_then(|i| i.get("call_id"))
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string(),
+                        name: item
+                            .and_then(|i| i.get("name"))
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string(),
+                    },
+                    _ => OpenAiResponsesStreamEvent::Other {
+                        event: event_type.to_string(),
+                    },
+                }
+            }
+            "response.function_call_arguments.delta" => {
+                OpenAiResponsesStreamEvent::ToolCallArgsDelta {
+                    call_id: json
+                        .get("call_id")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                    delta: json
+                        .get("delta")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                }
+            }
+            "response.completed" | "response.incomplete" => {
+                let response = json.get("response");
+                if let Some(response) = response {
+                    self.apply_usage(response);
+                    if self.message_id.is_none() {
+                        self.message_id = response
+                            .get("id")
+                            .and_then(Value::as_str)
+                            .map(str::to_string);
+                    }
+                }
+                OpenAiResponsesStreamEvent::Completed {
+                    usage: self.usage.clone(),
+                    stop_reason: response
+                        .and_then(|r| r.get("status"))
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                }
+            }
+            "response.failed" | "error" => OpenAiResponsesStreamEvent::Failed {
+                message: json
+                    .get("response")
+                    .and_then(|r| r.get("error"))
+                    .and_then(|e| e.get("message"))
+                    .or_else(|| json.get("error").and_then(|e| e.get("message")))
+                    .and_then(Value::as_str)
+                    .unwrap_or("response failed")
+                    .to_string(),
+            },
+            other => OpenAiResponsesStreamEvent::Other {
+                event: other.to_string(),
+            },
+        }
+    }
+}
+
+/// Assemble text and tool calls from a sequence of typed events.
+pub fn collect_response(events: &[OpenAiResponsesStreamEvent]) -> (String, Vec<ContentBlock>) {
+    let mut text = String::new();
+    let mut order: Vec<(Option<String>, String, String, String)> = Vec::new();
+    for event in events {
+        match event {
+            OpenAiResponsesStreamEvent::TextDelta { delta } => text.push_str(delta),
+            OpenAiResponsesStreamEvent::ToolCallStart {
+                item_id,
+                call_id,
+                name,
+            } => order.push((
+                item_id.clone(),
+                call_id.clone(),
+                name.clone(),
+                String::new(),
+            )),
+            OpenAiResponsesStreamEvent::ToolCallArgsDelta { call_id, delta } => {
+                if let Some(entry) = order.iter_mut().find(|entry| &entry.1 == call_id) {
+                    entry.3.push_str(delta);
+                }
+            }
+            _ => {}
+        }
+    }
+    let blocks: Vec<ContentBlock> = order
+        .into_iter()
+        .map(|(_, call_id, name, arguments)| {
+            let input = serde_json::from_str(&arguments).unwrap_or_else(|_| json!({}));
+            ContentBlock::ToolUse {
+                id: call_id,
+                name,
+                input,
+            }
+        })
+        .collect();
+    (text, blocks)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn maps_usage_with_cached_tokens_excluded_from_input() {
+        let mut stream = OpenAiResponsesStream::new();
+        let event = stream.handle(
+            "response.completed",
+            r#"{"type":"response.completed","response":{"id":"resp_1","status":"completed","usage":{"input_tokens":1000,"output_tokens":50,"total_tokens":1050,"input_tokens_details":{"cached_tokens":800},"output_tokens_details":{"reasoning_tokens":20}}}}"#,
+        );
+        match event {
+            OpenAiResponsesStreamEvent::Completed { usage, .. } => {
+                assert_eq!(usage.input, 200);
+                assert_eq!(usage.cache_read, 800);
+                assert_eq!(usage.output, 50);
+                assert_eq!(usage.reasoning, 20);
+                assert_eq!(usage.cache_hit_rate(), Some(0.8));
+            }
+            other => panic!("expected completed, got {other:?}"),
+        }
+        assert_eq!(stream.message_id(), Some("resp_1"));
+    }
+
+    #[test]
+    fn accumulates_text_and_tool_calls() {
+        let mut stream = OpenAiResponsesStream::new();
+        let events = [
+            stream.handle("response.created", r#"{"response":{"id":"resp_2"}}"#),
+            stream.handle("response.output_text.delta", r#"{"delta":"Let me "}"#),
+            stream.handle("response.output_text.delta", r#"{"delta":"check."}"#),
+            stream.handle(
+                "response.output_item.added",
+                r#"{"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"read"}}"#,
+            ),
+            stream.handle(
+                "response.function_call_arguments.delta",
+                r#"{"call_id":"call_1","delta":"{\"path\":"}"#,
+            ),
+            stream.handle(
+                "response.function_call_arguments.delta",
+                r#"{"call_id":"call_1","delta":"\"x\"}"}"#,
+            ),
+        ];
+        let (text, blocks) = collect_response(&events);
+        assert_eq!(text, "Let me check.");
+        assert_eq!(blocks.len(), 1);
+        match &blocks[0] {
+            ContentBlock::ToolUse { id, name, input } => {
+                assert_eq!(id, "call_1");
+                assert_eq!(name, "read");
+                assert_eq!(input["path"], serde_json::json!("x"));
+            }
+            _ => panic!("expected tool use"),
+        }
+    }
+
+    #[test]
+    fn failed_event_surfaces_message() {
+        let mut stream = OpenAiResponsesStream::new();
+        let event = stream.handle(
+            "response.failed",
+            r#"{"response":{"error":{"message":"rate limited"}}}"#,
+        );
+        assert_eq!(
+            event,
+            OpenAiResponsesStreamEvent::Failed {
+                message: "rate limited".to_string()
+            }
+        );
+    }
+}

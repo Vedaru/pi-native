@@ -6,7 +6,10 @@
 
 use std::io::Read;
 
-use pi_providers::{collect_content, AnthropicParams, AnthropicStream, ContentBlock, Usage};
+use pi_providers::{
+    collect_content, collect_response, AnthropicParams, AnthropicStream, ContentBlock,
+    OpenAiResponsesParams, OpenAiResponsesStream, Usage,
+};
 use pi_sse::SseParser;
 
 #[derive(Debug)]
@@ -108,12 +111,15 @@ pub fn read_sse(
 
 /// The result of consuming an Anthropic message stream.
 #[derive(Debug, Clone)]
-pub struct AnthropicResult {
+pub struct StreamResult {
     pub message_id: Option<String>,
     pub content: Vec<ContentBlock>,
     pub text: String,
     pub usage: Usage,
 }
+
+/// Alias kept for the Anthropic path.
+pub type AnthropicResult = StreamResult;
 
 /// Build, POST, and consume an Anthropic Messages streaming request.
 ///
@@ -123,7 +129,7 @@ pub fn stream_anthropic(
     base_url: &str,
     api_key: &str,
     params: &AnthropicParams,
-) -> Result<AnthropicResult, NetError> {
+) -> Result<StreamResult, NetError> {
     let body =
         serde_json::to_string(params).map_err(|error| NetError::Encode(error.to_string()))?;
     let url = format!("{}/v1/messages", base_url.trim_end_matches('/'));
@@ -139,7 +145,36 @@ pub fn stream_anthropic(
         events.push(stream.handle(event_type, data));
     })?;
     let (content, text) = collect_content(&events);
-    Ok(AnthropicResult {
+    Ok(StreamResult {
+        message_id: stream.message_id().map(str::to_string),
+        content,
+        text,
+        usage: stream.usage().clone(),
+    })
+}
+
+/// Build, POST, and consume an OpenAI Responses streaming request.
+/// `base_url` includes the version path (e.g. `https://api.openai.com/v1`).
+pub fn stream_openai_responses(
+    base_url: &str,
+    api_key: &str,
+    params: &OpenAiResponsesParams,
+) -> Result<StreamResult, NetError> {
+    let body =
+        serde_json::to_string(params).map_err(|error| NetError::Encode(error.to_string()))?;
+    let url = format!("{}/responses", base_url.trim_end_matches('/'));
+    let headers = [
+        ("authorization", format!("Bearer {api_key}")),
+        ("accept", "text/event-stream".to_string()),
+    ];
+    let response = post_json(&url, &headers, &body)?;
+    let mut stream = OpenAiResponsesStream::new();
+    let mut events = Vec::new();
+    read_sse(response.into_reader(), |event_type, data| {
+        events.push(stream.handle(event_type, data));
+    })?;
+    let (text, content) = collect_response(&events);
+    Ok(StreamResult {
         message_id: stream.message_id().map(str::to_string),
         content,
         text,
@@ -223,5 +258,43 @@ mod tests {
         assert_eq!(result.usage.output, 5);
         assert_eq!(result.usage.cache_read, 90);
         assert_eq!(result.usage.cache_hit_rate(), Some(0.9));
+    }
+
+    const RESPONSES_SSE: &str = concat!(
+        "event: response.created\n",
+        "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_9\"}}\n\n",
+        "event: response.output_text.delta\n",
+        "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hi\"}\n\n",
+        "event: response.completed\n",
+        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_9\",\"status\":\"completed\",\"usage\":{\"input_tokens\":100,\"output_tokens\":7,\"input_tokens_details\":{\"cached_tokens\":60}}}}\n\n",
+    );
+
+    #[test]
+    fn streams_openai_responses_sse_with_usage() {
+        let base = serve_once(RESPONSES_SSE);
+        let params = pi_providers::build_openai_responses_params(
+            "gpt-5".into(),
+            "system",
+            &[],
+            &[pi_providers::TranscriptMessage::UserText("hi".into())],
+            &pi_providers::OpenAiResponsesBuildOptions {
+                cache_retention: pi_providers::CacheRetention::Short,
+                session_id: Some("sess".into()),
+                supports_long_cache_retention: true,
+                supports_explicit_prompt_cache_mode: false,
+                supports_strict_mode: true,
+                supports_developer_role: true,
+                reasoning: true,
+                supports_image_input: true,
+                strict: false,
+            },
+        );
+        let result = stream_openai_responses(&base, "test-key", &params).expect("streams");
+        assert_eq!(result.message_id.as_deref(), Some("resp_9"));
+        assert_eq!(result.text, "Hi");
+        assert_eq!(result.usage.input, 40);
+        assert_eq!(result.usage.cache_read, 60);
+        assert_eq!(result.usage.output, 7);
+        assert_eq!(result.usage.cache_hit_rate(), Some(0.6));
     }
 }

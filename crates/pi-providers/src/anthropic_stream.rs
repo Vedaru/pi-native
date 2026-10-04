@@ -16,6 +16,8 @@ pub struct Usage {
     pub cache_write: i64,
     /// Subset of `cache_write` written with 1h retention.
     pub cache_write_1h: i64,
+    /// Reasoning tokens (a subset of `output`), when the provider reports them.
+    pub reasoning: i64,
 }
 
 impl Usage {
