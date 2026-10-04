@@ -216,3 +216,35 @@ fn serve_session_answers_tree_messages_and_resume() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn serve_session_answers_model_thinking_and_bash() {
+    let mut agent = agent_with(vec![AssistantTurn::default()]);
+    let input = concat!(
+        "{\"type\":\"get_commands\"}\n",
+        "{\"type\":\"set_model\",\"provider\":\"anthropic\",\"modelId\":\"m\"}\n",
+        "{\"type\":\"get_available_models\"}\n",
+        "{\"type\":\"set_thinking_level\",\"level\":\"high\"}\n",
+        "{\"type\":\"cycle_thinking_level\"}\n",
+        "{\"type\":\"get_available_thinking_levels\"}\n",
+        "{\"type\":\"set_auto_compaction\",\"enabled\":false}\n",
+        "{\"type\":\"bash\",\"command\":\"echo out-of-band\",\"excludeFromContext\":true}\n",
+    );
+    let buf = SessionBuf(std::rc::Rc::new(std::cell::RefCell::new(Vec::new())));
+    serve_session(
+        &mut agent,
+        None,
+        "/tmp",
+        std::io::Cursor::new(input.as_bytes().to_vec()),
+        buf.clone(),
+        |_| {},
+    )
+    .expect("serves");
+    let text = String::from_utf8(buf.0.borrow().clone()).unwrap();
+    assert!(text.contains("\"command\":\"get_commands\""), "{text}");
+    assert!(text.contains("\"provider\":\"anthropic\""), "{text}");
+    // high -> xhigh
+    assert!(text.contains("\"level\":\"xhigh\""), "{text}");
+    assert!(text.contains("\"command\":\"bash\""), "{text}");
+    assert!(text.contains("out-of-band"), "{text}");
+}

@@ -12,7 +12,8 @@
 //! the unit's session file.
 
 use pi_agent::{
-    transcript_values, Agent, AgentError, AgentEvent, Approval, Approver, SessionJournal,
+    messages_from_session, transcript_values, Agent, AgentError, AgentEvent, Approval, Approver,
+    SessionJournal,
 };
 use pi_session::SessionFile;
 use serde::{Deserialize, Serialize};
@@ -56,7 +57,77 @@ pub enum Request {
         session_path: String,
     },
     /// Give the current session a display name.
-    SetSessionName { name: String },
+    SetSessionName {
+        name: String,
+    },
+    /// Queue a steering message (delivered with the next prompt).
+    Steer {
+        #[serde(alias = "message")]
+        text: String,
+    },
+    /// Queue a follow-up message (delivered with the next prompt).
+    FollowUp {
+        #[serde(alias = "message")]
+        text: String,
+    },
+    /// Abort the current operation (a unit runs one turn at a time).
+    Abort,
+    /// Drop queued steering/follow-up messages.
+    ClearQueue,
+    /// Set the active model (recorded; the provider is fixed at startup).
+    SetModel {
+        provider: String,
+        #[serde(rename = "modelId")]
+        model_id: String,
+    },
+    CycleModel,
+    GetAvailableModels,
+    SetThinkingLevel {
+        level: String,
+    },
+    CycleThinkingLevel,
+    GetAvailableThinkingLevels,
+    SetSteeringMode {
+        mode: String,
+    },
+    SetFollowUpMode {
+        mode: String,
+    },
+    /// Force context compaction now.
+    Compact {
+        #[serde(default, rename = "customInstructions")]
+        custom_instructions: Option<String>,
+    },
+    SetAutoCompaction {
+        enabled: bool,
+    },
+    SetAutoRetry {
+        enabled: bool,
+    },
+    AbortRetry,
+    /// Run a shell command out of band.
+    Bash {
+        command: String,
+        #[serde(default, rename = "excludeFromContext")]
+        exclude_from_context: bool,
+    },
+    AbortBash,
+    /// Export the session to an HTML file.
+    ExportHtml {
+        #[serde(default, rename = "outputPath")]
+        output_path: Option<String>,
+    },
+    /// Branch a new session from an entry on the active branch.
+    Fork {
+        #[serde(rename = "entryId")]
+        entry_id: String,
+    },
+    /// Duplicate the current session at the current position.
+    Clone,
+    /// User messages that can be forked from.
+    GetForkMessages,
+    /// Slash commands available for `prompt` (none built in).
+    GetCommands,
     /// Answer a `ui_request` emitted earlier.
     UiResponse {
         id: String,
@@ -202,6 +273,180 @@ fn apply_command(
                 Err(error) => Some(failure(id, "switch_session", &error.to_string())),
             }
         }
+        Request::Steer { text } => {
+            session.queued.push(text);
+            Some(response(
+                id,
+                "steer",
+                serde_json::json!({ "disposition": "queued" }),
+            ))
+        }
+        Request::FollowUp { text } => {
+            session.queued.push(text);
+            Some(response(
+                id,
+                "follow_up",
+                serde_json::json!({ "disposition": "queued" }),
+            ))
+        }
+        Request::Abort => Some(response(id, "abort", serde_json::json!({}))),
+        Request::ClearQueue => {
+            let drained = std::mem::take(&mut session.queued);
+            Some(response(
+                id,
+                "clear_queue",
+                serde_json::json!({ "steering": [], "followUp": drained }),
+            ))
+        }
+        Request::SetModel { provider, model_id } => {
+            session.model = Some((provider.clone(), model_id.clone()));
+            Some(response(
+                id,
+                "set_model",
+                serde_json::json!({ "model": { "id": model_id, "provider": provider } }),
+            ))
+        }
+        Request::CycleModel => Some(response(
+            id,
+            "cycle_model",
+            serde_json::json!({ "model": session.model_value() }),
+        )),
+        Request::GetAvailableModels => Some(response(
+            id,
+            "get_available_models",
+            serde_json::json!({ "models": session.model_values() }),
+        )),
+        Request::SetThinkingLevel { level } => {
+            session.thinking_level = level.clone();
+            Some(response(
+                id,
+                "set_thinking_level",
+                serde_json::json!({ "level": level }),
+            ))
+        }
+        Request::CycleThinkingLevel => {
+            let level = session.cycle_thinking();
+            Some(response(
+                id,
+                "cycle_thinking_level",
+                serde_json::json!({ "level": level }),
+            ))
+        }
+        Request::GetAvailableThinkingLevels => Some(response(
+            id,
+            "get_available_thinking_levels",
+            serde_json::json!({ "levels": THINKING_LEVELS }),
+        )),
+        Request::SetSteeringMode { mode } => {
+            session.steering_mode = mode.clone();
+            Some(response(
+                id,
+                "set_steering_mode",
+                serde_json::json!({ "mode": mode }),
+            ))
+        }
+        Request::SetFollowUpMode { mode } => {
+            session.follow_up_mode = mode.clone();
+            Some(response(
+                id,
+                "set_follow_up_mode",
+                serde_json::json!({ "mode": mode }),
+            ))
+        }
+        Request::Compact { .. } => {
+            let tokens_before = agent.retained_tokens();
+            let (summary, dropped) = match agent.force_compact() {
+                Some(AgentEvent::Compacted { dropped, summary }) => (summary, Some(dropped)),
+                _ => (None, None),
+            };
+            Some(response(
+                id,
+                "compact",
+                serde_json::json!({
+                    "summary": summary,
+                    "dropped": dropped,
+                    "tokensBefore": tokens_before,
+                    "estimatedTokensAfter": agent.retained_tokens(),
+                }),
+            ))
+        }
+        Request::SetAutoCompaction { enabled } => {
+            session.auto_compaction = enabled;
+            Some(response(
+                id,
+                "set_auto_compaction",
+                serde_json::json!({ "enabled": enabled }),
+            ))
+        }
+        Request::SetAutoRetry { enabled } => {
+            session.auto_retry = enabled;
+            Some(response(
+                id,
+                "set_auto_retry",
+                serde_json::json!({ "enabled": enabled }),
+            ))
+        }
+        Request::AbortRetry => Some(response(id, "abort_retry", serde_json::json!({}))),
+        Request::Bash {
+            command,
+            exclude_from_context,
+        } => {
+            let (output, exit_code) = run_shell(&command, cwd);
+            if !exclude_from_context {
+                agent.push_user(format!("$ {command}\n{output}"));
+                session.persist(agent);
+            }
+            Some(response(
+                id,
+                "bash",
+                serde_json::json!({ "output": output, "exitCode": exit_code }),
+            ))
+        }
+        Request::AbortBash => Some(response(id, "abort_bash", serde_json::json!({}))),
+        Request::ExportHtml { output_path } => {
+            let path = output_path.map(PathBuf::from).unwrap_or_else(|| {
+                session
+                    .path
+                    .as_ref()
+                    .and_then(|path| path.parent().map(PathBuf::from))
+                    .unwrap_or_else(|| PathBuf::from(cwd))
+                    .join("session.html")
+            });
+            match export_html(agent, &path) {
+                Ok(()) => Some(response(
+                    id,
+                    "export_html",
+                    serde_json::json!({ "path": path.to_string_lossy() }),
+                )),
+                Err(error) => Some(failure(id, "export_html", &error.to_string())),
+            }
+        }
+        Request::Fork { entry_id } => match session.fork(&entry_id, cwd, agent) {
+            Ok(text) => Some(response(
+                id,
+                "fork",
+                serde_json::json!({ "text": text, "cancelled": false }),
+            )),
+            Err(error) => Some(failure(id, "fork", &error.to_string())),
+        },
+        Request::Clone => match session.clone_session(cwd, agent) {
+            Ok(()) => Some(response(
+                id,
+                "clone",
+                serde_json::json!({ "cancelled": false }),
+            )),
+            Err(error) => Some(failure(id, "clone", &error.to_string())),
+        },
+        Request::GetForkMessages => Some(response(
+            id,
+            "get_fork_messages",
+            serde_json::json!({ "messages": session.fork_messages() }),
+        )),
+        Request::GetCommands => Some(response(
+            id,
+            "get_commands",
+            serde_json::json!({ "commands": [] }),
+        )),
     }
 }
 
@@ -256,6 +501,40 @@ fn last_assistant_text(agent: &Agent) -> Option<String> {
         })
 }
 
+fn run_shell(command: &str, cwd: &str) -> (String, i32) {
+    match std::process::Command::new("sh")
+        .arg("-c")
+        .arg(command)
+        .current_dir(cwd)
+        .output()
+    {
+        Ok(output) => {
+            let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
+            text.push_str(&String::from_utf8_lossy(&output.stderr));
+            (text, output.status.code().unwrap_or(-1))
+        }
+        Err(error) => (error.to_string(), -1),
+    }
+}
+
+fn export_html(agent: &Agent, path: &std::path::Path) -> std::io::Result<()> {
+    let mut body = String::from("<h1>pi-native session</h1>");
+    for message in transcript_values(agent.messages()) {
+        let text = serde_json::to_string_pretty(&message).unwrap_or_default();
+        body.push_str(&format!("<pre>{}</pre>", escape_html(&text)));
+    }
+    std::fs::write(
+        path,
+        format!("<!doctype html><meta charset=\"utf-8\"><body>{body}</body>"),
+    )
+}
+
+fn escape_html(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
 fn from_agent_event(event: AgentEvent) -> Event {
     match event {
         AgentEvent::AssistantText(text) => Event::AssistantText { text },
@@ -279,7 +558,17 @@ struct SessionState {
     path: Option<PathBuf>,
     journal: Option<SessionJournal>,
     name: Option<String>,
+    thinking_level: String,
+    steering_mode: String,
+    follow_up_mode: String,
+    auto_compaction: bool,
+    auto_retry: bool,
+    model: Option<(String, String)>,
+    queued: Vec<String>,
 }
+
+/// pi's thinking levels, in order.
+const THINKING_LEVELS: &[&str] = &["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 
 impl SessionState {
     fn empty() -> Self {
@@ -287,6 +576,13 @@ impl SessionState {
             path: None,
             journal: None,
             name: None,
+            thinking_level: "off".to_string(),
+            steering_mode: "all".to_string(),
+            follow_up_mode: "all".to_string(),
+            auto_compaction: true,
+            auto_retry: true,
+            model: None,
+            queued: Vec::new(),
         }
     }
 
@@ -386,6 +682,134 @@ impl SessionState {
         self.journal = Some(journal);
         self.path = Some(path);
         Ok(())
+    }
+
+    fn model_value(&self) -> serde_json::Value {
+        match &self.model {
+            Some((provider, model_id)) => {
+                serde_json::json!({ "id": model_id, "provider": provider })
+            }
+            None => serde_json::Value::Null,
+        }
+    }
+
+    fn model_values(&self) -> Vec<serde_json::Value> {
+        if self.model.is_some() {
+            vec![self.model_value()]
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn cycle_thinking(&mut self) -> String {
+        let index = THINKING_LEVELS
+            .iter()
+            .position(|level| *level == self.thinking_level)
+            .unwrap_or(0);
+        let next = THINKING_LEVELS[(index + 1) % THINKING_LEVELS.len()];
+        self.thinking_level = next.to_string();
+        self.thinking_level.clone()
+    }
+
+    fn new_file_path(&self, cwd: &str) -> PathBuf {
+        let dir = self
+            .path
+            .as_ref()
+            .and_then(|path| path.parent().map(PathBuf::from))
+            .unwrap_or_else(|| PathBuf::from(cwd));
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0);
+        dir.join(format!("{nanos:x}.jsonl"))
+    }
+
+    fn clone_session(&mut self, cwd: &str, agent: &mut Agent) -> std::io::Result<()> {
+        let messages = agent.messages().to_vec();
+        let path = self.new_file_path(cwd);
+        let (mut journal, _) = SessionJournal::open(path.clone(), cwd)?;
+        journal.persist(&messages)?;
+        self.path = Some(path);
+        self.journal = Some(journal);
+        Ok(())
+    }
+
+    fn fork(
+        &mut self,
+        entry_id: &str,
+        cwd: &str,
+        agent: &mut Agent,
+    ) -> std::io::Result<Option<String>> {
+        let Some(path) = self.path.clone() else {
+            return Err(std::io::Error::other("no session file"));
+        };
+        let session =
+            SessionFile::read(&path).map_err(|error| std::io::Error::other(error.to_string()))?;
+        // Walk parentId from the entry to the root, then reverse.
+        let mut chain: Vec<String> = Vec::new();
+        let mut current = Some(entry_id.to_string());
+        while let Some(id) = current {
+            chain.push(id.clone());
+            current = session
+                .entries
+                .iter()
+                .find(|entry| entry.id == id)
+                .and_then(|entry| entry.parent_id.clone());
+        }
+        chain.reverse();
+        let entries: Vec<pi_session::SessionEntry> = chain
+            .iter()
+            .filter_map(|id| {
+                session
+                    .entries
+                    .iter()
+                    .find(|entry| &entry.id == id)
+                    .cloned()
+            })
+            .collect();
+        let branch = SessionFile {
+            header: session.header.clone(),
+            entries,
+        };
+        let text = branch
+            .message_entries()
+            .last()
+            .and_then(|entry| entry.message())
+            .and_then(|message| message.get("content"))
+            .and_then(|content| content.as_str())
+            .map(str::to_string);
+        let transcript = messages_from_session(&branch);
+        let new_path = self.new_file_path(cwd);
+        let (mut journal, _) = SessionJournal::open(new_path.clone(), cwd)?;
+        journal.persist(&transcript)?;
+        agent.replace_messages(transcript);
+        self.path = Some(new_path);
+        self.journal = Some(journal);
+        Ok(text)
+    }
+
+    fn fork_messages(&self) -> Vec<serde_json::Value> {
+        let Some(path) = &self.path else {
+            return Vec::new();
+        };
+        let Ok(session) = SessionFile::read(path) else {
+            return Vec::new();
+        };
+        session
+            .message_entries()
+            .filter_map(|entry| {
+                let message = entry.message()?;
+                if message.get("role").and_then(serde_json::Value::as_str) != Some("user") {
+                    return None;
+                }
+                let text = message
+                    .get("content")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                Some(serde_json::json!({ "entryId": entry.id, "text": text }))
+            })
+            .collect()
     }
 }
 
@@ -525,6 +949,9 @@ fn drive<R: std::io::BufRead, W: std::io::Write, F: FnMut(&Agent)>(
                     serde_json::json!({ "disposition": "started" }),
                 ));
                 agent.push_user(text);
+                for queued in std::mem::take(&mut session.queued) {
+                    agent.push_user(queued);
+                }
                 match agent.run_with(|event| io.write(&from_agent_event(event.clone()))) {
                     Ok(()) => {
                         session.persist(agent);

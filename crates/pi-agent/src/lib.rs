@@ -327,9 +327,67 @@ impl Agent {
         self
     }
 
-    /// Running total of approximate tokens (O(1); no per-call transcript scan).
+    /// Running total of approximate tokens (no per-call scan of the transcript).
     fn total_tokens(&self) -> usize {
         self.retained_tokens
+    }
+
+    /// Approximate tokens currently retained.
+    pub fn retained_tokens(&self) -> usize {
+        self.retained_tokens
+    }
+
+    /// Force compaction now (pi's manual `compact`), ignoring the threshold.
+    pub fn force_compact(&mut self) -> Option<AgentEvent> {
+        let (window, reserve) = self.compaction?;
+        let threshold = window.saturating_sub(reserve);
+        let tail_budget = reserve.min(threshold / 2).max(1);
+        self.compact_tail(tail_budget)
+    }
+
+    /// Drop the oldest messages into one summary, keeping a tail of at most
+    /// `tail_budget` tokens. Returns the `Compacted` event, if anything moved.
+    fn compact_tail(&mut self, tail_budget: usize) -> Option<AgentEvent> {
+        let mut tail_tokens = 0usize;
+        let mut cut = self.messages.len();
+        while cut > 0 {
+            let tokens = self.messages[cut - 1].approx_tokens();
+            if tail_tokens + tokens > tail_budget {
+                break;
+            }
+            tail_tokens += tokens;
+            cut -= 1;
+        }
+        if cut == 0 {
+            return None;
+        }
+        let dropped = cut;
+        let (dropped_bytes, dropped_tokens) =
+            self.messages[..cut]
+                .iter()
+                .fold((0usize, 0usize), |(bytes, tokens), message| {
+                    (
+                        bytes + message.approx_bytes(),
+                        tokens + message.approx_tokens(),
+                    )
+                });
+        let summary = if let Some(summarizer) = &self.summarizer {
+            summarizer.summarize(&self.messages[..cut]).ok()
+        } else {
+            None
+        };
+        let marker = match &summary {
+            Some(text) => format!("[Earlier conversation summary]\n{text}"),
+            None => format!("[{dropped} earlier messages omitted to fit the context window]"),
+        };
+        self.messages.drain(0..cut);
+        let summary_message = TranscriptMessage::UserText(marker);
+        self.retained_bytes =
+            self.retained_bytes.saturating_sub(dropped_bytes) + summary_message.approx_bytes();
+        self.retained_tokens =
+            self.retained_tokens.saturating_sub(dropped_tokens) + summary_message.approx_tokens();
+        self.messages.insert(0, summary_message);
+        Some(AgentEvent::Compacted { dropped, summary })
     }
 
     fn push(&mut self, message: TranscriptMessage) {
@@ -385,48 +443,8 @@ impl Agent {
             // at half the threshold.
             let tail_budget = reserve.min(threshold / 2).max(1);
             if self.total_tokens() > threshold {
-                let mut tail_tokens = 0usize;
-                let mut cut = self.messages.len();
-                while cut > 0 {
-                    let tokens = self.messages[cut - 1].approx_tokens();
-                    if tail_tokens + tokens > tail_budget {
-                        break;
-                    }
-                    tail_tokens += tokens;
-                    cut -= 1;
-                }
-                if cut > 0 {
-                    let dropped = cut;
-                    let (dropped_bytes, dropped_tokens) = self.messages[..cut].iter().fold(
-                        (0usize, 0usize),
-                        |(bytes, tokens), message| {
-                            (
-                                bytes + message.approx_bytes(),
-                                tokens + message.approx_tokens(),
-                            )
-                        },
-                    );
-                    let summary = if let Some(summarizer) = &self.summarizer {
-                        summarizer.summarize(&self.messages[..cut]).ok()
-                    } else {
-                        None
-                    };
-                    let marker = match &summary {
-                        Some(text) => format!("[Earlier conversation summary]\n{text}"),
-                        None => {
-                            format!(
-                                "[{dropped} earlier messages omitted to fit the context window]"
-                            )
-                        }
-                    };
-                    self.messages.drain(0..cut);
-                    let summary_message = TranscriptMessage::UserText(marker);
-                    self.retained_bytes = self.retained_bytes.saturating_sub(dropped_bytes)
-                        + summary_message.approx_bytes();
-                    self.retained_tokens = self.retained_tokens.saturating_sub(dropped_tokens)
-                        + summary_message.approx_tokens();
-                    self.messages.insert(0, summary_message);
-                    return Some(AgentEvent::Compacted { dropped, summary });
+                if let Some(event) = self.compact_tail(tail_budget) {
+                    return Some(event);
                 }
             }
         }
