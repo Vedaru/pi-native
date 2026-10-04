@@ -147,6 +147,49 @@ fn convert_assistant(blocks: &[AssistantBlock]) -> Vec<ContentBlock> {
     out
 }
 
+fn part_bytes(part: &ContentPart) -> usize {
+    match part {
+        ContentPart::Text { text } => text.len() + 16,
+        ContentPart::Image { data, mime_type } => data.len() + mime_type.len() + 24,
+    }
+}
+
+fn block_bytes(block: &AssistantBlock) -> usize {
+    match block {
+        AssistantBlock::Text { text } => text.len() + 16,
+        AssistantBlock::Thinking { thinking, .. } => thinking.len() + 16,
+        AssistantBlock::ToolCall {
+            id,
+            name,
+            arguments,
+        } => id.len() + name.len() + arguments.to_string().len() + 24,
+    }
+}
+
+impl TranscriptMessage {
+    /// Approximate serialized size in bytes, for context budgeting.
+    pub fn approx_bytes(&self) -> usize {
+        match self {
+            TranscriptMessage::UserText(text) => text.len() + 32,
+            TranscriptMessage::UserParts(parts) => parts.iter().map(part_bytes).sum::<usize>() + 32,
+            TranscriptMessage::Assistant(blocks) => {
+                blocks.iter().map(block_bytes).sum::<usize>() + 48
+            }
+            TranscriptMessage::ToolResult {
+                tool_call_id,
+                tool_name,
+                content,
+                ..
+            } => {
+                tool_call_id.len()
+                    + tool_name.len()
+                    + content.iter().map(part_bytes).sum::<usize>()
+                    + 48
+            }
+        }
+    }
+}
+
 /// Convert a transcript to Anthropic messages, grouping consecutive tool
 /// results into a single user message like pi does.
 pub fn convert_messages(messages: &[TranscriptMessage]) -> Vec<AnthropicMessage> {

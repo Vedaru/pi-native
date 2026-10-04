@@ -168,9 +168,15 @@ window):
 | `grep` | 0.50 s | 8.5 MB |
 | `find` | 0.56 s | 8.5 MB |
 | `edit` | 0.17 s | 6.9 MB |
+| `read` (40 KB results) | 0.29 s | 20.6 MB |
 
 Without the window, 50,000 `ls` turns: 0.08 s / 39 MB (and 1M turns stay flat
 at ~5 MB with the window).
+
+The message-count window alone does **not** bound memory when tools return large
+output (`window x output`). A **byte budget** (`with_context_byte_limit`) does:
+20,000 `read` turns of 40 KB go from **87 MB** (window only) to **20.6 MB**
+(16 MB budget), independent of how large the output is.
 
 Growth is proportional to the retained transcript (~900 B/turn), with no leak.
 Two fixes came out of pressure testing:

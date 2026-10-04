@@ -46,9 +46,12 @@ struct Cli {
     /// Run a deterministic in-process stress workload of N tool-call turns.
     #[arg(long)]
     stress: Option<usize>,
-    /// Tool used by --stress: ls (default), grep, find, or edit.
+    /// Tool used by --stress: ls (default), grep, find, edit, or read.
     #[arg(long, default_value = "ls")]
     stress_tool: String,
+    /// Context byte budget in MB for --stress; 0 disables the budget.
+    #[arg(long, default_value_t = 16)]
+    stress_byte_limit_mb: usize,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -117,7 +120,7 @@ fn main() {
         return;
     }
     if let Some(turns) = cli.stress {
-        run_stress(turns, &cli.stress_tool);
+        run_stress(turns, &cli.stress_tool, cli.stress_byte_limit_mb);
         return;
     }
     if let Some(prompt) = cli.print {
@@ -232,7 +235,7 @@ impl Approver for TerminalApprover {
 /// tiny output, then a final message. No network, no subprocesses, and a
 /// constant per-tool-result size, so the measured memory is the harness
 /// overhead rather than the size of a directory listing.
-fn run_stress(turns: usize, tool: &str) {
+fn run_stress(turns: usize, tool: &str, byte_limit_mb: usize) {
     // A small workspace is created per run so each tool has a deterministic input.
     let dir = std::env::temp_dir().join(format!("pi-stress-{}-{tool}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -244,12 +247,18 @@ fn run_stress(turns: usize, tool: &str) {
     if tool == "edit" {
         let _ = std::fs::write(dir.join("e.txt"), "A\n");
     }
+    if tool == "read" {
+        // ~40 KB per read; with many reads, a message-count window alone would
+        // allow window x 40 KB of retained output.
+        let _ = std::fs::write(dir.join("big.txt"), "x".repeat(40 * 1024));
+    }
 
     let tool_name = tool.to_string();
     let provider = FnProvider::new(move |index| {
         if index < turns {
             let arguments = match tool_name.as_str() {
                 "grep" => serde_json::json!({ "pattern": "needle" }),
+                "read" => serde_json::json!({ "path": "big.txt" }),
                 "find" => serde_json::json!({ "pattern": "*.txt" }),
                 "edit" => {
                     // Alternate A<->B so every edit targets unique text.
@@ -280,7 +289,7 @@ fn run_stress(turns: usize, tool: &str) {
         }
     });
 
-    let mut agent = Agent::new(
+    let agent = Agent::new(
         Box::new(provider),
         default_tools(),
         SYSTEM_PROMPT,
@@ -288,6 +297,11 @@ fn run_stress(turns: usize, tool: &str) {
     )
     .with_max_iterations(turns + 2)
     .with_context_window(4096);
+    let mut agent = if byte_limit_mb > 0 {
+        agent.with_context_byte_limit(byte_limit_mb * 1024 * 1024)
+    } else {
+        agent
+    };
     agent.push_user("stress");
 
     // Stream events instead of collecting them, so a long run does not retain

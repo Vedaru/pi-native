@@ -277,3 +277,44 @@ fn context_window_bounds_retained_messages() {
         agent.messages().len()
     );
 }
+
+#[test]
+fn context_byte_limit_bounds_retained_output() {
+    // Each tool result is ~8 KB; a 16 KB budget keeps only a couple of messages,
+    // even though the message-count window is much larger.
+    let provider = FnProvider::new(|index| {
+        if index < 50 {
+            AssistantTurn {
+                tool_calls: vec![ToolCall {
+                    id: format!("c{index}"),
+                    name: "echo".into(),
+                    arguments: json!({ "text": "x".repeat(8000) }),
+                }],
+                stop_reason: Some("tool_use".into()),
+                ..Default::default()
+            }
+        } else {
+            AssistantTurn {
+                text: "done".into(),
+                ..Default::default()
+            }
+        }
+    });
+    let mut agent = Agent::new(
+        Box::new(provider),
+        vec![Box::new(EchoTool)],
+        "s",
+        ToolContext::new(std::env::temp_dir()),
+    )
+    .with_max_iterations(60)
+    .with_context_window(4096)
+    .with_context_byte_limit(16 * 1024);
+    agent.push_user("go");
+
+    agent.run().expect("runs");
+    assert!(
+        agent.messages().len() <= 4,
+        "byte budget not enforced: {} messages",
+        agent.messages().len()
+    );
+}

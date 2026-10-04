@@ -189,6 +189,8 @@ pub struct Agent {
     approver: Arc<dyn Approver>,
     max_iterations: usize,
     context_window: Option<usize>,
+    context_bytes: Option<usize>,
+    retained_bytes: usize,
 }
 
 impl Agent {
@@ -207,6 +209,8 @@ impl Agent {
             approver: Arc::new(AllowAll),
             max_iterations: 16,
             context_window: None,
+            context_bytes: None,
+            retained_bytes: 0,
         }
     }
 
@@ -232,21 +236,50 @@ impl Agent {
         self
     }
 
+    /// Bound retained context to `max_bytes` of approximate message size.
+    ///
+    /// This is the bound that matters when tools return large output: a message
+    /// count alone still allows `count x max_tool_output` bytes. Oldest messages
+    /// are dropped until the retained total is under budget.
+    pub fn with_context_byte_limit(mut self, max_bytes: usize) -> Self {
+        self.context_bytes = Some(max_bytes);
+        self
+    }
+
+    fn push(&mut self, message: TranscriptMessage) {
+        self.retained_bytes += message.approx_bytes();
+        self.messages.push(message);
+    }
+
     fn trim_context(&mut self) {
         if let Some(window) = self.context_window {
             if self.messages.len() > window {
                 let excess = self.messages.len() - window;
-                self.messages.drain(0..excess);
+                for message in self.messages.drain(0..excess) {
+                    self.retained_bytes =
+                        self.retained_bytes.saturating_sub(message.approx_bytes());
+                }
+            }
+        }
+        if let Some(budget) = self.context_bytes {
+            while self.retained_bytes > budget && self.messages.len() > 1 {
+                let message = self.messages.remove(0);
+                self.retained_bytes = self.retained_bytes.saturating_sub(message.approx_bytes());
             }
         }
     }
 
     pub fn push_user(&mut self, text: impl Into<String>) {
-        self.messages.push(TranscriptMessage::UserText(text.into()));
+        self.push(TranscriptMessage::UserText(text.into()));
     }
 
     pub fn messages(&self) -> &[TranscriptMessage] {
         &self.messages
+    }
+
+    /// Approximate retained transcript size in bytes (for the byte budget).
+    pub fn retained_bytes(&self) -> usize {
+        self.retained_bytes
     }
 
     /// Run the model/tool loop, collecting events. Convenience wrapper over
@@ -288,7 +321,7 @@ impl Agent {
                 });
             }
             if !blocks.is_empty() {
-                self.messages.push(TranscriptMessage::Assistant(blocks));
+                self.push(TranscriptMessage::Assistant(blocks));
             }
             self.trim_context();
 
@@ -310,7 +343,7 @@ impl Agent {
                     is_error: result.is_error,
                     content: result.content.clone(),
                 });
-                self.messages.push(TranscriptMessage::ToolResult {
+                self.push(TranscriptMessage::ToolResult {
                     tool_call_id: call.id.clone(),
                     tool_name: call.name.clone(),
                     content: vec![ContentPart::Text {
