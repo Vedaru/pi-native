@@ -1,0 +1,5 @@
+# generated measurement artifacts are committed on purpose; keep them small
+*.pyc
+__pycache__/
+.venv/
+/target/
