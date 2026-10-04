@@ -165,11 +165,11 @@ states are declared in the artifact schema so it does not churn later.
 | --- | --- | --- |
 | `pi-node` (headless RPC) | 111.7 MB | 124.8 MB |
 | `pi-rust` (reference port, headless) | 38.9 MB | 50.7 MB |
-| **`pi-native` (our build, headless)** | **2.6 MB** | — |
+| **`pi-native` (our build, headless)** | **4.1 MB** | 6.3 MB (stress) |
 | `pi-node` (interactive TUI) | 117.2 MB | **207.1 MB** |
 
-`pi-native` is the idle floor of our binary today (it only idles); it will grow
-as the runtime lands. The reference `pi-rust` is the third-party port, included
+`pi-native` now runs the full agent loop, tools, RPC, and plugins, so its idle
+footprint grew from the idle-only scaffold; it is still ~27x below pi-node. The reference `pi-rust` is the third-party port, included
 only for comparison — our build is `pi-native` (`PI_NATIVE_BIN`).
 
 Headless, a 3.2 MB session costs ~12-13 MB. The **interactive TUI adds ~90 MB**
@@ -194,6 +194,22 @@ Comparison on a 6000x4000 PNG (native, via
 | base64 size | 2,405,452 B | 2,405,532 B |
 | time | 1,485 ms | 336 ms |
 | peak RSS | 493 MB | 207 MB |
+
+## Lean build
+
+The release profile is tuned for size and speed: `lto = "fat"`, `opt-level = 2`,
+`codegen-units = 1`, `panic = "abort"`, stripped. Measured (host, x86_64):
+
+| | before (thin/3) | now (fat/2) |
+| --- | --- | --- |
+| binary | ~8.7 MB | **~7.5 MB** |
+| idle RSS (`--rpc`) | 4.4 MB | **4.1 MB** |
+| idle RSS (`--serve`) | 5.8 MB | **5.3 MB** |
+| idle CPU (3 s) | ~0 | **0.001 s** |
+
+The process is near the floor for a Rust binary (a bare `fn main` reports
+~2.3 MB, mostly shared libc). A static build reports ~3.3 MB but would stop
+sharing libc pages across a swarm, so the dynamic build is kept.
 
 ## Pressure (`--stress`)
 

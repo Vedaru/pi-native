@@ -382,7 +382,9 @@ impl Tool for LsTool {
             })
             .collect();
         // pi sorts case-insensitively.
-        names.sort_by_key(|name| name.to_lowercase());
+        // `sort_by_cached_key` computes the key once per entry; `sort_by_key`
+        // would allocate a lowercase copy on every comparison.
+        names.sort_by_cached_key(|name| name.to_lowercase());
         names.truncate(limit);
         let truncated = truncate_head(&names.join("\n"), DEFAULT_MAX_LINES, DEFAULT_MAX_BYTES);
         ToolResult::ok(truncated.content)
@@ -651,7 +653,7 @@ impl Tool for GrepTool {
             let relative = path.strip_prefix(&root).unwrap_or(path);
             if let Some((full_path, matcher)) = &glob_matcher {
                 let candidate = if *full_path {
-                    relative.to_string_lossy().replace('\\', "/")
+                    relative.to_string_lossy().into_owned()
                 } else {
                     path.file_name()
                         .map(|name| name.to_string_lossy().into_owned())
@@ -662,7 +664,7 @@ impl Tool for GrepTool {
                 }
             }
             let display = if is_dir {
-                relative.to_string_lossy().replace('\\', "/")
+                relative.to_string_lossy().into_owned()
             } else {
                 path.file_name()
                     .map(|name| name.to_string_lossy().into_owned())
@@ -787,14 +789,14 @@ impl Tool for FindTool {
             let path = entry.path();
             let relative = path.strip_prefix(&root).unwrap_or(path);
             let candidate = if full_path {
-                relative.to_string_lossy().replace('\\', "/")
+                relative.to_string_lossy().into_owned()
             } else {
                 path.file_name()
                     .map(|name| name.to_string_lossy().into_owned())
                     .unwrap_or_default()
             };
             if matcher.is_match(candidate.as_str()) || matcher.is_match(relative) {
-                paths.push(relative.to_string_lossy().replace('\\', "/"));
+                paths.push(relative.to_string_lossy().into_owned());
                 if paths.len() >= limit {
                     break;
                 }
