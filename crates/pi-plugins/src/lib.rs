@@ -12,6 +12,7 @@
 //! Stage 1: runtime + `pi` hostcall surface + capability check.
 //! Stage 2: module resolver + virtual Node built-ins (`path`, `os`, `process`).
 
+pub mod crypto;
 pub mod modules;
 
 use rquickjs::{Context, Ctx, Function, Module, Object, Runtime};
@@ -151,6 +152,7 @@ impl PluginHost {
         context.with(|ctx| {
             self.install_pi_global(&ctx)?;
             self.install_host_fs(&ctx)?;
+            self.install_host_crypto(&ctx)?;
             install_env(&ctx)?;
             let entry = Module::declare(ctx.clone(), name, prepared.as_bytes())?;
             // Module bodies run synchronously; top-level await is not supported yet.
@@ -510,6 +512,44 @@ impl PluginHost {
         ctx.globals().set("__pi_host", host)?;
         Ok(())
     }
+
+    /// Install `__pi_host.crypto`, pure local primitives (no policy gate: these
+    /// are computation, not ambient side effects).
+    fn install_host_crypto(&self, ctx: &Ctx<'_>) -> Result<(), PluginError> {
+        let globals = ctx.globals();
+        let host: Object = globals.get("__pi_host")?;
+        let crypto = Object::new(ctx.clone())?;
+
+        crypto.set(
+            "hashBytes",
+            Function::new(ctx.clone(), |algo: String, data: String| -> Vec<u8> {
+                crate::crypto::hash_bytes(&algo, data.as_bytes()).unwrap_or_default()
+            }),
+        )?;
+        crypto.set(
+            "hmacBytes",
+            Function::new(
+                ctx.clone(),
+                |algo: String, key: String, data: String| -> Vec<u8> {
+                    crate::crypto::hmac_bytes(&algo, key.as_bytes(), data.as_bytes())
+                        .unwrap_or_default()
+                },
+            ),
+        )?;
+        crypto.set(
+            "randomBytes",
+            Function::new(ctx.clone(), |len: u32| -> Vec<u8> {
+                crate::crypto::random_bytes(len as usize)
+            }),
+        )?;
+        crypto.set(
+            "randomUUID",
+            Function::new(ctx.clone(), || -> String { crate::crypto::random_uuid() }),
+        )?;
+
+        host.set("crypto", crypto)?;
+        Ok(())
+    }
 }
 
 fn platform_name() -> &'static str {
@@ -769,5 +809,39 @@ mod tests {
         assert_eq!(calls[0].args["op"], serde_json::json!("getState"));
         assert_eq!(calls[1].capability, Capability::Ui);
         assert_eq!(calls[1].args["args"], serde_json::json!("hello"));
+    }
+
+    #[test]
+    fn plugin_can_hash_with_node_crypto() {
+        let host = PluginHost::new(PluginPolicy::permissive());
+        let calls = host
+            .run(
+                r#"import { createHash } from "node:crypto"; pi.log(createHash("sha256").update("abc").digest("hex"));"#,
+            )
+            .expect("runs");
+        assert_eq!(
+            calls[0].args,
+            serde_json::json!("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+        );
+    }
+
+    #[test]
+    fn plugin_can_generate_a_uuid() {
+        let host = PluginHost::new(PluginPolicy::permissive());
+        let calls = host
+            .run(r#"import { randomUUID } from "node:crypto"; pi.log(randomUUID());"#)
+            .expect("runs");
+        assert_eq!(calls[0].args.as_str().map(str::len), Some(36));
+    }
+
+    #[test]
+    fn plugin_can_use_event_emitter() {
+        let host = PluginHost::new(PluginPolicy::permissive());
+        let calls = host
+            .run(
+                r#"import { EventEmitter } from "node:events"; const e = new EventEmitter(); e.on("x", (v) => pi.log("got " + v)); e.emit("x", 5);"#,
+            )
+            .expect("runs");
+        assert_eq!(calls[0].args, serde_json::json!("got 5"));
     }
 }

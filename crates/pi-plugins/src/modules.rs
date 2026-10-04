@@ -134,6 +134,8 @@ pub fn virtual_module_source(canonical: &str) -> Option<String> {
         "node:process" => Some(PROCESS_MODULE.to_string()),
         "node:fs" => Some(FS_MODULE.to_string()),
         "node:fs/promises" => Some(FS_PROMISES_MODULE.to_string()),
+        "node:crypto" => Some(CRYPTO_MODULE.to_string()),
+        "node:events" => Some(EVENTS_MODULE.to_string()),
         _ => None,
     }
 }
@@ -278,6 +280,63 @@ export async function access(path) { if (!host.existsSync(path)) throw new Error
 export default { readFile, writeFile, readdir, mkdir, unlink, access };
 "#;
 
+const CRYPTO_MODULE: &str = r#"
+const host = globalThis.__pi_host.crypto;
+const B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+function toHex(bytes) { let s = ""; for (const b of bytes) s += b.toString(16).padStart(2, "0"); return s; }
+function toBase64(bytes) {
+  let out = "";
+  for (let i = 0; i < bytes.length; i += 3) {
+    const b0 = bytes[i], b1 = bytes[i + 1], b2 = bytes[i + 2];
+    out += B64[b0 >> 2];
+    out += B64[((b0 & 3) << 4) | ((b1 || 0) >> 4)];
+    out += b1 === undefined ? "=" : B64[((b1 & 15) << 2) | ((b2 || 0) >> 6)];
+    out += b2 === undefined ? "=" : B64[b2 & 63];
+  }
+  return out;
+}
+function toUtf8(bytes) { return bytes.map((b) => String.fromCharCode(b)).join(""); }
+function encode(bytes, encoding) {
+  if (!encoding || encoding === "utf8" || encoding === "utf-8") return toUtf8(bytes);
+  if (encoding === "hex") return toHex(bytes);
+  if (encoding === "base64") return toBase64(bytes);
+  return toUtf8(bytes);
+}
+export class Hash {
+  constructor(algo) { this.algo = algo; this.data = ""; }
+  update(data) { this.data += String(data); return this; }
+  digest(encoding) { return encode(host.hashBytes(this.algo, this.data), encoding); }
+}
+export class Hmac extends Hash {
+  constructor(algo, key) { super(algo); this.key = String(key); }
+  digest(encoding) { return encode(host.hmacBytes(this.algo, this.key, this.data), encoding); }
+}
+export function createHash(algo) { return new Hash(algo); }
+export function createHmac(algo, key) { return new Hmac(algo, key); }
+export function randomBytes(n) { return host.randomBytes(n); }
+export function randomUUID() { return host.randomUUID(); }
+export default { createHash, createHmac, randomBytes, randomUUID, Hash, Hmac };
+"#;
+
+const EVENTS_MODULE: &str = r#"
+export class EventEmitter {
+  constructor() { this._events = new Map(); }
+  on(name, fn) { const list = this._events.get(name) || []; list.push(fn); this._events.set(name, list); return this; }
+  addListener(name, fn) { return this.on(name, fn); }
+  prependListener(name, fn) { const list = this._events.get(name) || []; list.unshift(fn); this._events.set(name, list); return this; }
+  once(name, fn) { const wrap = (...args) => { this.off(name, wrap); fn(...args); }; return this.on(name, wrap); }
+  off(name, fn) { const list = this._events.get(name); if (list) { const i = list.indexOf(fn); if (i >= 0) list.splice(i, 1); } return this; }
+  removeListener(name, fn) { return this.off(name, fn); }
+  removeAllListeners(name) { if (name === undefined) this._events.clear(); else this._events.delete(name); return this; }
+  emit(name, ...args) { const list = this._events.get(name); if (!list || list.length === 0) return false; for (const fn of list.slice()) fn(...args); return true; }
+  listenerCount(name) { const list = this._events.get(name); return list ? list.length : 0; }
+  listeners(name) { return (this._events.get(name) || []).slice(); }
+  eventNames() { return [...this._events.keys()]; }
+}
+export function once(emitter, name) { return new Promise((resolve) => emitter.once(name, (...args) => resolve(args))); }
+export default EventEmitter;
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -305,7 +364,9 @@ mod tests {
         assert!(virtual_module_source("node:process").is_some());
         assert!(virtual_module_source("node:fs").is_some());
         assert!(virtual_module_source("node:fs/promises").is_some());
-        assert!(virtual_module_source("node:crypto").is_none());
+        assert!(virtual_module_source("node:crypto").is_some());
+        assert!(virtual_module_source("node:events").is_some());
+        assert!(virtual_module_source("node:zlib").is_none());
     }
 
     #[test]
