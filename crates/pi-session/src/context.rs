@@ -161,7 +161,7 @@ mod tests {
     #[test]
     fn compaction_replaces_summarized_history() {
         let header = header("s1", "/tmp");
-        let entries = vec![
+        let entries = [
             r#"{"type":"message","id":"a","parentId":null,"timestamp":"t","message":{"role":"user","content":"old 1"}}"#,
             r#"{"type":"message","id":"b","parentId":"a","timestamp":"t","message":{"role":"assistant","content":"old 2"}}"#,
             r#"{"type":"compaction","id":"c","parentId":"b","timestamp":"t","summary":"SUMMARY","firstKeptEntryId":"b","tokensBefore":100}"#,
