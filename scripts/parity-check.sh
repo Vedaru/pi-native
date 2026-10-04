@@ -4,8 +4,8 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-for scenario in harness/scenarios/anthropic-*.json; do
-  node harness/capture-anthropic.mjs "$scenario"
+for scenario in harness/scenarios/*.json; do
+  node harness/capture.mjs "$scenario"
 done
 
 cargo test --workspace

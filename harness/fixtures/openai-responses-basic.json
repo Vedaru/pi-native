@@ -1,0 +1,57 @@
+{
+  "input": [
+    {
+      "content": "You are pi, a coding agent. Be concise.",
+      "role": "developer"
+    },
+    {
+      "content": [
+        {
+          "text": "hello",
+          "type": "input_text"
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "model": "gpt-5",
+  "prompt_cache_key": "harness-session",
+  "store": false,
+  "stream": true,
+  "tools": [
+    {
+      "description": "Read a file",
+      "name": "read",
+      "parameters": {
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "strict": false,
+      "type": "function"
+    },
+    {
+      "description": "Run a shell command",
+      "name": "bash",
+      "parameters": {
+        "properties": {
+          "command": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "command"
+        ],
+        "type": "object"
+      },
+      "strict": false,
+      "type": "function"
+    }
+  ]
+}

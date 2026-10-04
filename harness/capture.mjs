@@ -2,11 +2,14 @@
 // Capture an exact provider request from the installed pi implementation.
 //
 // This is the TS side of the wire-parity gate (VED-313). It calls pi's real
-// Anthropic provider with an injected `fetch`, records the serialized request
-// body, and writes a canonical-JSON fixture. The Rust builder must reproduce it.
+// provider with an injected `fetch`, records the serialized request body, and
+// writes a canonical-JSON fixture. The Rust builder must reproduce it.
 //
 // Usage:
-//   node harness/capture-anthropic.mjs harness/scenarios/anthropic-basic.json
+//   node harness/capture.mjs harness/scenarios/anthropic-basic.json
+//
+// Scenario `provider` (default "anthropic"):
+//   anthropic | openai-completions | openai-responses
 //
 // Env:
 //   PI_AI_DIST  override path to the installed pi-ai dist directory.
@@ -24,6 +27,24 @@ const PI_AI_DIST =
 
 const load = (rel) => import(pathToFileURL(join(PI_AI_DIST, rel)).href);
 
+const PROVIDERS = {
+  anthropic: {
+    api: "api/anthropic-messages.js",
+    models: "providers/anthropic.models.js",
+    export: "ANTHROPIC_MODELS",
+  },
+  "openai-completions": {
+    api: "api/openai-completions.js",
+    models: "providers/openai.models.js",
+    export: "OPENAI_MODELS",
+  },
+  "openai-responses": {
+    api: "api/openai-responses.js",
+    models: "providers/openai.models.js",
+    export: "OPENAI_MODELS",
+  },
+};
+
 /** Recursively sort object keys so JSON key order cannot cause false diffs. */
 export function canonicalize(value) {
   if (Array.isArray(value)) return value.map(canonicalize);
@@ -38,24 +59,26 @@ export function canonicalize(value) {
 async function main() {
   const scenarioPath = process.argv[2];
   if (!scenarioPath) {
-    console.error("usage: capture-anthropic.mjs <scenario.json>");
+    console.error("usage: capture.mjs <scenario.json>");
     process.exit(2);
   }
   const scenario = JSON.parse(readFileSync(scenarioPath, "utf8"));
+  const providerName = scenario.provider ?? "anthropic";
+  const provider = PROVIDERS[providerName];
+  if (!provider) throw new Error(`unknown provider: ${providerName}`);
 
-  const { streamSimple } = await load("api/anthropic-messages.js");
+  const { streamSimple } = await load(provider.api);
   const { normalizeContext } = await load("utils/transcript.js");
-  const { ANTHROPIC_MODELS } = await load("providers/anthropic.models.js");
-
-  const model = ANTHROPIC_MODELS[scenario.model];
-  if (!model) throw new Error(`unknown anthropic model: ${scenario.model}`);
+  const modelsModule = await load(provider.models);
+  const catalog = modelsModule[provider.export];
+  const model = catalog[scenario.model];
+  if (!model) throw new Error(`unknown ${providerName} model: ${scenario.model}`);
 
   let capturedBody = null;
   let capturedParams = null;
   const fakeFetch = async (_url, init) => {
     capturedBody = typeof init?.body === "string" ? init.body : null;
-    // Return a minimal empty SSE response so the provider does not retry.
-    return new Response("event: message_stop\ndata: {}\n\n", {
+    return new Response("data: [DONE]\n\n", {
       status: 200,
       headers: { "content-type": "text/event-stream" },
     });
@@ -68,7 +91,7 @@ async function main() {
   });
 
   const options = {
-    apiKey: "sk-ant-harness-dummy",
+    apiKey: "harness-dummy-key",
     sessionId: scenario.sessionId,
     cacheRetention: scenario.cacheRetention,
     onPayload: (params) => {
@@ -78,22 +101,19 @@ async function main() {
   };
 
   streamSimple(model, context, options);
-  // Let the async setup run to the point of building params and issuing fetch.
   await new Promise((r) => setTimeout(r, 500));
 
   if (!capturedBody) {
     throw new Error("no request body captured; the provider did not reach fetch");
   }
 
-  const parsed = JSON.parse(capturedBody);
-  const fixture = canonicalize(parsed);
-
+  const fixture = canonicalize(JSON.parse(capturedBody));
   const outPath = join(repoRoot, "harness", "fixtures", `${basename(scenarioPath, ".json")}.json`);
   mkdirSync(dirname(outPath), { recursive: true });
   writeFileSync(outPath, JSON.stringify(fixture, null, 2) + "\n");
 
   console.log(`captured: ${scenarioPath}`);
-  console.log(`model:    ${scenario.model}`);
+  console.log(`provider: ${providerName} / ${scenario.model}`);
   console.log(`fixture:  ${outPath}`);
   if (capturedParams) {
     console.log(`payload keys: ${Object.keys(capturedParams).sort().join(", ")}`);
