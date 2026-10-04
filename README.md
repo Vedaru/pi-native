@@ -217,3 +217,12 @@ Swarm (`scripts/swarm_stress.py`): N units at once, aggregate and per-unit.
 | 8 idle `--rpc` | 3.9 MB | 30.9 MB |
 | 32 idle `--rpc` | 3.8 MB | 121.8 MB |
 | 8 busy (`read` sessions, 200k turns) | 4.9 MB | 39.1 MB |
+
+Native states (`scripts/native_states.py`), 200k turns where applicable:
+
+| State | RSS | CPU |
+| --- | --- | --- |
+| idle | 3.9 MB | 0.00 s |
+| tool-heavy (`read`) | 4.9 MB | 3.73 s |
+| tool-heavy (`grep`) | 9.8 MB | 3.49 s |
+| compaction-heavy | 4.3 MB | 4.08 s |
