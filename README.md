@@ -209,3 +209,11 @@ Two fixes came out of pressure testing:
 
 The remaining growth is the retained transcript; bounding it needs **context
 compaction**, which is the real fix for very long sessions.
+
+Swarm (`scripts/swarm_stress.py`): N units at once, aggregate and per-unit.
+
+| Swarm | Per unit | Total |
+| --- | --- | --- |
+| 8 idle `--rpc` | 3.9 MB | 30.9 MB |
+| 32 idle `--rpc` | 3.8 MB | 121.8 MB |
+| 8 busy (`read` sessions, 200k turns) | 4.9 MB | 39.1 MB |

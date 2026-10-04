@@ -47,3 +47,7 @@ jobs:
         run: python3 scripts/stress_gate.py --binary target/release/pi-native --turns 20000 --tools ls grep find edit read --max-mb 100 --max-cpu 5
       - name: Pressure gate (session/compaction)
         run: python3 scripts/stress_gate.py --binary target/release/pi-native --turns 20000 --tools read --max-mb 100 --max-cpu 5 --session
+      - name: Swarm gate
+        run: |
+          python3 scripts/swarm_stress.py --binary target/release/pi-native --units 8 --mode idle --max-total-mb 100
+          python3 scripts/swarm_stress.py --binary target/release/pi-native --units 8 --mode busy --turns 200000 --max-total-mb 200
