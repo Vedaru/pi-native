@@ -34,6 +34,15 @@ cargo test --workspace
 cargo clippy --workspace --all-targets
 ```
 
+Packaging builds a single self-contained binary and tars it with the license:
+
+```bash
+scripts/package.sh                      # -> dist/pi-native-<version>-<target>.tar.gz
+scripts/package.sh x86_64-unknown-linux-musl   # static build (needs musl-tools)
+```
+
+`pi-native --version` reports the version, git revision, and target triple.
+
 ## Prompt-cache primitives (`pi-cache`)
 
 The provider-parity gate (VED-315) requires exact cache behavior. `pi-cache`
