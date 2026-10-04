@@ -258,9 +258,262 @@ impl Tool for LsTool {
     }
 }
 
+/// `write`: create or overwrite a file.
+pub struct WriteTool;
+
+impl Tool for WriteTool {
+    fn name(&self) -> &'static str {
+        "write"
+    }
+
+    fn description(&self) -> &'static str {
+        "Create or overwrite a file with the given content. Parent directories are created."
+    }
+
+    fn input_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string", "description": "File path, relative to the working directory" },
+                "content": { "type": "string", "description": "Full file content" }
+            },
+            "required": ["path", "content"]
+        })
+    }
+
+    fn run(&self, input: &Value, ctx: &ToolContext) -> ToolResult {
+        let Some(path) = input.get("path").and_then(Value::as_str) else {
+            return ToolResult::error("write: missing required field `path`");
+        };
+        let Some(content) = input.get("content").and_then(Value::as_str) else {
+            return ToolResult::error("write: missing required field `content`");
+        };
+        let resolved = ctx.resolve(path);
+        if let Some(parent) = resolved.parent() {
+            if let Err(error) = std::fs::create_dir_all(parent) {
+                return ToolResult::error(format!("write: {path}: {error}"));
+            }
+        }
+        match std::fs::write(&resolved, content) {
+            Ok(()) => ToolResult::ok(format!("Wrote {} bytes to {path}", content.len())),
+            Err(error) => ToolResult::error(format!("write: {path}: {error}")),
+        }
+    }
+}
+
+/// `edit`: replace a unique exact string in a file.
+pub struct EditTool;
+
+impl Tool for EditTool {
+    fn name(&self) -> &'static str {
+        "edit"
+    }
+
+    fn description(&self) -> &'static str {
+        "Replace an exact string in a file. `oldText` must occur exactly once."
+    }
+
+    fn input_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string", "description": "File path, relative to the working directory" },
+                "oldText": { "type": "string", "description": "Exact text to replace; must be unique" },
+                "newText": { "type": "string", "description": "Replacement text" }
+            },
+            "required": ["path", "oldText", "newText"]
+        })
+    }
+
+    fn run(&self, input: &Value, ctx: &ToolContext) -> ToolResult {
+        let (Some(path), Some(old_text), Some(new_text)) = (
+            input.get("path").and_then(Value::as_str),
+            input.get("oldText").and_then(Value::as_str),
+            input.get("newText").and_then(Value::as_str),
+        ) else {
+            return ToolResult::error("edit: requires `path`, `oldText`, and `newText`");
+        };
+        let resolved = ctx.resolve(path);
+        let contents = match std::fs::read_to_string(&resolved) {
+            Ok(contents) => contents,
+            Err(error) => return ToolResult::error(format!("edit: {path}: {error}")),
+        };
+        match contents.matches(old_text).count() {
+            0 => ToolResult::error(format!("edit: {path}: `oldText` not found")),
+            1 => {
+                let updated = contents.replacen(old_text, new_text, 1);
+                match std::fs::write(&resolved, updated) {
+                    Ok(()) => ToolResult::ok(format!("Edited {path}")),
+                    Err(error) => ToolResult::error(format!("edit: {path}: {error}")),
+                }
+            }
+            count => ToolResult::error(format!(
+                "edit: {path}: `oldText` is not unique ({count} matches)"
+            )),
+        }
+    }
+}
+
+/// `grep`: search file contents with a regex, respecting .gitignore.
+pub struct GrepTool;
+
+impl Tool for GrepTool {
+    fn name(&self) -> &'static str {
+        "grep"
+    }
+
+    fn description(&self) -> &'static str {
+        "Search file contents for a regex pattern (respects .gitignore). Output is `path:line: text`."
+    }
+
+    fn input_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "pattern": { "type": "string", "description": "Rust regex pattern" },
+                "path": { "type": "string", "description": "Directory to search, defaults to the working directory" },
+                "max_results": { "type": "integer", "description": "Maximum matches to return (default 200)" }
+            },
+            "required": ["pattern"]
+        })
+    }
+
+    fn run(&self, input: &Value, ctx: &ToolContext) -> ToolResult {
+        let Some(pattern) = input.get("pattern").and_then(Value::as_str) else {
+            return ToolResult::error("grep: missing required field `pattern`");
+        };
+        let regex = match regex::Regex::new(pattern) {
+            Ok(regex) => regex,
+            Err(error) => return ToolResult::error(format!("grep: invalid pattern: {error}")),
+        };
+        let root = input
+            .get("path")
+            .and_then(Value::as_str)
+            .map(|path| ctx.resolve(path))
+            .unwrap_or_else(|| ctx.cwd.clone());
+        let max = input
+            .get("max_results")
+            .and_then(Value::as_u64)
+            .unwrap_or(200) as usize;
+
+        let mut matches: Vec<String> = Vec::new();
+        for entry in ignore::WalkBuilder::new(&root).build().flatten() {
+            if !entry
+                .file_type()
+                .map(|kind| kind.is_file())
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            let Ok(contents) = std::fs::read_to_string(entry.path()) else {
+                continue;
+            };
+            let display = entry
+                .path()
+                .strip_prefix(&ctx.cwd)
+                .unwrap_or(entry.path())
+                .display();
+            for (index, line) in contents.lines().enumerate() {
+                if regex.is_match(line) {
+                    matches.push(format!("{display}:{}: {}", index + 1, line.trim_end()));
+                    if matches.len() >= max {
+                        break;
+                    }
+                }
+            }
+            if matches.len() >= max {
+                break;
+            }
+        }
+        let truncated = truncate_head(&matches.join("\n"), DEFAULT_MAX_LINES, DEFAULT_MAX_BYTES);
+        ToolResult::ok(truncated.content)
+    }
+}
+
+/// `find`: list files matching a glob, respecting .gitignore.
+pub struct FindTool;
+
+impl Tool for FindTool {
+    fn name(&self) -> &'static str {
+        "find"
+    }
+
+    fn description(&self) -> &'static str {
+        "Find files by glob pattern (respects .gitignore)."
+    }
+
+    fn input_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "pattern": { "type": "string", "description": "Glob pattern, e.g. `*.rs` or `**/*.md`" },
+                "path": { "type": "string", "description": "Directory to search, defaults to the working directory" },
+                "max_results": { "type": "integer", "description": "Maximum paths to return (default 200)" }
+            },
+            "required": ["pattern"]
+        })
+    }
+
+    fn run(&self, input: &Value, ctx: &ToolContext) -> ToolResult {
+        let Some(pattern) = input.get("pattern").and_then(Value::as_str) else {
+            return ToolResult::error("find: missing required field `pattern`");
+        };
+        let matcher = match globset::Glob::new(pattern) {
+            Ok(glob) => glob.compile_matcher(),
+            Err(error) => return ToolResult::error(format!("find: invalid pattern: {error}")),
+        };
+        let root = input
+            .get("path")
+            .and_then(Value::as_str)
+            .map(|path| ctx.resolve(path))
+            .unwrap_or_else(|| ctx.cwd.clone());
+        let max = input
+            .get("max_results")
+            .and_then(Value::as_u64)
+            .unwrap_or(200) as usize;
+
+        let mut paths: Vec<String> = Vec::new();
+        for entry in ignore::WalkBuilder::new(&root).build().flatten() {
+            if !entry
+                .file_type()
+                .map(|kind| kind.is_file())
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            let path = entry.path();
+            let file_name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("");
+            if matcher.is_match(file_name) || matcher.is_match(path) {
+                paths.push(
+                    path.strip_prefix(&ctx.cwd)
+                        .unwrap_or(path)
+                        .display()
+                        .to_string(),
+                );
+                if paths.len() >= max {
+                    break;
+                }
+            }
+        }
+        paths.sort();
+        ToolResult::ok(paths.join("\n"))
+    }
+}
+
 /// The default tool set.
 pub fn default_tools() -> Vec<Box<dyn Tool>> {
-    vec![Box::new(ReadTool), Box::new(BashTool), Box::new(LsTool)]
+    vec![
+        Box::new(ReadTool),
+        Box::new(BashTool),
+        Box::new(LsTool),
+        Box::new(WriteTool),
+        Box::new(EditTool),
+        Box::new(GrepTool),
+        Box::new(FindTool),
+    ]
 }
 
 /// Provider-facing specs for a tool set.

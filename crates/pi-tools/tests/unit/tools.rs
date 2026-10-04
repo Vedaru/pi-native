@@ -68,9 +68,74 @@ fn tool_specs_serialize_for_the_provider() {
     let tools = default_tools();
     let specs = tool_specs(&tools);
     let names: Vec<&str> = specs.iter().map(|spec| spec.name.as_str()).collect();
-    assert_eq!(names, vec!["read", "bash", "ls"]);
+    assert_eq!(
+        names,
+        vec!["read", "bash", "ls", "write", "edit", "grep", "find"]
+    );
     assert_eq!(
         specs[0].input_schema["required"],
         serde_json::json!(["path"])
     );
+}
+
+#[test]
+fn write_creates_a_file_and_directories() {
+    let ctx = temp_ctx();
+    let result = WriteTool.run(
+        &serde_json::json!({ "path": "nested/dir/a.txt", "content": "hello" }),
+        &ctx,
+    );
+    assert!(!result.is_error, "{result:?}");
+    assert_eq!(
+        std::fs::read_to_string(ctx.cwd.join("nested/dir/a.txt")).unwrap(),
+        "hello"
+    );
+}
+
+#[test]
+fn edit_replaces_a_unique_string() {
+    let ctx = temp_ctx();
+    std::fs::write(ctx.cwd.join("a.txt"), "one\ntwo\nthree\n").expect("write");
+    let result = EditTool.run(
+        &serde_json::json!({ "path": "a.txt", "oldText": "two", "newText": "TWO" }),
+        &ctx,
+    );
+    assert!(!result.is_error, "{result:?}");
+    assert_eq!(
+        std::fs::read_to_string(ctx.cwd.join("a.txt")).unwrap(),
+        "one\nTWO\nthree\n"
+    );
+}
+
+#[test]
+fn edit_rejects_a_non_unique_string() {
+    let ctx = temp_ctx();
+    std::fs::write(ctx.cwd.join("a.txt"), "x x x").expect("write");
+    let result = EditTool.run(
+        &serde_json::json!({ "path": "a.txt", "oldText": "x", "newText": "y" }),
+        &ctx,
+    );
+    assert!(result.is_error);
+    assert!(result.content.contains("not unique"));
+}
+
+#[test]
+fn grep_finds_matching_lines() {
+    let ctx = temp_ctx();
+    std::fs::write(ctx.cwd.join("a.txt"), "alpha\nbeta\n").expect("write");
+    std::fs::write(ctx.cwd.join("b.txt"), "gamma\n").expect("write");
+    let result = GrepTool.run(&serde_json::json!({ "pattern": "a$" }), &ctx);
+    assert!(!result.is_error, "{result:?}");
+    assert!(result.content.contains("a.txt:1: alpha"), "{result:?}");
+    assert!(result.content.contains("b.txt:1: gamma"), "{result:?}");
+}
+
+#[test]
+fn find_matches_a_glob() {
+    let ctx = temp_ctx();
+    std::fs::write(ctx.cwd.join("a.rs"), "").expect("write");
+    std::fs::write(ctx.cwd.join("b.txt"), "").expect("write");
+    let result = FindTool.run(&serde_json::json!({ "pattern": "*.rs" }), &ctx);
+    assert!(!result.is_error, "{result:?}");
+    assert_eq!(result.content, "a.rs");
 }
