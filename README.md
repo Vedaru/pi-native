@@ -20,10 +20,9 @@ a pi-compatible implementation.
 ```
 crates/pi-cache/       provider prompt-cache primitives, ported from pi (VED-314)
 crates/pi-providers/   Anthropic/OpenAI request builders with pi's cache placement
-crates/pi-cli/         `pi-native` CLI (early scaffold)
-scripts/mem_bench.py   runtime memory benchmark (VED-302)
-config/                target and benchmark configuration
-artifacts/             generated measurement artifacts (committed for history)
+crates/pi-cli/         `pi-native` CLI
+scripts/               benchmark, stress, and parity harnesses
+artifacts/             committed measurement history
 docs/adr/              architecture decision records
 ```
 
