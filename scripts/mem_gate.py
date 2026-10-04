@@ -85,7 +85,13 @@ def main() -> int:
         sys.stderr.write(run.stderr)
         return run.returncode
 
-    current = index_results(load_json(current_path))
+    current_artifact = load_json(current_path)
+    if not current_artifact or not current_artifact.get("results"):
+        # No target binaries in this environment (e.g. CI without pi installed).
+        print("No benchmark targets available in this environment; memory gate skipped.")
+        return 0
+
+    current = index_results(current_artifact)
     regressions: list[str] = []
     comparisons: list[str] = []
     for key, rss in current.items():
