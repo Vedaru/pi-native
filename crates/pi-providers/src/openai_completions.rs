@@ -36,6 +36,8 @@ pub struct OpenAiCompletionsBuildOptions {
     pub max_tokens_field: MaxTokensField,
     pub supports_developer_role: bool,
     pub supports_strict_mode: bool,
+    /// DeepSeek-style compat: assistant messages carry `reasoning_content`.
+    pub requires_reasoning_content_on_assistant_messages: bool,
     pub reasoning: bool,
     pub thinking_format: ThinkingFormat,
     pub max_tokens: Option<i64>,
@@ -77,6 +79,7 @@ fn convert_messages(
     messages: &[TranscriptMessage],
     instruction_role: &str,
     system_text: &str,
+    requires_reasoning_content: bool,
 ) -> Vec<Value> {
     let mut out = Vec::new();
     if !system_text.is_empty() {
@@ -124,6 +127,9 @@ fn convert_messages(
                     "content".into(),
                     text.map(Value::String).unwrap_or(Value::Null),
                 );
+                if requires_reasoning_content {
+                    map.insert("reasoning_content".into(), json!(""));
+                }
                 if !tool_calls.is_empty() {
                     map.insert("tool_calls".into(), Value::Array(tool_calls));
                 }
@@ -189,7 +195,12 @@ pub fn build_openai_completions_params(
     params.insert("model".into(), json!(model));
     params.insert(
         "messages".into(),
-        Value::Array(convert_messages(messages, instruction_role, system_text)),
+        Value::Array(convert_messages(
+            messages,
+            instruction_role,
+            system_text,
+            options.requires_reasoning_content_on_assistant_messages,
+        )),
     );
     params.insert("stream".into(), json!(true));
 
@@ -251,6 +262,7 @@ mod tests {
             max_tokens_field: MaxTokensField::MaxTokens,
             supports_developer_role: false,
             supports_strict_mode: true,
+            requires_reasoning_content_on_assistant_messages: true,
             reasoning: true,
             thinking_format: ThinkingFormat::Deepseek,
             max_tokens: Some(384_000),
@@ -298,6 +310,42 @@ mod tests {
             &options(),
         );
         assert_eq!(actual, expected, "openai-completions basic differs from pi");
+    }
+
+    #[test]
+    fn matches_captured_pi_openai_completions_tool_use() {
+        let expected: Value = serde_json::from_str(include_str!(
+            "../../../harness/fixtures/openai-completions-tool-use.json"
+        ))
+        .expect("fixture parses");
+        let transcript = vec![
+            TranscriptMessage::UserText("read package.json".into()),
+            TranscriptMessage::Assistant(vec![AssistantBlock::ToolCall {
+                id: "toolu_1".into(),
+                name: "read".into(),
+                arguments: json!({"path": "package.json"}),
+            }]),
+            TranscriptMessage::ToolResult {
+                tool_call_id: "toolu_1".into(),
+                tool_name: "read".into(),
+                content: vec![ContentPart::Text {
+                    text: "{\"name\":\"x\"}".into(),
+                }],
+                is_error: false,
+            },
+            TranscriptMessage::UserText("summarize it".into()),
+        ];
+        let actual = build_openai_completions_params(
+            "deepseek-flash".into(),
+            "You are pi, a coding agent. Be concise.",
+            &tools(),
+            &transcript,
+            &options(),
+        );
+        assert_eq!(
+            actual, expected,
+            "openai-completions tool-use differs from pi"
+        );
     }
 
     #[test]

@@ -41,6 +41,7 @@ pub enum TranscriptMessage {
     Assistant(Vec<AssistantBlock>),
     ToolResult {
         tool_call_id: String,
+        tool_name: String,
         content: Vec<ContentPart>,
         is_error: bool,
     },
@@ -181,6 +182,7 @@ pub fn convert_messages(messages: &[TranscriptMessage]) -> Vec<AnthropicMessage>
                     tool_call_id,
                     content: parts,
                     is_error,
+                    ..
                 }) = messages.get(j)
                 {
                     content.push(ContentBlock::ToolResult {
@@ -241,11 +243,13 @@ mod tests {
         let messages = vec![
             TranscriptMessage::ToolResult {
                 tool_call_id: "a".into(),
+                tool_name: "read".into(),
                 content: vec![ContentPart::Text { text: "1".into() }],
                 is_error: false,
             },
             TranscriptMessage::ToolResult {
                 tool_call_id: "b".into(),
+                tool_name: "bash".into(),
                 content: vec![ContentPart::Text { text: "2".into() }],
                 is_error: true,
             },

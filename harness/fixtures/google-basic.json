@@ -1,0 +1,62 @@
+{
+  "contents": [
+    {
+      "parts": [
+        {
+          "text": "hello"
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "generationConfig": {
+    "maxOutputTokens": 65536,
+    "thinkingConfig": {
+      "thinkingBudget": 0
+    }
+  },
+  "systemInstruction": {
+    "parts": [
+      {
+        "text": "You are pi, a coding agent. Be concise."
+      }
+    ],
+    "role": "user"
+  },
+  "tools": [
+    {
+      "functionDeclarations": [
+        {
+          "description": "Read a file",
+          "name": "read",
+          "parametersJsonSchema": {
+            "properties": {
+              "path": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "path"
+            ],
+            "type": "object"
+          }
+        },
+        {
+          "description": "Run a shell command",
+          "name": "bash",
+          "parametersJsonSchema": {
+            "properties": {
+              "command": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "command"
+            ],
+            "type": "object"
+          }
+        }
+      ]
+    }
+  ]
+}

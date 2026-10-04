@@ -625,6 +625,7 @@ mod tests {
             }]),
             TranscriptMessage::ToolResult {
                 tool_call_id: "toolu_1".into(),
+                tool_name: "read".into(),
                 content: vec![ContentPart::Text {
                     text: "{\"name\":\"x\"}".into(),
                 }],

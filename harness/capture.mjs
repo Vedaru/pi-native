@@ -48,6 +48,11 @@ const PROVIDERS = {
     models: "providers/deepseek.models.js",
     export: "DEEPSEEK_MODELS",
   },
+  google: {
+    api: "api/google-generative-ai.js",
+    models: "providers/google.models.js",
+    export: "GOOGLE_MODELS",
+  },
 };
 
 /** Recursively sort object keys so JSON key order cannot cause false diffs. */
@@ -97,6 +102,12 @@ async function main() {
     messages: scenario.messages,
   });
 
+  // Google's adapter rejects a custom `options.fetch`, so for it we replace the
+  // global fetch instead. Other providers get the injected fetch directly.
+  if (providerName === "google") {
+    globalThis.fetch = fakeFetch;
+  }
+
   const options = {
     apiKey: "harness-dummy-key",
     sessionId: scenario.sessionId,
@@ -104,8 +115,10 @@ async function main() {
     onPayload: (params) => {
       capturedParams = params;
     },
-    fetch: fakeFetch,
   };
+  if (providerName !== "google") {
+    options.fetch = fakeFetch;
+  }
 
   streamSimple(model, context, options);
   await new Promise((r) => setTimeout(r, 500));
