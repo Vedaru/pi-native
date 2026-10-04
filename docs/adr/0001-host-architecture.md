@@ -11,6 +11,21 @@ pi is a TypeScript/Node application. Its idle RSS is ~111 MB, of which ~58 MB is
 the Node/V8 runtime itself. The project goal is to reduce memory by rewriting
 only the memory-heavy subsystems in Rust and removing the Node runtime.
 
+### Scope: partial rewrite + plugin wrapper
+
+This is **not a full port of pi**. Plugins/extensions are explicitly out of
+scope for rewriting:
+
+- Rewrite only the memory-heavy **core** in Rust (providers/HTTP, cache, SSE,
+session/context, TUI render hot paths).
+- Keep a **JS plugin wrapper** so existing pi plugins load and run unchanged.
+- The wrapper is an embedded JS runtime (`rquickjs`) with `swc` transpilation,
+exposing a hostcall API that mirrors pi's extension API.
+- Removing the Node **runtime** is in scope; removing the JS **plugin API** is
+not. When the two conflict, plugin compatibility wins.
+- The native core exposes a narrow, stable interface to the wrapper so each can
+evolve independently.
+
 Two hard constraints shape the host choice:
 
 1. **Provider-side identity (VED-315).** Outbound provider requests and
