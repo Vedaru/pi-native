@@ -39,13 +39,12 @@ fn tools() -> Vec<ToolSpec> {
 }
 
 /// Parity against a request captured from pi (VED-313).
-/// Regenerate with `node harness/capture.mjs harness/scenarios/openai-responses-basic.json`.
+/// Regenerate with `node scripts/harness/capture.mjs scripts/harness/scenarios/openai-responses-basic.json`.
 #[test]
 fn matches_captured_pi_openai_responses_basic() {
-    let expected: Value = serde_json::from_str(include_str!(
-        "../../../../harness/fixtures/openai-responses-basic.json"
-    ))
-    .expect("fixture parses");
+    let expected: Value =
+        serde_json::from_str(include_str!("../fixtures/openai-responses-basic.json"))
+            .expect("fixture parses");
 
     let built = build_openai_responses_params(
         "gpt-5".into(),
@@ -62,10 +61,9 @@ fn matches_captured_pi_openai_responses_basic() {
 /// function_call_output).
 #[test]
 fn matches_captured_pi_openai_responses_tool_use() {
-    let expected: Value = serde_json::from_str(include_str!(
-        "../../../../harness/fixtures/openai-responses-tool-use.json"
-    ))
-    .expect("fixture parses");
+    let expected: Value =
+        serde_json::from_str(include_str!("../fixtures/openai-responses-tool-use.json"))
+            .expect("fixture parses");
     let transcript = vec![
         TranscriptMessage::UserText("read package.json".into()),
         TranscriptMessage::Assistant(vec![AssistantBlock::ToolCall {

@@ -85,7 +85,7 @@ fn context_reset_clears_previous_request() {
 }
 
 /// Parity against pi's real `computeCacheWaste` (VED-314).
-/// Regenerate with `node harness/capture-cache-stats.mjs`.
+/// Regenerate with `node scripts/harness/capture-cache-stats.mjs`.
 #[test]
 fn matches_captured_pi_cache_waste() {
     use serde_json::Value;
@@ -104,14 +104,12 @@ fn matches_captured_pi_cache_waste() {
         }
     }
 
-    let scenario: Value = serde_json::from_str(include_str!(
-        "../../../../harness/fixtures/cache-stats-scenario.json"
-    ))
-    .expect("scenario parses");
-    let expected: Value = serde_json::from_str(include_str!(
-        "../../../../harness/fixtures/cache-stats-expected.json"
-    ))
-    .expect("expected parses");
+    let scenario: Value =
+        serde_json::from_str(include_str!("../fixtures/cache-stats-scenario.json"))
+            .expect("scenario parses");
+    let expected: Value =
+        serde_json::from_str(include_str!("../fixtures/cache-stats-expected.json"))
+            .expect("expected parses");
 
     fn usage_from(value: &Value) -> Usage {
         let cost = value.get("cost");

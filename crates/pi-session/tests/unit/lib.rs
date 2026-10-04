@@ -1,6 +1,6 @@
 use super::*;
 
-const SAMPLE: &str = include_str!("../../../../harness/fixtures/session-sample.jsonl");
+const SAMPLE: &str = include_str!("../fixtures/session-sample.jsonl");
 
 #[test]
 fn parses_a_real_session_sample() {

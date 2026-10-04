@@ -268,7 +268,7 @@ fn matches_captured_pi_basic() {
         &parity_options(CacheRetention::Short),
     );
     assert_parity(
-        include_str!("../../../../harness/fixtures/anthropic-basic.json"),
+        include_str!("../fixtures/anthropic-basic.json"),
         built,
         "basic",
     );
@@ -284,7 +284,7 @@ fn matches_captured_pi_long_retention() {
         &parity_options(CacheRetention::Long),
     );
     assert_parity(
-        include_str!("../../../../harness/fixtures/anthropic-long-retention.json"),
+        include_str!("../fixtures/anthropic-long-retention.json"),
         built,
         "long-retention",
     );
@@ -300,7 +300,7 @@ fn matches_captured_pi_no_tools() {
         &parity_options(CacheRetention::Short),
     );
     assert_parity(
-        include_str!("../../../../harness/fixtures/anthropic-no-tools.json"),
+        include_str!("../fixtures/anthropic-no-tools.json"),
         built,
         "no-tools",
     );
@@ -333,7 +333,7 @@ fn matches_captured_pi_tool_use() {
         &parity_options(CacheRetention::Short),
     );
     assert_parity(
-        include_str!("../../../../harness/fixtures/anthropic-tool-use.json"),
+        include_str!("../fixtures/anthropic-tool-use.json"),
         built,
         "tool-use",
     );

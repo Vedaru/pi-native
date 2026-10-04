@@ -88,7 +88,7 @@ cargo run -q -p pi-native -- prompt-cache-key --session-id sess-123 --responses
 
 ## Provider wire parity (VED-313)
 
-The gate requires byte-identical provider requests. `harness/capture.mjs`
+The gate requires byte-identical provider requests. `scripts/harness/capture.mjs`
 captures pi's real outgoing request by injecting a fake `fetch` into pi's
 provider, then writes canonical JSON fixtures. The Rust builder is tested
 against those fixtures.
@@ -97,9 +97,9 @@ against those fixtures.
 ./scripts/parity-check.sh
 ```
 
-Scenarios live in `harness/scenarios/` and select a `provider`
+Scenarios live in `scripts/harness/scenarios/` and select a `provider`
 (`anthropic`, `openai-completions`, `openai-responses`). Fixtures live in
-`harness/fixtures/`. JSON key order is canonicalized so only semantic changes
+each crate's `tests/fixtures/`. JSON key order is canonicalized so only semantic changes
 count. `PI_AI_DIST` overrides the installed pi-ai path.
 
 ## Attribution

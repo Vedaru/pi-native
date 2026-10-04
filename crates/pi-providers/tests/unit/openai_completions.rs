@@ -45,13 +45,12 @@ fn tools() -> Vec<ToolSpec> {
 }
 
 /// Parity against a request captured from pi (VED-313).
-/// Regenerate with `node harness/capture.mjs harness/scenarios/openai-completions-basic.json`.
+/// Regenerate with `node scripts/harness/capture.mjs scripts/harness/scenarios/openai-completions-basic.json`.
 #[test]
 fn matches_captured_pi_openai_completions_basic() {
-    let expected: Value = serde_json::from_str(include_str!(
-        "../../../../harness/fixtures/openai-completions-basic.json"
-    ))
-    .expect("fixture parses");
+    let expected: Value =
+        serde_json::from_str(include_str!("../fixtures/openai-completions-basic.json"))
+            .expect("fixture parses");
     let actual = build_openai_completions_params(
         "deepseek-flash".into(),
         "You are pi, a coding agent. Be concise.",
@@ -64,10 +63,9 @@ fn matches_captured_pi_openai_completions_basic() {
 
 #[test]
 fn matches_captured_pi_openai_completions_tool_use() {
-    let expected: Value = serde_json::from_str(include_str!(
-        "../../../../harness/fixtures/openai-completions-tool-use.json"
-    ))
-    .expect("fixture parses");
+    let expected: Value =
+        serde_json::from_str(include_str!("../fixtures/openai-completions-tool-use.json"))
+            .expect("fixture parses");
     let transcript = vec![
         TranscriptMessage::UserText("read package.json".into()),
         TranscriptMessage::Assistant(vec![AssistantBlock::ToolCall {

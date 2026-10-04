@@ -33,13 +33,11 @@ fn tools() -> Vec<ToolSpec> {
 }
 
 /// Parity against a request captured from pi (VED-313).
-/// Regenerate with `node harness/capture.mjs harness/scenarios/google-basic.json`.
+/// Regenerate with `node scripts/harness/capture.mjs scripts/harness/scenarios/google-basic.json`.
 #[test]
 fn matches_captured_pi_google_basic() {
-    let expected: Value = serde_json::from_str(include_str!(
-        "../../../../harness/fixtures/google-basic.json"
-    ))
-    .expect("fixture parses");
+    let expected: Value = serde_json::from_str(include_str!("../fixtures/google-basic.json"))
+        .expect("fixture parses");
     let actual = serde_json::to_value(build_google_params(
         "gemini-2.5-flash".into(),
         "You are pi, a coding agent. Be concise.",
@@ -54,10 +52,8 @@ fn matches_captured_pi_google_basic() {
 /// Parity for the multi-turn tool-use path (functionCall / functionResponse).
 #[test]
 fn matches_captured_pi_google_tool_use() {
-    let expected: Value = serde_json::from_str(include_str!(
-        "../../../../harness/fixtures/google-tool-use.json"
-    ))
-    .expect("fixture parses");
+    let expected: Value = serde_json::from_str(include_str!("../fixtures/google-tool-use.json"))
+        .expect("fixture parses");
     let transcript = vec![
         TranscriptMessage::UserText("read package.json".into()),
         TranscriptMessage::Assistant(vec![AssistantBlock::ToolCall {

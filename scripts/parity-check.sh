@@ -4,8 +4,8 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-for scenario in harness/scenarios/*.json; do
-  node harness/capture.mjs "$scenario"
+for scenario in scripts/harness/scenarios/*.json; do
+  node scripts/harness/capture.mjs "$scenario" crates/pi-providers/tests/fixtures
 done
 
 cargo test --workspace

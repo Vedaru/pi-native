@@ -6,7 +6,7 @@
 // writes a canonical-JSON fixture. The Rust builder must reproduce it.
 //
 // Usage:
-//   node harness/capture.mjs harness/scenarios/anthropic-basic.json
+//   node scripts/harness/capture.mjs scripts/harness/scenarios/anthropic-basic.json <out-dir>
 //
 // Scenario `provider` (default "anthropic"):
 //   anthropic | openai-completions | openai-responses
@@ -19,7 +19,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const repoRoot = resolve(here, "..");
+const repoRoot = resolve(here, "..", "..");
 
 const PI_AI_DIST =
   process.env.PI_AI_DIST ??
@@ -128,7 +128,10 @@ async function main() {
   }
 
   const fixture = canonicalize(JSON.parse(capturedBody));
-  const outPath = join(repoRoot, "harness", "fixtures", `${basename(scenarioPath, ".json")}.json`);
+  const outDir = process.argv[3]
+    ? resolve(repoRoot, process.argv[3])
+    : join(repoRoot, "crates", "pi-providers", "tests", "fixtures");
+  const outPath = join(outDir, `${basename(scenarioPath, ".json")}.json`);
   mkdirSync(dirname(outPath), { recursive: true });
   writeFileSync(outPath, JSON.stringify(fixture, null, 2) + "\n");
 

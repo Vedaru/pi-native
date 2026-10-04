@@ -1,7 +1,7 @@
 use super::*;
 use crate::SessionFile;
 
-const SAMPLE: &str = include_str!("../../../../harness/fixtures/session-sample.jsonl");
+const SAMPLE: &str = include_str!("../fixtures/session-sample.jsonl");
 
 #[test]
 fn builds_messages_from_the_leaf_branch() {
