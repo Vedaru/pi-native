@@ -1,6 +1,6 @@
 # pipelets
 
-**A swarm-friendly, low-memory, low-CPU agent bare core.**
+**A swarm-friendly, low-memory, low-CPU agent bare core — ~4 MB per idle unit.**
 
 pipelets is the headless-first Rust core that agent swarms run on: one small
 self-contained binary per unit, no Node/V8, and byte-identical provider requests

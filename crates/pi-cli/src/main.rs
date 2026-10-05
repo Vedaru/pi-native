@@ -36,7 +36,7 @@ const LONG_VERSION: &str = concat!(
     name = "pipelets",
     version,
     long_version = LONG_VERSION,
-    about = "Low-memory bare-core agent runtime for swarms (pi-compatible)"
+    about = "A swarm-friendly, low-memory, low-CPU agent bare core — ~4 MB per idle unit, byte-for-byte pi provider parity, no Node"
 )]
 struct Cli {
     /// Start in RPC mode and idle on stdin (used by the memory benchmark).

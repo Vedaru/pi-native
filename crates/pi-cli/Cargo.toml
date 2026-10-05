@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Pipelets: a low-memory, low-CPU bare-core agent runtime for swarms, ports pi's behavior"
+description = "A swarm-friendly, low-memory, low-CPU agent bare core: ~4 MB per idle unit, byte-for-byte pi provider parity, no Node"
 
 [[bin]]
 name = "pipelets"
