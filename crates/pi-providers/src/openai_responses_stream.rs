@@ -29,6 +29,10 @@ pub enum OpenAiResponsesStreamEvent {
         usage: Usage,
         stop_reason: Option<String>,
     },
+    Incomplete {
+        usage: Usage,
+        stop_reason: Option<String>,
+    },
     Failed {
         message: String,
     },
@@ -168,12 +172,15 @@ impl OpenAiResponsesStream {
                             .map(str::to_string);
                     }
                 }
-                OpenAiResponsesStreamEvent::Completed {
-                    usage: self.usage.clone(),
-                    stop_reason: response
-                        .and_then(|r| r.get("status"))
-                        .and_then(Value::as_str)
-                        .map(str::to_string),
+                let usage = self.usage.clone();
+                let stop_reason = response
+                    .and_then(|r| r.get("status"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+                if event_type == "response.incomplete" {
+                    OpenAiResponsesStreamEvent::Incomplete { usage, stop_reason }
+                } else {
+                    OpenAiResponsesStreamEvent::Completed { usage, stop_reason }
                 }
             }
             "response.failed" | "error" => OpenAiResponsesStreamEvent::Failed {
@@ -195,8 +202,12 @@ impl OpenAiResponsesStream {
 
 /// Assemble text and tool calls from a sequence of typed events.
 pub fn collect_response(events: &[OpenAiResponsesStreamEvent]) -> (String, Vec<ContentBlock>) {
+    use std::collections::HashMap;
     let mut text = String::new();
     let mut order: Vec<(Option<String>, String, String, String)> = Vec::new();
+    // Index each call's position in `order` by its `call_id` so argument deltas
+    // are O(1) instead of a linear scan per delta.
+    let mut by_call_id: HashMap<String, usize> = HashMap::new();
     for event in events {
         match event {
             OpenAiResponsesStreamEvent::TextDelta { delta } => text.push_str(delta),
@@ -204,16 +215,22 @@ pub fn collect_response(events: &[OpenAiResponsesStreamEvent]) -> (String, Vec<C
                 item_id,
                 call_id,
                 name,
-            } => order.push((
-                item_id.clone(),
-                call_id.clone(),
-                name.clone(),
-                String::new(),
-            )),
+            } => {
+                by_call_id.insert(call_id.clone(), order.len());
+                order.push((
+                    item_id.clone(),
+                    call_id.clone(),
+                    name.clone(),
+                    String::new(),
+                ));
+            }
             OpenAiResponsesStreamEvent::ToolCallArgsDelta { call_id, delta } => {
-                if let Some(entry) = order.iter_mut().find(|entry| &entry.1 == call_id) {
-                    entry.3.push_str(delta);
-                }
+                let index = *by_call_id.entry(call_id.clone()).or_insert_with(|| {
+                    // No prior `ToolCallStart`: keep the delta instead of dropping it.
+                    order.push((None, call_id.clone(), String::new(), String::new()));
+                    order.len() - 1
+                });
+                order[index].3.push_str(delta);
             }
             _ => {}
         }

@@ -8,6 +8,15 @@ use crate::types::ContentBlock;
 use crate::types::Usage;
 use serde_json::Value;
 
+/// One tool-call delta entry within a streamed chunk.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ToolCallDelta {
+    pub index: usize,
+    pub id: Option<String>,
+    pub name: Option<String>,
+    pub arguments: Option<String>,
+}
+
 /// A parsed Chat Completions stream event.
 #[derive(Debug, Clone, PartialEq)]
 pub enum OpenAiCompletionsStreamEvent {
@@ -17,11 +26,9 @@ pub enum OpenAiCompletionsStreamEvent {
     ReasoningDelta {
         delta: String,
     },
-    ToolCallDelta {
-        index: usize,
-        id: Option<String>,
-        name: Option<String>,
-        arguments: Option<String>,
+    /// Every tool-call delta carried by the chunk (parallel calls included).
+    ToolCallDeltas {
+        deltas: Vec<ToolCallDelta>,
     },
     Finished {
         finish_reason: Option<String>,
@@ -99,49 +106,51 @@ impl OpenAiCompletionsStream {
         let Some(choice) = value.get("choices").and_then(|choices| choices.get(0)) else {
             return OpenAiCompletionsStreamEvent::Other;
         };
+        // Process the delta before `finish_reason`: a final delta may arrive in
+        // the same chunk that carries the finish reason.
+        if let Some(delta) = choice.get("delta") {
+            if let Some(text) = delta.get("content").and_then(Value::as_str) {
+                if !text.is_empty() {
+                    return OpenAiCompletionsStreamEvent::TextDelta {
+                        delta: text.to_string(),
+                    };
+                }
+            }
+            if let Some(reasoning) = delta.get("reasoning_content").and_then(Value::as_str) {
+                if !reasoning.is_empty() {
+                    return OpenAiCompletionsStreamEvent::ReasoningDelta {
+                        delta: reasoning.to_string(),
+                    };
+                }
+            }
+            if let Some(calls) = delta.get("tool_calls").and_then(Value::as_array) {
+                // Keep every entry in the chunk, not just the first.
+                let deltas: Vec<ToolCallDelta> = calls
+                    .iter()
+                    .map(|call| {
+                        let function = call.get("function");
+                        ToolCallDelta {
+                            index: call.get("index").and_then(Value::as_u64).unwrap_or(0) as usize,
+                            id: call.get("id").and_then(Value::as_str).map(str::to_string),
+                            name: function
+                                .and_then(|function| function.get("name"))
+                                .and_then(Value::as_str)
+                                .map(str::to_string),
+                            arguments: function
+                                .and_then(|function| function.get("arguments"))
+                                .and_then(Value::as_str)
+                                .map(str::to_string),
+                        }
+                    })
+                    .collect();
+                if !deltas.is_empty() {
+                    return OpenAiCompletionsStreamEvent::ToolCallDeltas { deltas };
+                }
+            }
+        }
         if let Some(reason) = choice.get("finish_reason").and_then(Value::as_str) {
             return OpenAiCompletionsStreamEvent::Finished {
                 finish_reason: Some(reason.to_string()),
-            };
-        }
-        let Some(delta) = choice.get("delta") else {
-            return OpenAiCompletionsStreamEvent::Other;
-        };
-        if let Some(text) = delta.get("content").and_then(Value::as_str) {
-            if !text.is_empty() {
-                return OpenAiCompletionsStreamEvent::TextDelta {
-                    delta: text.to_string(),
-                };
-            }
-        }
-        if let Some(reasoning) = delta.get("reasoning_content").and_then(Value::as_str) {
-            if !reasoning.is_empty() {
-                return OpenAiCompletionsStreamEvent::ReasoningDelta {
-                    delta: reasoning.to_string(),
-                };
-            }
-        }
-        if let Some(call) = delta
-            .get("tool_calls")
-            .and_then(Value::as_array)
-            .and_then(|calls| calls.first())
-        {
-            let index = call.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
-            let id = call.get("id").and_then(Value::as_str).map(str::to_string);
-            let function = call.get("function");
-            let name = function
-                .and_then(|function| function.get("name"))
-                .and_then(Value::as_str)
-                .map(str::to_string);
-            let arguments = function
-                .and_then(|function| function.get("arguments"))
-                .and_then(Value::as_str)
-                .map(str::to_string);
-            return OpenAiCompletionsStreamEvent::ToolCallDelta {
-                index,
-                id,
-                name,
-                arguments,
             };
         }
         OpenAiCompletionsStreamEvent::Other
@@ -158,24 +167,21 @@ pub fn collect_completions(events: &[OpenAiCompletionsStreamEvent]) -> (String, 
         match event {
             TextDelta { delta } => text.push_str(delta),
             ReasoningDelta { delta } => reasoning.push_str(delta),
-            ToolCallDelta {
-                index,
-                id,
-                name,
-                arguments,
-            } => {
-                while calls.len() <= *index {
-                    calls.push((String::new(), String::new(), String::new()));
-                }
-                let call = &mut calls[*index];
-                if let Some(id) = id {
-                    call.0 = id.clone();
-                }
-                if let Some(name) = name {
-                    call.1 = name.clone();
-                }
-                if let Some(arguments) = arguments {
-                    call.2.push_str(arguments);
+            ToolCallDeltas { deltas } => {
+                for delta in deltas {
+                    while calls.len() <= delta.index {
+                        calls.push((String::new(), String::new(), String::new()));
+                    }
+                    let call = &mut calls[delta.index];
+                    if let Some(id) = &delta.id {
+                        call.0 = id.clone();
+                    }
+                    if let Some(name) = &delta.name {
+                        call.1 = name.clone();
+                    }
+                    if let Some(arguments) = &delta.arguments {
+                        call.2.push_str(arguments);
+                    }
                 }
             }
             Finished { .. } | Other => {}

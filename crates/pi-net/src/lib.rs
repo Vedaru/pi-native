@@ -142,9 +142,9 @@ pub trait SseProtocol: Default {
     /// Auth and version headers; the transport adds `content-type` and `accept`.
     fn headers(api_key: &str) -> Vec<(&'static str, String)>;
     /// Consume one SSE frame, returning any incremental delta it carried.
-    fn ingest(&mut self, event_type: &str, data: &str) -> Option<StreamDelta>;
-    /// Finish and produce the result.
-    fn into_result(self) -> StreamResult;
+    fn ingest(&mut self, event_type: &str, data: &str) -> Vec<StreamDelta>;
+    /// Finish and produce the result, or an error if the stream failed.
+    fn into_result(self) -> Result<StreamResult, NetError>;
 }
 
 /// Generic provider streaming.
@@ -183,51 +183,49 @@ where
     let response = post_json(&url, &headers, &body)?;
     let mut protocol = P::default();
     read_sse(response.into_reader(), |event_type, data| {
-        if let Some(delta) = protocol.ingest(event_type, data) {
+        for delta in protocol.ingest(event_type, data) {
             on_delta(delta);
         }
     })?;
-    Ok(protocol.into_result())
+    protocol.into_result()
 }
 
-fn completion_delta(event: &OpenAiCompletionsStreamEvent) -> Option<StreamDelta> {
+fn completion_delta(event: &OpenAiCompletionsStreamEvent) -> Vec<StreamDelta> {
     match event {
-        OpenAiCompletionsStreamEvent::TextDelta { delta } => Some(StreamDelta::Text(delta.clone())),
+        OpenAiCompletionsStreamEvent::TextDelta { delta } => vec![StreamDelta::Text(delta.clone())],
         OpenAiCompletionsStreamEvent::ReasoningDelta { delta } => {
-            Some(StreamDelta::Thinking(delta.clone()))
+            vec![StreamDelta::Thinking(delta.clone())]
         }
-        OpenAiCompletionsStreamEvent::ToolCallDelta {
-            id,
-            name,
-            arguments,
-            ..
-        } => Some(StreamDelta::ToolCall {
-            id: id.clone(),
-            name: name.clone(),
-            arguments: arguments.clone(),
-        }),
-        _ => None,
+        OpenAiCompletionsStreamEvent::ToolCallDeltas { deltas } => deltas
+            .iter()
+            .map(|delta| StreamDelta::ToolCall {
+                id: delta.id.clone(),
+                name: delta.name.clone(),
+                arguments: delta.arguments.clone(),
+            })
+            .collect(),
+        _ => Vec::new(),
     }
 }
 
-fn response_delta(event: &OpenAiResponsesStreamEvent) -> Option<StreamDelta> {
+fn response_delta(event: &OpenAiResponsesStreamEvent) -> Vec<StreamDelta> {
     match event {
-        OpenAiResponsesStreamEvent::TextDelta { delta } => Some(StreamDelta::Text(delta.clone())),
+        OpenAiResponsesStreamEvent::TextDelta { delta } => vec![StreamDelta::Text(delta.clone())],
         OpenAiResponsesStreamEvent::ToolCallStart { call_id, name, .. } => {
-            Some(StreamDelta::ToolCall {
+            vec![StreamDelta::ToolCall {
                 id: Some(call_id.clone()),
                 name: Some(name.clone()),
                 arguments: None,
-            })
+            }]
         }
         OpenAiResponsesStreamEvent::ToolCallArgsDelta { call_id, delta } => {
-            Some(StreamDelta::ToolCall {
+            vec![StreamDelta::ToolCall {
                 id: Some(call_id.clone()),
                 name: None,
                 arguments: Some(delta.clone()),
-            })
+            }]
         }
-        _ => None,
+        _ => Vec::new(),
     }
 }
 
@@ -246,20 +244,20 @@ impl SseProtocol for OpenAiCompletionsProtocol {
     fn headers(api_key: &str) -> Vec<(&'static str, String)> {
         vec![("authorization", format!("Bearer {api_key}"))]
     }
-    fn ingest(&mut self, _event_type: &str, data: &str) -> Option<StreamDelta> {
+    fn ingest(&mut self, _event_type: &str, data: &str) -> Vec<StreamDelta> {
         let event = self.stream.handle(data);
         let delta = completion_delta(&event);
         self.events.push(event);
         delta
     }
-    fn into_result(self) -> StreamResult {
+    fn into_result(self) -> Result<StreamResult, NetError> {
         let (text, content) = collect_completions(&self.events);
-        StreamResult {
+        Ok(StreamResult {
             message_id: self.stream.message_id().map(str::to_string),
             content,
             text,
             usage: self.stream.usage().clone(),
-        }
+        })
     }
 }
 
@@ -278,20 +276,26 @@ impl SseProtocol for OpenAiResponsesProtocol {
     fn headers(api_key: &str) -> Vec<(&'static str, String)> {
         vec![("authorization", format!("Bearer {api_key}"))]
     }
-    fn ingest(&mut self, event_type: &str, data: &str) -> Option<StreamDelta> {
+    fn ingest(&mut self, event_type: &str, data: &str) -> Vec<StreamDelta> {
         let event = self.stream.handle(event_type, data);
         let delta = response_delta(&event);
         self.events.push(event);
         delta
     }
-    fn into_result(self) -> StreamResult {
+    fn into_result(self) -> Result<StreamResult, NetError> {
+        if let Some(failure) = self.events.iter().find_map(|event| match event {
+            OpenAiResponsesStreamEvent::Failed { message } => Some(message.clone()),
+            _ => None,
+        }) {
+            return Err(NetError::Transport(failure));
+        }
         let (text, content) = collect_response(&self.events);
-        StreamResult {
+        Ok(StreamResult {
             message_id: self.stream.message_id().map(str::to_string),
             content,
             text,
             usage: self.stream.usage().clone(),
-        }
+        })
     }
 }
 
