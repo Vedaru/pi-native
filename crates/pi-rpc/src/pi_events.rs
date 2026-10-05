@@ -274,13 +274,32 @@ impl PiEventAdapter {
                 kind,
                 prompt,
                 options,
-            } => out.push(json!({
-                "type": "extension_ui_request",
-                "id": id,
-                "method": kind,
-                "title": prompt,
-                "options": options,
-            })),
+            } => {
+                // pi's dialog shapes differ by method: `confirm` carries a
+                // `message`, `select` carries `options`, and so on.
+                let mut request = json!({
+                    "type": "extension_ui_request",
+                    "id": id,
+                    "method": kind,
+                });
+                match kind.as_str() {
+                    "confirm" => {
+                        request["title"] = json!(prompt);
+                        request["message"] = json!(prompt);
+                    }
+                    "select" => {
+                        request["title"] = json!(prompt);
+                        request["options"] = json!(options);
+                    }
+                    "notify" => {
+                        request["message"] = json!(prompt);
+                    }
+                    _ => {
+                        request["title"] = json!(prompt);
+                    }
+                }
+                out.push(request);
+            }
             // Responses, state, ready, and errors already use a stable envelope.
             Event::Ready { .. }
             | Event::Response { .. }
@@ -366,6 +385,25 @@ mod tests {
             json!("hmm")
         );
         assert_eq!(message_end["message"]["content"][1]["text"], json!("done"));
+    }
+
+    #[test]
+    fn confirm_ui_requests_carry_a_message() {
+        let native = vec![Event::UiRequest {
+            id: "ui-1".into(),
+            kind: "confirm".into(),
+            prompt: "Run bash?".into(),
+            options: vec!["allow".into(), "deny".into()],
+        }];
+        let events = translate_all(&native);
+        let request = events
+            .iter()
+            .find(|event| event["type"] == json!("extension_ui_request"))
+            .expect("ui request");
+        assert_eq!(request["method"], json!("confirm"));
+        assert_eq!(request["title"], json!("Run bash?"));
+        // pi's confirm dialog reads `message`; omitting it crashed the client.
+        assert_eq!(request["message"], json!("Run bash?"));
     }
 
     #[test]
