@@ -125,6 +125,22 @@ fn permutation(before: &[Value], after: &[Value]) -> Option<Vec<usize>> {
     Some(permutation)
 }
 
+/// Whether `permutation` is a valid reordering of an array of length `len`:
+/// every position is in range and distinct.
+fn valid_permutation(permutation: &[usize], len: usize) -> bool {
+    if permutation.len() != len {
+        return false;
+    }
+    let mut seen = vec![false; len];
+    for &index in permutation {
+        if index >= len || seen[index] {
+            return false;
+        }
+        seen[index] = true;
+    }
+    true
+}
+
 /// Apply an operation batch to a revision, returning the new revision.
 pub fn apply(base: &Value, ops: &[Op]) -> Value {
     let mut root = base.clone();
@@ -151,18 +167,18 @@ pub fn apply(base: &Value, ops: &[Op]) -> Value {
             } => {
                 if let Some(array) = array_at_mut(&mut root, path) {
                     let start = (*start).min(array.len());
-                    let end = (start + delete_count).min(array.len());
+                    let end = start.saturating_add(*delete_count).min(array.len());
                     array.splice(start..end, items.clone());
                 }
             }
             Op::Move { path, permutation } => {
                 if let Some(array) = array_at_mut(&mut root, path) {
-                    let old = array.clone();
-                    let reordered: Vec<Value> = permutation
-                        .iter()
-                        .filter_map(|&index| old.get(index).cloned())
-                        .collect();
-                    if reordered.len() == old.len() {
+                    if valid_permutation(permutation, array.len()) {
+                        let old = array.clone();
+                        let reordered: Vec<Value> = permutation
+                            .iter()
+                            .map(|&index| old[index].clone())
+                            .collect();
                         *array = reordered;
                     }
                 }
