@@ -378,6 +378,101 @@ fn new_session_records_the_parent_session() {
 }
 
 #[test]
+fn reset_clears_context_in_place_and_reruns_the_first_message() {
+    let dir = std::env::temp_dir().join(format!("pi-rpc-reset-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("dir");
+    let path = dir.join("s.jsonl");
+    let lines = concat!(
+        "{\"type\":\"session\",\"id\":\"h\",\"timestamp\":\"2024-01-01T00:00:00Z\",\"cwd\":\"/tmp\",\"version\":3}\n",
+        "{\"type\":\"message\",\"id\":\"m1\",\"parentId\":null,\"timestamp\":\"2024-01-01T00:00:01Z\",\"message\":{\"role\":\"user\",\"content\":\"first task\"}}\n",
+    );
+    std::fs::write(&path, lines).expect("write session");
+
+    let mut agent = agent_with(vec![AssistantTurn {
+        text: "done".into(),
+        stop_reason: Some("end_turn".into()),
+        ..Default::default()
+    }]);
+    // `reset` with no text re-runs the first user message; the response reports
+    // the cleared/rerun bookkeeping and the turn streams afterwards.
+    let input = "{\"type\":\"reset\"}\n";
+    let buf = SessionBuf(std::rc::Rc::new(std::cell::RefCell::new(Vec::new())));
+    serve_session(
+        &mut agent,
+        Some(path.clone()),
+        &dir.to_string_lossy(),
+        std::io::Cursor::new(input.as_bytes().to_vec()),
+        buf.clone(),
+        |_| {},
+    )
+    .expect("serves");
+    let text = String::from_utf8(buf.0.borrow().clone()).unwrap();
+    assert!(text.contains("\"command\":\"reset\""), "{text}");
+    assert!(text.contains("\"reran\":true"), "{text}");
+    assert!(text.contains("first task"), "{text}");
+    assert!(text.contains("\"type\":\"done\""), "{text}");
+    // The transcript was cleared, then re-seeded with only the re-run task and
+    // its reply.
+    assert_eq!(agent.messages().len(), 2);
+    // The session file keeps its id and holds only the fresh transcript.
+    let session = SessionFile::read(&path).expect("read session");
+    assert_eq!(session.header.id, "h");
+    let messages: Vec<_> = session
+        .entries
+        .iter()
+        .filter(|entry| entry.kind == "message")
+        .collect();
+    assert_eq!(messages.len(), 2, "{messages:?}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn reset_without_rerun_only_clears() {
+    let mut agent = agent_with(Vec::new());
+    agent.push_user("stale context");
+    let events = handle(
+        &mut agent,
+        Request::Reset {
+            text: None,
+            rerun: false,
+        },
+    );
+    assert_eq!(agent.messages().len(), 0);
+    let Event::Response { command, data, .. } = &events[0] else {
+        panic!("expected response, got {events:?}");
+    };
+    assert_eq!(command, "reset");
+    assert_eq!(data["cleared"], serde_json::json!(true));
+    assert_eq!(data["reran"], serde_json::json!(false));
+}
+
+#[test]
+fn reset_with_explicit_text_reruns_that_task() {
+    let mut agent = agent_with(vec![AssistantTurn {
+        text: "ok".into(),
+        stop_reason: Some("end_turn".into()),
+        ..Default::default()
+    }]);
+    agent.push_user("old task");
+    let events = handle(
+        &mut agent,
+        Request::Reset {
+            text: Some("new task".into()),
+            rerun: true,
+        },
+    );
+    assert!(matches!(events[0], Event::Response { ref command, .. } if command == "reset"));
+    // The re-run replaced the context with the explicit task and its reply.
+    assert_eq!(agent.messages().len(), 2);
+    let Event::Response { data, .. } = &events[0] else {
+        unreachable!()
+    };
+    assert_eq!(data["text"], serde_json::json!("new task"));
+}
+
+#[test]
 fn entries_and_stats_read_the_live_journal() {
     let dir = std::env::temp_dir().join(format!("pi-rpc-entries-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);

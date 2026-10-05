@@ -265,6 +265,38 @@ class VerifierReportTests(unittest.TestCase):
         self.assertNotIn("verification", record)
 
 
+class FreshContextTests(unittest.TestCase):
+    def test_fresh_context_is_on_by_default(self):
+        self.assertTrue(conductor.FRESH_CONTEXT)
+
+    def test_reset_context_posts_to_the_reset_route(self):
+        # Keep the conductor's fresh-context-per-card default honest: the reset
+        # request must hit `/sessions/:id/reset` with an empty JSON body.
+        seen = {}
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        def fake_urlopen(request, timeout=None):
+            seen["url"] = request.full_url
+            seen["method"] = request.get_method()
+            seen["data"] = request.data
+            return FakeResponse()
+
+        original = conductor.urllib.request.urlopen
+        conductor.urllib.request.urlopen = fake_urlopen
+        try:
+            conductor.reset_context("abc-0")
+        finally:
+            conductor.urllib.request.urlopen = original
+        self.assertTrue(seen["url"].endswith("/sessions/abc-0/reset"), seen["url"])
+        self.assertEqual(seen["method"], "POST")
+
+
 class RetryTests(unittest.TestCase):
     def test_terminal_statuses_are_recognized(self):
         for status in ("done", "declined", "blocked", "dispatched_readonly"):

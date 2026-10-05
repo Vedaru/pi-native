@@ -64,6 +64,17 @@ pub enum Request {
     SetSessionName {
         name: String,
     },
+    /// Wipe the unit's context in place and (by default) re-run the task.
+    ///
+    /// The session file and id are kept, so the unit stays addressable. The
+    /// task is `text` when given, else the first user message in the current
+    /// transcript (neuralyzer's "wipe and re-run the first message").
+    Reset {
+        #[serde(default)]
+        text: Option<String>,
+        #[serde(default = "default_true")]
+        rerun: bool,
+    },
     /// Generate a short session title from the transcript.
     GenerateTitle,
     /// Queue a steering message (delivered with the next prompt).
@@ -224,6 +235,10 @@ pub enum Event {
     },
 }
 
+fn default_true() -> bool {
+    true
+}
+
 /// Apply one request to an agent with no session file (tests/embedding).
 pub fn handle(agent: &mut Agent, request: Request) -> Vec<Event> {
     let mut session = SessionState::empty();
@@ -237,11 +252,61 @@ pub fn handle(agent: &mut Agent, request: Request) -> Vec<Event> {
                 }],
             }
         }
+        Request::Reset { text, rerun } => reset_events(agent, &mut session, text, rerun),
         Request::UiResponse { .. } => Vec::new(),
         other => apply_command(agent, &mut session, ".", None, other)
             .into_iter()
             .collect(),
     }
+}
+
+/// The text of the first user message in the transcript, if any.
+fn first_user_text(agent: &Agent) -> Option<String> {
+    agent.messages().iter().find_map(|message| match message {
+        pi_providers::TranscriptMessage::UserText(text) => Some(text.clone()),
+        pi_providers::TranscriptMessage::UserParts(parts) => {
+            let text: String = parts
+                .iter()
+                .filter_map(|part| match part {
+                    pi_providers::ContentPart::Text { text } => Some(text.clone()),
+                    pi_providers::ContentPart::Image { .. } => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            (!text.is_empty()).then_some(text)
+        }
+        _ => None,
+    })
+}
+
+/// Clear the context in place, then optionally re-run the task. Returns the
+/// `reset` response followed by the re-run's events. Used by [`handle`], which
+/// has no streaming writer; the `drive` loop streams instead.
+fn reset_events(
+    agent: &mut Agent,
+    session: &mut SessionState,
+    text: Option<String>,
+    rerun: bool,
+) -> Vec<Event> {
+    let task = text.or_else(|| first_user_text(agent));
+    agent.replace_messages(Vec::new());
+    session.persist(agent);
+    let reran = rerun && task.is_some();
+    let mut events = vec![response(
+        None,
+        "reset",
+        serde_json::json!({ "cleared": true, "reran": reran, "text": task }),
+    )];
+    if let Some(task) = task.filter(|_| rerun) {
+        agent.push_user(task);
+        match agent.run() {
+            Ok(run) => events.extend(run.into_iter().map(from_agent_event)),
+            Err(error) => events.push(Event::Error {
+                message: error.to_string(),
+            }),
+        }
+    }
+    events
 }
 
 /// Handle a non-prompt command. Returns the reply, if the command has one.
@@ -278,6 +343,9 @@ fn apply_command(
             "get_last_assistant_text",
             serde_json::json!({ "text": last_assistant_text(agent) }),
         )),
+        // `reset` is handled in the drive loop (it streams a re-run) and in
+        // `handle`; it has no standalone command reply here.
+        Request::Reset { .. } => None,
         Request::GetSessionStats => Some(response(id, "get_session_stats", session.stats(agent))),
         Request::SetSessionName { name } => {
             session.set_name(name.clone());
@@ -1102,6 +1170,9 @@ fn drive<R: std::io::BufRead, W: std::io::Write, F: FnMut(&Agent)>(
         version: PROTOCOL_VERSION,
     });
     while let Some((id, request)) = io.next_request() {
+        // A prompt to run after the request is applied. `reset` sets this too,
+        // so a clear-and-re-run shares the streaming turn below.
+        let mut run: Option<String> = None;
         match request {
             Request::Prompt { text } => {
                 // pi acknowledges immediately, then streams events.
@@ -1110,6 +1181,9 @@ fn drive<R: std::io::BufRead, W: std::io::Write, F: FnMut(&Agent)>(
                     "prompt",
                     serde_json::json!({ "disposition": "started" }),
                 ));
+                // A prompt runs inline so steering and follow-up messages are
+                // delivered per pi's semantics (VED-385). `reset` shares the
+                // same run path below via `run`.
                 agent.push_user(text);
                 // Steering messages are injected before the next model call.
                 // `one-at-a-time` delivers one and leaves the rest queued.
@@ -1137,12 +1211,57 @@ fn drive<R: std::io::BufRead, W: std::io::Write, F: FnMut(&Agent)>(
                     }
                 }
             }
+            Request::Reset { text, rerun } => {
+                // Clear the context in place so the unit keeps its session id
+                // (VED-373).
+                let task = text.or_else(|| first_user_text(agent));
+                agent.replace_messages(Vec::new());
+                session.persist(agent);
+                io.write(&response(
+                    id,
+                    "reset",
+                    serde_json::json!({
+                        "cleared": true,
+                        "reran": rerun && task.is_some(),
+                        "text": task,
+                    }),
+                ));
+                if rerun {
+                    run = task;
+                }
+            }
             // Answered by the approval hook while a turn is running.
             Request::UiResponse { .. } => {}
             other => {
                 if let Some(event) = apply_command(agent, session, cwd, id, other) {
                     io.write(&event);
                 }
+            }
+        }
+        let Some(text) = run else {
+            continue;
+        };
+        // A `reset` with `rerun` uses the same delivery semantics as a prompt:
+        // steering before the turn, follow-ups as subsequent turns.
+        agent.push_user(text);
+        for queued in session.take_steering() {
+            agent.push_user(queued);
+        }
+        loop {
+            if let Err(error) = run_turn(agent, io, session) {
+                io.write(&Event::Error {
+                    message: error.to_string(),
+                });
+                break;
+            }
+            session.persist(agent);
+            after_turn(agent);
+            let follow_ups = session.take_follow_up();
+            if follow_ups.is_empty() {
+                break;
+            }
+            for queued in follow_ups {
+                agent.push_user(queued);
             }
         }
     }

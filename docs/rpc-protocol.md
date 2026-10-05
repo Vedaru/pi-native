@@ -10,6 +10,7 @@ Protocol version: `1` (reported in the `ready` event).
 
 ```json
 {"type": "prompt", "text": "run the tests"}
+{"type": "reset"}
 {"type": "get_messages"}
 {"type": "get_tree"}
 {"type": "switch_session", "sessionPath": "/path/to/session.jsonl"}
@@ -29,6 +30,7 @@ Commands reply with pi's envelope: `{"type":"response","id":?,"command":?,
 | `get_last_assistant_text` | — | Most recent assistant text |
 | `get_session_stats` | — | Session counts and file/name |
 | `new_session` | `parentSession`? | Start an empty session (new file) |
+| `reset` | `text`?, `rerun`? (default `true`) | Clear the context in place and re-run `text` (else the first user message) |
 | `switch_session` | `sessionPath` | Load a session file and continue (resume) |
 | `set_session_name` | `name` | Name the current session |
 | `steer` / `follow_up` | `message` | Queue a message for the next prompt (steering before the model call, follow-up after the turn) |
@@ -45,14 +47,23 @@ Commands reply with pi's envelope: `{"type":"response","id":?,"command":?,
 | `get_commands` | — | Slash commands (none built in; extensions are a later slice) |
 | `ui_response` | `id`, `value` | Answer a `ui_request` |
 
-This covers pi's 33 RPC commands. `set_model` records the model but does not swap
-the live provider, and `abort`/`abort_retry`/`abort_bash` are no-ops for a
-synchronous unit; `get_commands` returns built-ins only. The remaining control
-flags are **honoured**, not merely recorded: `set_auto_compaction` gates the
-agent's threshold compaction, `set_auto_retry` gates the transport retry loop,
-and `set_steering_mode`/`set_follow_up_mode` control whether a prompt delivers
-all queued messages or one at a time (`steer` before the model call, `follow_up`
+This covers pi's 33 RPC commands, plus `reset` for fresh-context execution.
+`set_model` records the model but does not swap the live provider, and
+`abort`/`abort_retry`/`abort_bash` are no-ops for a synchronous unit;
+`get_commands` returns built-ins only. The remaining control flags are
+**honoured**, not merely recorded: `set_auto_compaction` gates the agent's
+threshold compaction, `set_auto_retry` gates the transport retry loop, and
+`set_steering_mode`/`set_follow_up_mode` control whether a prompt delivers all
+queued messages or one at a time (`steer` before the model call, `follow_up`
 after the turn). An unsupported mode returns `success:false` with an `error`.
+
+`reset` clears the transcript **in place**: the session file keeps its id and
+header (so the unit stays addressable), only its message entries are dropped.
+With `rerun: true` (the default) the unit then re-runs the task — the `text`
+field when given, otherwise the first user message in the cleared transcript —
+streaming the turn's events after a `reset` response. `rerun: false` clears and
+stops, which is what the swarm conductor sends before each card so a unit never
+carries one growing transcript across cards (VED-373).
 
 ## Events (unit to client)
 
@@ -78,6 +89,7 @@ after the turn). An unsupported mode returns `success:false` with an `error`.
 | `tool_end` | `tool_call_id`, `name`, `is_error`, `content` | A tool call finished |
 | `done` | `stop_reason` | The agent loop finished |
 | `state` | `messages` | Reply to `get_state` |
+| `response` | `command: "reset"`, `cleared`, `reran`, `text` | Reply to `reset` (a `done`/turn events follow when `reran`) |
 | `ui_request` | `id`, `kind`, `prompt`, `options` | A generic UI request |
 | `error` | `message` | A protocol or turn error |
 

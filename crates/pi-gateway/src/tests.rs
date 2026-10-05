@@ -363,6 +363,34 @@ fn generates_a_session_title() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[test]
+fn resets_a_session_context_in_place() {
+    let dir = temp_dir("reset");
+    let server = start_gateway(&dir, "hello");
+    let id = create_session(&server, &dir);
+
+    // Run a prompt so the session has context.
+    let (status, _) = request(
+        server.addr,
+        "POST",
+        &format!("/sessions/{id}/commands"),
+        Some(json!({ "type": "prompt", "text": "work" })),
+    );
+    assert_eq!(status, 202);
+    // Give the unit a moment to finish the turn before resetting.
+    std::thread::sleep(Duration::from_millis(100));
+
+    let (status, body) = request(server.addr, "POST", &format!("/sessions/{id}/reset"), None);
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains("\"cleared\":true"), "{body}");
+    assert!(body.contains("\"reran\":false"), "{body}");
+    // The session id is unchanged, so the unit stays addressable.
+    let (status, body) = request(server.addr, "GET", "/sessions", None);
+    assert_eq!(status, 200);
+    assert!(body.contains(&id), "{body}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Parse `id: <n>` lines from an SSE transcript, in order.
 fn sse_ids(transcript: &str) -> Vec<u64> {
     transcript

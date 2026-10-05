@@ -14,6 +14,7 @@
 //! | `DELETE` | `/sessions/:id` | Forget a unit (keeps the session file on disk) |
 //! | `GET` | `/sessions/:id/commands` | Extension slash commands |
 //! | `POST` | `/sessions/:id/title` | Generate a session title from the transcript |
+//! | `POST` | `/sessions/:id/reset` | Clear a unit's context in place (no re-run) |
 //! | `GET` | `/sessions/:id/events` | SSE: replay + live (`?format=pi` for pi's shapes) |
 //! | `POST` | `/sessions/:id/commands` | Send a command (202 Accepted) |
 //! | `POST` | `/sessions/:id/ui_response` | Answer a `ui_request` |
@@ -459,6 +460,7 @@ fn handle_connection(mut stream: TcpStream, gateway: Arc<Gateway>) -> std::io::R
         ("DELETE", ["sessions", id]) => remove_session(&mut stream, &gateway, id),
         ("GET", ["sessions", id, "commands"]) => session_commands(&mut stream, &gateway, id),
         ("POST", ["sessions", id, "title"]) => session_title(&mut stream, &gateway, id),
+        ("POST", ["sessions", id, "reset"]) => reset_session(&mut stream, &gateway, id),
         ("GET", ["sessions", id, "events"]) => {
             stream_events(
                 stream,
@@ -619,6 +621,28 @@ fn session_commands(stream: &mut TcpStream, gateway: &Gateway, id: &str) {
             && event.get("command").and_then(Value::as_str) == Some("get_commands")
     })
     .unwrap_or_else(|error| await_error(error, "get_commands"));
+    write_json(stream, 200, &data);
+}
+
+/// Clear a unit's context in place without re-running the task, so the next
+/// prompt starts fresh. The session file and id are kept, so the unit stays
+/// addressable. Used by the swarm conductor for fresh-context-per-card.
+fn reset_session(stream: &mut TcpStream, gateway: &Gateway, id: &str) {
+    let Some(subscription) = subscribe_or_error(stream, gateway, id) else {
+        return;
+    };
+    if !send_or_error(
+        stream,
+        gateway,
+        id,
+        json!({ "type": "reset", "rerun": false }),
+    ) {
+        return;
+    }
+    let data = await_response(&subscription, "reset", |event| {
+        event.get("type").and_then(Value::as_str) == Some("response")
+            && event.get("command").and_then(Value::as_str) == Some("reset")
+    });
     write_json(stream, 200, &data);
 }
 

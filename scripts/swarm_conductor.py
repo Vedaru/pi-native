@@ -29,6 +29,13 @@ import urllib.request
 GATEWAY = os.environ.get("SWARM_GATEWAY", "http://127.0.0.1:30142")
 POLL_SECONDS = 20
 
+# Long-lived units bloat and drift: a role unit that kept every card's
+# transcript would send a growing, irrelevant context to the provider. By
+# default the conductor clears a unit's context before each card so every card
+# starts fresh (the unit keeps its session id). Set SWARM_FRESH_CONTEXT=0 to
+# keep one growing transcript per unit instead.
+FRESH_CONTEXT = os.environ.get("SWARM_FRESH_CONTEXT", "1") not in {"0", "false", "no"}
+
 # Stable role-unit session ids (the trailing segment of the session file name).
 ROLE_UNITS = {
     "planner": "18db8638ff4db8cc-0",
@@ -330,6 +337,24 @@ def abort(session_id: str) -> None:
         pass
 
 
+def reset_context(session_id: str) -> None:
+    """Clear a unit's context in place, keeping its session id, so the next
+    card starts from a fresh transcript (VED-373)."""
+    if not session_id:
+        return
+    request = urllib.request.Request(
+        f"{GATEWAY}/sessions/{session_id}/reset",
+        data=b"{}",
+        headers={"content-type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10):
+            pass
+    except OSError:
+        pass
+
+
 def assignment_prompt(identifier: str, title: str, role: str) -> str:
     """Prompt for a write-capable unit: implement, gate, report for verification.
 
@@ -484,6 +509,11 @@ def main() -> None:
             for decision in decisions:
                 if decision.action == "dispatch":
                     title = board.get(decision.issue, {}).get("title", "")
+                    # Fresh context per card: drop the unit's transcript before
+                    # handing it the next task, so it never grows across cards
+                    # (VED-373).
+                    if FRESH_CONTEXT:
+                        reset_context(decision.session_id)
                     try:
                         dispatch(
                             decision.session_id,
