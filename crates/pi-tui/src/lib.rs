@@ -13,11 +13,17 @@
 pub mod buffer;
 pub mod dialog;
 pub mod editor;
+pub mod image;
 pub mod render;
 
 pub use buffer::{Buffer, Cell, Color, Style};
 pub use dialog::{Dialog, DialogOutcome, DialogState};
 pub use editor::{cursor_column, move_cursor, wrap_line, wrap_lines};
+pub use image::{
+    calculate_image_cell_size, encode_iterm2, encode_kitty, encode_sixel, image_dimensions,
+    image_fallback, render_image, Capabilities, CellDimensions, ImageCellSize, ImageDimensions,
+    ImageProtocol, RenderOptions, RenderedImage,
+};
 pub use render::{diff, Renderer};
 
 #[cfg(test)]

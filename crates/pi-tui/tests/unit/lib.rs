@@ -234,3 +234,164 @@ fn notify_dialog_dismisses_without_a_value() {
     });
     assert_eq!(state.handle_key("enter"), DialogOutcome::Answered(None));
 }
+
+// ---- image protocols (VED-307) ----
+
+use crate::image::{
+    calculate_image_cell_size, encode_iterm2, encode_kitty, image_dimensions, image_fallback,
+    render_image, Capabilities, CellDimensions, ImageDimensions, ImageProtocol, RenderOptions,
+};
+
+fn png_1x1() -> String {
+    // A 1x1 PNG, base64 (signature + IHDR width/height = 1).
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+        .to_string()
+}
+
+#[test]
+fn png_dimensions_are_read_from_magic_bytes() {
+    let dimensions = image_dimensions(&png_1x1()).expect("png dimensions");
+    assert_eq!(dimensions.width_px, 1);
+    assert_eq!(dimensions.height_px, 1);
+}
+
+#[test]
+fn unknown_bytes_have_no_dimensions() {
+    assert!(image_dimensions("bm90IGFuIGltYWdl").is_none());
+    assert!(image_dimensions("!!!not base64!!!").is_none());
+}
+
+#[test]
+fn capabilities_detect_kitty_and_iterm2() {
+    let kitty = Capabilities::detect_from(|key| match key {
+        "KITTY_WINDOW_ID" => Some("1".to_string()),
+        _ => None,
+    });
+    assert_eq!(kitty.images, Some(ImageProtocol::Kitty));
+
+    let iterm = Capabilities::detect_from(|key| match key {
+        "TERM_PROGRAM" => Some("iTerm.app".to_string()),
+        _ => None,
+    });
+    assert_eq!(iterm.images, Some(ImageProtocol::Iterm2));
+
+    // tmux disables images (the escapes are not forwarded).
+    let tmux = Capabilities::detect_from(|key| match key {
+        "TMUX" => Some("/tmp/tmux".to_string()),
+        "KITTY_WINDOW_ID" => Some("1".to_string()),
+        _ => None,
+    });
+    assert_eq!(tmux.images, None);
+}
+
+#[test]
+fn cell_size_fits_within_the_width() {
+    let size = calculate_image_cell_size(
+        ImageDimensions {
+            width_px: 900,
+            height_px: 180,
+        },
+        80,
+        None,
+        CellDimensions::default(),
+        false,
+    );
+    assert!(size.columns <= 80, "{size:?}");
+    assert!(size.rows >= 1);
+}
+
+#[test]
+fn cell_size_honors_max_height() {
+    let size = calculate_image_cell_size(
+        ImageDimensions {
+            width_px: 100,
+            height_px: 10_000,
+        },
+        80,
+        Some(10),
+        CellDimensions::default(),
+        false,
+    );
+    assert!(size.rows <= 10, "{size:?}");
+}
+
+#[test]
+fn kitty_encoding_uses_png_and_placement_controls() {
+    let sequence = encode_kitty(&png_1x1(), Some(2), Some(1), Some(7), true);
+    assert!(
+        sequence.starts_with("\x1b_Ga=T,f=100,q=2,c=2,r=1,i=7;"),
+        "{sequence}"
+    );
+    assert!(sequence.ends_with("\x1b\\"), "{sequence}");
+}
+
+#[test]
+fn kitty_chunks_long_payloads() {
+    let big = "A".repeat(9000);
+    let sequence = encode_kitty(&big, None, None, None, true);
+    assert!(
+        sequence.contains("m=1;"),
+        "first chunk marks more: {sequence:.40}"
+    );
+    assert!(sequence.contains("m=0;"), "last chunk clears more");
+    // 9000 bytes / 4096 => three chunks.
+    assert_eq!(sequence.matches("\x1b_G").count(), 3);
+}
+
+#[test]
+fn kitty_move_cursor_false_adds_c1() {
+    let sequence = encode_kitty("AAAA", None, None, None, false);
+    assert!(sequence.contains("C=1"), "{sequence}");
+}
+
+#[test]
+fn iterm2_encoding_has_inline_and_size() {
+    let sequence = encode_iterm2("AAAA", Some(10), Some("cat.png"), true);
+    assert!(
+        sequence.starts_with("\x1b]1337;File=inline=1;"),
+        "{sequence}"
+    );
+    assert!(sequence.contains("width=10"), "{sequence}");
+    assert!(sequence.contains("height=auto"), "{sequence}");
+    assert!(
+        sequence.contains("name="),
+        "name should be base64: {sequence}"
+    );
+    assert!(sequence.ends_with('\x07'), "{sequence}");
+    // size is the decoded byte length of "AAAA" = 3.
+    assert!(sequence.contains("size=3"), "{sequence}");
+}
+
+#[test]
+fn render_image_returns_cells_and_sequence() {
+    let rendered = render_image(
+        &png_1x1(),
+        ImageDimensions {
+            width_px: 9,
+            height_px: 18,
+        },
+        ImageProtocol::Kitty,
+        RenderOptions {
+            max_width_cells: 2,
+            image_id: Some(1),
+            ..RenderOptions::default()
+        },
+    );
+    assert_eq!(rendered.columns, 2);
+    assert_eq!(rendered.rows, 2);
+    assert_eq!(rendered.image_id, Some(1));
+    assert!(rendered.sequence.contains("i=1"));
+}
+
+#[test]
+fn image_fallback_mentions_type_and_size() {
+    let fallback = image_fallback(
+        "image/png",
+        Some(ImageDimensions {
+            width_px: 4,
+            height_px: 3,
+        }),
+        Some("cat.png"),
+    );
+    assert_eq!(fallback, "[Image: cat.png [image/png] 4x3]");
+}

@@ -7,4 +7,5 @@ repository.workspace = true
 description = "Native TUI renderer core: cell buffer, differential ANSI writer, editor text, and ctx.ui dialogs"
 
 [dependencies]
+base64 = "0.22"
 unicode-width = "0.2"
