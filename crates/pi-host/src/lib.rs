@@ -80,7 +80,8 @@ impl Shared {
             replay.pop_front();
         }
         replay.push_back(event.clone());
-        drop(replay);
+        // Hold the replay lock while registering/sending so a concurrent
+        // subscribe() cannot both snapshot this event and receive it live.
         let mut subscribers = self
             .subscribers
             .lock()
