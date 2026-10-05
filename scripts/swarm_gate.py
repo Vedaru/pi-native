@@ -19,7 +19,7 @@ it records, so a branch that moves after gating must be re-gated (VED-377 AC1).
 
 Usage:
 
-    scripts/swarm_gate.py [--cwd <worktree>] [--json <path>] [--skip-tests]
+    scripts/swarm_gate.py [--cwd <dir>] [--json <path>] [--skip-tests]
 
 With no ``--cwd`` the gate runs in the current directory. ``--json -`` prints the
 receipt; otherwise it is written to ``--json`` (default: stdout only).
@@ -99,7 +99,7 @@ def run_gate(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--cwd", default=".", help="worktree to gate (default: cwd)")
+    parser.add_argument("--cwd", default=".", help="directory to gate (default: cwd)")
     parser.add_argument("--json", default="-", help="receipt output path, or - for stdout")
     parser.add_argument("--skip-tests", action="store_true", help="fmt+clippy only (fast)")
     args = parser.parse_args(argv)

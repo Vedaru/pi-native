@@ -195,21 +195,15 @@ unit, dispatches one card at a time, and never lets two `cargo test` / `git
 commit` runs race. Write-intent cards route to editing roles; audit/verify cards
 route to a read-only role (VED-360).
 
-Every **code card runs in its own git worktree** (VED-370): the conductor runs
-`scripts/swarm_worktree.py` to create `$SWARM_WORKTREE_ROOT/<ID>` on branch
-`swarm/<ID>`, opens a unit with `cwd` set to that directory (`POST /sessions`
-with `cwd`), and dispatches the worker there. The worker therefore always sees
-`cwd == workspace path` and commits only on `swarm/<ID>`; it never writes to the
-main tree and never pushes. The same worktree/session is reused for that card's
-review/test, and removed with `git worktree remove --force` + `git branch -D`
-only once the card is Done/Canceled. Read-only cards that never edit a tree do
-not get a branch.
+Every **code card runs in the shared main tree**: the conductor opens a unit in
+the repo root and dispatches it there, one editor at a time, so commits land on
+the current branch. Read-only cards that never edit a tree are dispatched the
+same way. No per-card worktrees.
 
 ```bash
 SWARM_REPO=/path/to/pi-native \
-SWARM_WORKTREE_ROOT=/path/to/pi-native-ws \
 python3 scripts/swarm_conductor.py
-python3 scripts/test_swarm_conductor.py   # routing + worktree isolation
+python3 scripts/test_swarm_conductor.py   # routing + dispatch
 ```
 
 ## Prompt-cache primitives (`pi-cache`)

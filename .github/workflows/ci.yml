@@ -41,7 +41,6 @@ jobs:
           python3 scripts/test_swarm_columns.py
           python3 scripts/test_swarm_dag.py
           python3 scripts/test_swarm_collision.py
-          python3 scripts/test_swarm_merge_queue.py
           python3 scripts/test_mem_gate.py
 
   package:

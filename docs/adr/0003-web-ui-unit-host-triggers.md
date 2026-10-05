@@ -66,7 +66,7 @@ Findings from the investigation:
 - Milestone 1 (browse) is usable as soon as session-dir management lands.
 - Milestone 2 (event parity) is the load-bearing change for a live UI; it
   requires exposing provider stream deltas through the agent loop.
-- SDK-only panels (subagents, MCP, skills, plugins, worktrees, project trust,
+- SDK-only panels (subagents, MCP, skills, plugins, project trust,
   exact system prompt, node-pty terminal) must be hidden or reimplemented.
 - Unattended triggers must run under the capability/approval policy added in the
   sandbox fixes, with per-run budgets.

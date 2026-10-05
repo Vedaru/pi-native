@@ -82,7 +82,7 @@ without any fork change.
 - One working directory per gateway (the host builds its agent with a single
   cwd); run one gateway per project.
 - `set_tools` is fixed at unit creation (`recreated: false`).
-- SDK-only panels (sub-agents, MCP, skills, plugins, worktrees, project trust,
+- SDK-only panels (sub-agents, MCP, skills, plugins, project trust,
   exact system prompt, node-pty terminal) are not backed on the native path.
 - `navigate_tree` maps to the gateway `fork` command.
 - `bash` returns immediately; its output arrives on the event stream.

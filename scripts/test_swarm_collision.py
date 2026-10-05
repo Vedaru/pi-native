@@ -110,15 +110,14 @@ class DeclareTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             collision.declare_intent({}, intent("", ["a"]))
 
-    def test_record_captures_branch_and_worktree(self):
+    def test_record_captures_branch(self):
         # AC4.
         intents: dict = {}
         collision.declare_intent(
             intents,
-            intent("VED-1", ["a"], branch="swarm/VED-1", worktree="/ws/VED-1"),
+            intent("VED-1", ["a"], branch="swarm/VED-1"),
         )
         self.assertEqual(intents["VED-1"]["branch"], "swarm/VED-1")
-        self.assertEqual(intents["VED-1"]["worktree"], "/ws/VED-1")
 
     def test_release_drops_the_intent(self):
         intents: dict = {}

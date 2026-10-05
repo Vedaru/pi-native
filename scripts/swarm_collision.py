@@ -24,7 +24,6 @@ durable store as the claim table and survive a restart:
       "scope": ["crates/pi-rpc/src/lib.rs", "crates/pi-agent"],
       "symbols": ["SessionState::switch"],
       "branch": "swarm/VED-375",
-      "worktree": "/…/pi-native-ws/VED-375",
       "declared_at": 1730000000
     }
 
@@ -335,7 +334,6 @@ def declare_intent(
         "scope",
         "symbols",
         "branch",
-        "worktree",
         "declared_at",
     ):
         if field in intent and intent[field] is not None:

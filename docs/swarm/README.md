@@ -35,9 +35,9 @@ with the reason instead of declining silently.
 
 ## Working on code
 
-- Code cards run in an **isolated worktree**: `python3 scripts/swarm_worktree.py
-  create <ID>` prints a path (e.g. `/home/vedaru/Projects/pi-native-ws/<ID>`) on
-  branch `swarm/<ID>`. Work there, commit there, never the main tree.
+- Code cards run directly in the **shared main tree** — no worktrees. The
+  orchestrator dispatches one editor at a time, and commits land on the current
+  branch.
 - **One editor at a time** — only one unit should run a heavy `cargo` build.
 - Gates before Done: `cargo fmt --all`, `cargo clippy --workspace --all-targets
   -- -D warnings`, `cargo test --workspace`.
@@ -65,30 +65,6 @@ block. An unknown/empty scope is fail-safe: it warns and requires explicit
 resolution instead of passing as disjoint. `--force` overrides a block but the
 override is recorded on both cards — it is never silent. The pure rules live in
 `scripts/swarm_collision.py` (`scripts/test_swarm_collision.py`).
-
-## Merge queue (risk-based gating)
-
-Accepted `swarm/<ID>` branches are merged through a deterministic FIFO queue
-instead of by hand:
-
-```
-python3 scripts/swarm_merge_queue.py enqueue VED-123
-python3 scripts/swarm_merge_queue.py list
-python3 scripts/swarm_merge_queue.py run            # rebase -> gate -> merge
-python3 scripts/swarm_merge_queue.py approve VED-123  # high-risk only
-python3 scripts/swarm_merge_queue.py resolve VED-123 --resolution "…"
-```
-
-`run` rebases the head worktree onto `master`, runs the gate
-(`scripts/swarm_gate.py`: fmt/clippy/test) and stores a receipt **bound to the
-exact head**, then merges locally. A branch is never merged unless the receipt
-is green for the merged head; `high`-risk entries (shared gate/CI files,
-cross-cutting crates, large diffs, or a review/audit title) need a recorded
-reviewer approval first. Conflicts are surfaced with exact paths and recorded,
-never silently auto-resolved. The queue is **serial** — one heavy build at a
-time — and it **does not push**: the synthesizer pushes. State lives beside the
-worktrees at `<worktree-root>/.merge-queue.json` (survives reboot). Tests:
-`scripts/test_swarm_merge_queue.py`.
 
 ## Patterns
 

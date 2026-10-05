@@ -13,7 +13,7 @@ is involved in deciding what runs. It owns:
   and releases claims on Done/Canceled;
 * **startup cleanup** of claims whose cards are already terminal.
 
-The tracker -> worktree -> session loop mirrors OpenAI Symphony (SPEC sections
+The tracker -> session loop mirrors OpenAI Symphony (SPEC sections
 7-8) and the `cyrus` / `contrabass` / `needle` / `sortie` / `machinist` swarms.
 
 Usage as a daemon::
