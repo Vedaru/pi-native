@@ -358,6 +358,22 @@ struct Unit {
     shared: Arc<Shared>,
     commands: Option<Sender<Vec<u8>>>,
     thread: Option<std::thread::JoinHandle<()>>,
+    /// Whether the unit's worker thread is currently alive. Set when the thread
+    /// is spawned and cleared by an [`AliveGuard`] when it exits or panics, so a
+    /// crashed unit is distinguishable from a suspended one (VED-376).
+    alive: Arc<AtomicBool>,
+}
+
+/// Clears a unit's `alive` flag when the worker thread leaves its scope, on a
+/// normal return **and** on panic (Drop runs during unwinding). This is what
+/// makes `UnitInfo.running` honest: the host holds the command `Sender`, so the
+/// channel alone cannot tell a crashed thread from a running one.
+struct AliveGuard(Arc<AtomicBool>);
+
+impl Drop for AliveGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
 }
 
 impl Unit {
@@ -373,7 +389,12 @@ impl Unit {
         let path = session_path.clone();
         let unit_cwd = cwd.clone();
         let agent_factory = factory.clone();
+        let alive = Arc::new(AtomicBool::new(true));
+        let thread_alive = alive.clone();
         let thread = std::thread::spawn(move || {
+            // Cleared on normal exit and on panic, so a crashed unit does not
+            // keep reporting `running: true` (VED-376).
+            let _guard = AliveGuard(thread_alive);
             let mut agent = agent_factory(&unit_cwd);
             let reader = BufReader::new(ChannelReader::new(rx));
             let _ =
@@ -388,6 +409,7 @@ impl Unit {
             shared,
             commands: Some(tx),
             thread: Some(thread),
+            alive,
         }
     }
 
@@ -416,12 +438,44 @@ impl Unit {
         let path = self.session_path.clone();
         let cwd = self.cwd.clone();
         let factory = self.factory.clone();
+        self.alive.store(true, Ordering::SeqCst);
+        let thread_alive = self.alive.clone();
         self.thread = Some(std::thread::spawn(move || {
+            let _guard = AliveGuard(thread_alive);
             let mut agent = factory(&cwd);
             let reader = BufReader::new(ChannelReader::new(rx));
             let _ = pi_rpc::serve_session(&mut agent, Some(path), &cwd, reader, writer, |_| {});
         }));
         self.commands = Some(tx);
+    }
+
+    /// Restart the unit's worker so it can accept a recovery command while
+    /// preserving the session id (the addressable handle).
+    ///
+    /// Three cases, one spawn path:
+    /// - suspended (`commands` is `None`) -> [`wake`](Self::wake);
+    /// - the command sender is alive but the worker thread has died (a panic) ->
+    ///   drop the stale sender, then wake;
+    /// - a live worker -> no-op.
+    ///
+    /// It never calls [`Host::open`], so recovery cannot hit `AtCapacity`
+    /// (VED-376). The caller sends the recovery prompt afterwards.
+    fn restart(&mut self) {
+        if self.commands.is_some() && self.is_alive() {
+            return;
+        }
+        if self.commands.is_some() {
+            // The thread is gone; drop the stale sender so `wake` respawns.
+            self.suspend();
+        }
+        self.wake();
+    }
+
+    /// Whether the unit's worker thread is currently alive. A suspended unit
+    /// (no command sender) is not alive; a crashed thread is not alive either,
+    /// which is how recovery distinguishes a dead unit from a running one.
+    fn is_alive(&self) -> bool {
+        self.alive.load(Ordering::SeqCst)
     }
 
     fn suspend(&mut self) {
@@ -444,8 +498,21 @@ impl Unit {
         }
     }
 
+    /// The unit is addressable and its worker is alive.
     fn is_running(&self) -> bool {
-        self.commands.is_some()
+        self.commands.is_some() && self.is_alive()
+    }
+
+    /// The agent is released (no command sender) but the unit is still
+    /// addressable and a later `send` wakes it.
+    fn is_suspended(&self) -> bool {
+        self.commands.is_none()
+    }
+
+    /// The unit holds a command sender but its worker thread has died (a panic
+    /// or an exit without a suspend). Recovery restarts these (VED-376).
+    fn is_dead(&self) -> bool {
+        self.commands.is_some() && !self.is_alive()
     }
 
     fn subscribe(&self) -> Subscription {
@@ -470,11 +537,17 @@ pub struct UnitInfo {
     pub name: Option<String>,
     pub cwd: String,
     pub session_path: String,
+    /// The unit's worker thread is alive (not suspended, not crashed).
     pub running: bool,
     /// The agent is inside a run right now (see `Shared::in_flight`). `running`
-    /// only says the unit is not suspended; this distinguishes working from
-    /// idle.
+    /// says the worker thread is alive; this distinguishes working from idle.
     pub in_flight: bool,
+    /// The agent has been released and a later `send` wakes it. Distinct from
+    /// `running`: a suspended unit is addressable but not alive (VED-376).
+    pub suspended: bool,
+    /// The worker thread exists but has died (a panic). Recovery restarts
+    /// rather than re-dispatches these (VED-376).
+    pub dead: bool,
     pub last_event: Option<String>,
     pub last_event_at: i64,
     pub subscribers: usize,
@@ -605,6 +678,41 @@ impl Host {
             .ok_or_else(|| HostError::UnknownSession(session_id.to_string()))
     }
 
+    /// Whether the unit's worker thread is alive. `false` for an unknown
+    /// session, a suspended unit, or a crashed one.
+    pub fn is_alive(&self, session_id: &str) -> bool {
+        self.units
+            .get(session_id)
+            .map(Unit::is_alive)
+            .unwrap_or(false)
+    }
+
+    /// Whether the unit holds a command sender whose worker thread has died (a
+    /// panic or an exit without a suspend). Recovery restarts these.
+    pub fn is_dead(&self, session_id: &str) -> bool {
+        self.units
+            .get(session_id)
+            .map(Unit::is_dead)
+            .unwrap_or(false)
+    }
+
+    /// Restart a unit's worker without dropping the unit: the session id (the
+    /// addressable handle) is preserved and the agent is rebuilt from the
+    /// session file. A suspended unit is woken; a crashed thread is respawned;
+    /// a live unit is left alone. Returns whether the session is known.
+    ///
+    /// This never creates a new unit, so it cannot hit [`HostError::AtCapacity`];
+    /// recovery of a dead/stalled unit should call this rather than `open`.
+    pub fn restart(&mut self, session_id: &str) -> bool {
+        match self.units.get_mut(session_id) {
+            Some(unit) => {
+                unit.restart();
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Suspend every running unit that has been idle for at least `idle`.
     ///
     /// A unit is idle when it has no live subscribers and no command or event
@@ -645,6 +753,8 @@ impl Host {
                 session_path: unit.session_path.to_string_lossy().into_owned(),
                 running: unit.is_running(),
                 in_flight: unit.shared.in_flight(),
+                suspended: unit.is_suspended(),
+                dead: unit.is_dead(),
                 last_event: unit.shared.last_event(),
                 last_event_at: unit.shared.last_event_at(),
                 subscribers: unit.shared.subscriber_count(),

@@ -378,6 +378,56 @@ fn in_flight_is_true_during_a_silent_turn_and_false_after() {
     );
     assert!(!host.swarm()[0].in_flight);
 
+// ---- VED-376: honest worker liveness and restart -------------------------
+
+/// A host whose unit factory panics immediately, standing in for a worker that
+/// crashed while the host still holds its command sender.
+fn panicking_host(cwd: &std::path::Path) -> Host {
+    let cwd = cwd.to_path_buf();
+    Host::new(cwd.to_string_lossy().to_string(), move |_unit_cwd: &str| {
+        panic!("worker crash for the VED-376 liveness test");
+    })
+}
+
+/// Poll `predicate` until it holds or `timeout` elapses.
+fn wait_until(mut predicate: impl FnMut() -> bool, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if predicate() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    predicate()
+}
+
+#[test]
+fn a_crashed_worker_is_not_reported_running() {
+    // The host holds the command sender, so the channel alone says "running".
+    // The Drop guard must clear liveness on panic (H1/H3/H4).
+    let dir = temp_dir("crash");
+    let mut host = panicking_host(&dir);
+    let id = host.open(dir.join("s.jsonl")).expect("open");
+
+    assert!(
+        wait_until(|| !host.is_alive(&id), Duration::from_secs(2)),
+        "a panicked worker must not stay alive"
+    );
+    assert!(!host.is_alive(&id), "crashed worker reports alive");
+    assert!(
+        !host.is_running(&id),
+        "crashed worker must not report running (the running-lies-after-panic bug)"
+    );
+    let info = host
+        .swarm()
+        .into_iter()
+        .find(|unit| unit.session_id == id)
+        .expect("unit in swarm");
+    assert!(
+        !info.running,
+        "UnitInfo.running must be honest after a crash"
+    );
+    assert!(info.dead, "a crashed unit must be marked dead");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -386,5 +436,99 @@ fn in_flight_is_an_error_for_an_unknown_session() {
     let dir = temp_dir("in-flight-unknown");
     let host = one_turn_host(&dir, "hello");
     assert!(host.in_flight("missing").is_err());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_live_unit_reports_running_and_alive() {
+    // H3: a healthy unit is both alive and running.
+    let dir = temp_dir("alive");
+    let mut host = one_turn_host(&dir, "hello");
+    let id = host.open(dir.join("s.jsonl")).expect("open");
+    assert!(host.is_alive(&id));
+    assert!(host.is_running(&id));
+    let info = host
+        .swarm()
+        .into_iter()
+        .find(|u| u.session_id == id)
+        .unwrap();
+    assert!(info.running && !info.dead && !info.suspended);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_suspended_unit_is_addressable_but_not_alive() {
+    // H2/H9: suspend drops the sender; the worker exits and clears its guard,
+    // but the unit stays addressable (a later send wakes it).
+    let dir = temp_dir("suspended-liveness");
+    let mut host = one_turn_host(&dir, "hello");
+    let id = host.open(dir.join("s.jsonl")).expect("open");
+    host.suspend(&id);
+    assert!(
+        wait_until(|| !host.is_alive(&id), Duration::from_secs(2)),
+        "a suspended worker exits and is not alive"
+    );
+    assert!(!host.is_running(&id));
+    let info = host
+        .swarm()
+        .into_iter()
+        .find(|u| u.session_id == id)
+        .unwrap();
+    assert!(info.suspended, "a suspended unit is marked suspended");
+    assert!(!info.dead, "a suspended unit is not dead");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn restart_wakes_a_suspended_unit_preserving_the_handle() {
+    // H5/H8: restart rebuilds the agent without changing the session id.
+    let dir = temp_dir("restart-suspended");
+    let mut host = one_turn_host(&dir, "hello");
+    let id = host.open(dir.join("s.jsonl")).expect("open");
+    host.suspend(&id);
+    assert!(wait_until(|| !host.is_alive(&id), Duration::from_secs(2)));
+
+    assert!(host.restart(&id), "restart knows the session");
+    assert!(host.is_alive(&id), "restart wakes the unit");
+    // The same handle still addresses the session and can run a turn.
+    let sub = host.subscribe(&id).expect("subscribe after restart");
+    host.send(&id, json!({ "type": "prompt", "text": "go" }))
+        .expect("send after restart");
+    assert!(wait_for(&sub, "done", Duration::from_secs(2)).is_some());
+    assert_eq!(host.swarm()[0].session_id, id);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn restart_respawns_a_dead_worker_without_reopening() {
+    // H6/H10: a dead thread is respawned through restart, never `open`, so it
+    // cannot hit the capacity ceiling even at the cap.
+    let dir = temp_dir("restart-dead");
+    let mut host = panicking_host(&dir).with_max_units(1);
+    let id = host.open(dir.join("s.jsonl")).expect("open");
+    assert!(wait_until(|| !host.is_alive(&id), Duration::from_secs(2)));
+    assert!(host.is_dead(&id));
+
+    assert!(host.restart(&id), "restart knows the session");
+    // The new worker panics again, but restart itself must not have needed a
+    // new unit slot: the session id is unchanged and capacity was never hit.
+    let info = host
+        .swarm()
+        .into_iter()
+        .find(|u| u.session_id == id)
+        .unwrap();
+    assert_eq!(info.session_id, id);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn restart_leaves_a_live_unit_alone() {
+    // H7: a live unit is a no-op, so double recovery cannot spawn two threads.
+    let dir = temp_dir("restart-live");
+    let mut host = one_turn_host(&dir, "hello");
+    let id = host.open(dir.join("s.jsonl")).expect("open");
+    assert!(host.restart(&id));
+    assert!(host.is_alive(&id));
+    assert!(host.is_running(&id));
     let _ = std::fs::remove_dir_all(&dir);
 }
