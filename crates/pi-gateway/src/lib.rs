@@ -25,7 +25,7 @@
 
 use pi_host::{Host, HostError, RecvError, Subscription};
 use pi_rpc::{Event, PiEventAdapter};
-use pi_triggers::{Episode, Receipt, RunStore, Runner};
+use pi_triggers::{Episode, Receipt, RunStore, Runner, TriggerSpec};
 use serde_json::{json, Value};
 use std::io::{Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
@@ -451,6 +451,9 @@ fn handle_connection(mut stream: TcpStream, gateway: Arc<Gateway>) -> std::io::R
             drop(host);
             write_json(&mut stream, 200, &json!({ "units": units, "cwd": cwd }));
         }
+        ("GET", ["cron"]) => list_cron(&mut stream, &gateway),
+        ("POST", ["cron"]) => upsert_cron(&mut stream, &gateway, &request),
+        ("DELETE", ["cron", id]) => remove_cron(&mut stream, &gateway, id),
         ("GET", ["runs"]) => {
             let receipts = gateway.receipts();
             write_json(&mut stream, 200, &json!({ "receipts": receipts }));
@@ -578,6 +581,76 @@ fn remove_session(stream: &mut TcpStream, gateway: &Gateway, id: &str) {
             stream,
             404,
             &json!({ "error": format!("unknown session: {id}") }),
+        );
+    }
+}
+
+/// List the runtime cron jobs a unit has scheduled.
+fn list_cron(stream: &mut TcpStream, gateway: &Gateway) {
+    let Some(triggers) = &gateway.triggers else {
+        write_json(stream, 200, &json!({ "jobs": [] }));
+        return;
+    };
+    let runtime = triggers.lock().unwrap_or_else(|error| error.into_inner());
+    let jobs: Vec<Value> = runtime
+        .runner
+        .triggers()
+        .iter()
+        .map(|trigger| {
+            json!({
+                "id": trigger.id,
+                "schedule": trigger.schedule.describe(),
+                "prompt": trigger.prompt,
+                "target": trigger.target,
+                "lastFiredAt": runtime.runner.last_fired_at(&trigger.id),
+            })
+        })
+        .collect();
+    write_json(stream, 200, &json!({ "jobs": jobs }));
+}
+
+/// Add or replace a runtime cron job. The body is a `TriggerSpec`:
+/// `{id, interval_secs | cron, prompt, target?}`.
+fn upsert_cron(stream: &mut TcpStream, gateway: &Gateway, request: &Request) {
+    let Some(triggers) = &gateway.triggers else {
+        write_json(stream, 503, &json!({ "error": "cron is not enabled" }));
+        return;
+    };
+    let body = request.json().unwrap_or(Value::Null);
+    let spec: TriggerSpec = match serde_json::from_value(body) {
+        Ok(spec) => spec,
+        Err(error) => {
+            write_json(stream, 400, &json!({ "error": error.to_string() }));
+            return;
+        }
+    };
+    let id = spec.id.clone();
+    let trigger = match spec.into_trigger() {
+        Ok(trigger) => trigger,
+        Err(error) => {
+            write_json(stream, 400, &json!({ "error": error }));
+            return;
+        }
+    };
+    let mut runtime = triggers.lock().unwrap_or_else(|error| error.into_inner());
+    runtime.runner.upsert(trigger);
+    write_json(stream, 201, &json!({ "ok": true, "id": id }));
+}
+
+/// Remove a runtime cron job by id.
+fn remove_cron(stream: &mut TcpStream, gateway: &Gateway, id: &str) {
+    let Some(triggers) = &gateway.triggers else {
+        write_json(stream, 503, &json!({ "error": "cron is not enabled" }));
+        return;
+    };
+    let mut runtime = triggers.lock().unwrap_or_else(|error| error.into_inner());
+    if runtime.runner.remove(id) {
+        write_json(stream, 200, &json!({ "removed": true }));
+    } else {
+        write_json(
+            stream,
+            404,
+            &json!({ "error": format!("unknown cron job: {id}") }),
         );
     }
 }

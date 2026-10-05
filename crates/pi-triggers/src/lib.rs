@@ -33,6 +33,16 @@ pub enum Schedule {
     Cron(CronSchedule),
 }
 
+impl Schedule {
+    /// A one-line description: `every 300s` or `cron 0 * * * *`.
+    pub fn describe(&self) -> String {
+        match self {
+            Schedule::Interval { every } => format!("every {}s", every.as_secs()),
+            Schedule::Cron(cron) => format!("cron {}", cron.expression),
+        }
+    }
+}
+
 /// One trigger definition.
 #[derive(Debug, Clone)]
 pub struct Trigger {
@@ -40,6 +50,9 @@ pub struct Trigger {
     pub schedule: Schedule,
     /// Prompt sent to the session each time the trigger fires.
     pub prompt: String,
+    /// Deliver to this existing session id instead of the trigger's own session
+    /// (a unit scheduling its own tick).
+    pub target: Option<String>,
     /// If non-zero, at most one episode per `dedupe_window` (restart-safe).
     pub dedupe_window: Duration,
     /// If non-zero, at most this many episodes per `budget_window`.
@@ -59,6 +72,7 @@ impl Trigger {
             id: id.into(),
             schedule: Schedule::Interval { every },
             prompt: prompt.into(),
+            target: None,
             dedupe_window: Duration::ZERO,
             max_runs_per_window: 0,
             budget_window: Duration::ZERO,
@@ -77,6 +91,7 @@ impl Trigger {
             id: id.into(),
             schedule: Schedule::Cron(CronSchedule::parse(expression)?),
             prompt: prompt.into(),
+            target: None,
             dedupe_window: Duration::ZERO,
             max_runs_per_window: 0,
             budget_window: Duration::ZERO,
@@ -516,8 +531,18 @@ impl Runner {
                 continue;
             }
 
-            let path = self.session_path(&trigger.id);
-            match host.open(path.clone()) {
+            let trigger_path = self.session_path(&trigger.id);
+            // A target delivers to an existing unit (a unit scheduling its own
+            // tick); otherwise the trigger owns a stable session.
+            let opened = match &trigger.target {
+                Some(target) => Ok(target.clone()),
+                None => host.open(trigger_path.clone()),
+            };
+            let path = match &trigger.target {
+                Some(target) => host.session_path(target).unwrap_or(trigger_path),
+                None => trigger_path,
+            };
+            match opened {
                 Ok(session_id) => {
                     let workspace = self
                         .workspace
@@ -791,6 +816,30 @@ impl Runner {
         }
     }
 
+    /// Add a trigger, replacing any with the same id.
+    pub fn upsert(&mut self, trigger: Trigger) {
+        let id = trigger.id.clone();
+        if let Some(existing) = self.triggers.iter_mut().find(|t| t.id == id) {
+            *existing = trigger;
+        } else {
+            self.triggers.push(trigger);
+        }
+        self.last_fired.remove(&id);
+    }
+
+    /// Remove a trigger by id. Returns whether one was removed.
+    pub fn remove(&mut self, id: &str) -> bool {
+        let before = self.triggers.len();
+        self.triggers.retain(|trigger| trigger.id != id);
+        self.last_fired.remove(id);
+        self.triggers.len() != before
+    }
+
+    /// Unix-seconds of the last firing for a trigger, if any.
+    pub fn last_fired_at(&self, id: &str) -> Option<i64> {
+        self.last_fired.get(id).copied()
+    }
+
     fn is_due<S: RunStore + ?Sized>(&self, trigger: &Trigger, store: &S, now: i64) -> bool {
         let last = self.last_fired.get(&trigger.id).copied();
         match &trigger.schedule {
@@ -927,6 +976,8 @@ fn session_file_stem(trigger_id: &str) -> String {
 /// A parsed 5-field cron expression.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CronSchedule {
+    /// The original 5-field expression, for listing/round-tripping.
+    expression: String,
     minute: Field,
     hour: Field,
     day: Field,
@@ -944,6 +995,7 @@ impl CronSchedule {
             ));
         }
         Ok(Self {
+            expression: expression.to_string(),
             minute: Field::parse(parts[0], 0, 59)?,
             hour: Field::parse(parts[1], 0, 23)?,
             day: Field::parse(parts[2], 1, 31)?,
@@ -982,6 +1034,9 @@ pub struct TriggerSpec {
     #[serde(default)]
     pub cron: Option<String>,
     pub prompt: String,
+    /// Deliver to this existing session id instead of a per-trigger session.
+    #[serde(default)]
+    pub target: Option<String>,
     #[serde(default)]
     pub dedupe_window_secs: u64,
     #[serde(default)]
@@ -1017,6 +1072,7 @@ impl TriggerSpec {
             id: self.id,
             schedule,
             prompt: self.prompt,
+            target: self.target,
             dedupe_window: Duration::from_secs(self.dedupe_window_secs),
             max_runs_per_window: self.max_runs_per_window,
             budget_window: Duration::from_secs(self.budget_window_secs),

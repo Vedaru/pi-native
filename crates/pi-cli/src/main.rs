@@ -870,29 +870,28 @@ fn run_gateway(
             std::process::exit(1);
         }
     };
-    let gateway = match triggers {
-        Some(path) => {
-            let triggers = pi_triggers::load_triggers(path).unwrap_or_else(|error| {
-                eprintln!("pi-native: {error}");
-                std::process::exit(1);
-            });
-            let runs = trigger_runs
-                .map(PathBuf::from)
-                .unwrap_or_else(|| cwd.join(".pi-native").join("trigger-runs.jsonl"));
-            let store = pi_triggers::JsonlRuns::open(&runs).unwrap_or_else(|error| {
-                eprintln!("pi-native: cannot open {}: {error}", runs.display());
-                std::process::exit(1);
-            });
-            let sessions = cwd.join(".pi-native").join("trigger-sessions");
-            let mut runner =
-                pi_triggers::Runner::new(triggers, sessions).with_workspace(cwd.clone());
-            if let Some(price) = run_price {
-                runner = runner.with_price(price);
-            }
-            pi_gateway::Gateway::with_triggers(host, runner, Box::new(store))
-        }
-        None => pi_gateway::Gateway::new(host),
+    // Cron is always available so a unit can schedule its own tick at runtime
+    // via `POST /cron`; `--triggers` only seeds the initial set.
+    let initial = match triggers {
+        Some(path) => pi_triggers::load_triggers(path).unwrap_or_else(|error| {
+            eprintln!("pi-native: {error}");
+            std::process::exit(1);
+        }),
+        None => Vec::new(),
     };
+    let runs = trigger_runs
+        .map(PathBuf::from)
+        .unwrap_or_else(|| cwd.join(".pi-native").join("trigger-runs.jsonl"));
+    let store = pi_triggers::JsonlRuns::open(&runs).unwrap_or_else(|error| {
+        eprintln!("pi-native: cannot open {}: {error}", runs.display());
+        std::process::exit(1);
+    });
+    let sessions = cwd.join(".pi-native").join("trigger-sessions");
+    let mut runner = pi_triggers::Runner::new(initial, sessions).with_workspace(cwd.clone());
+    if let Some(price) = run_price {
+        runner = runner.with_price(price);
+    }
+    let gateway = pi_gateway::Gateway::with_triggers(host, runner, Box::new(store));
     // Allow the header host the operator actually bound, plus loopback.
     let mut allowed_hosts = vec!["localhost".to_string()];
     let bound_host = bind_addr.ip().to_string();
@@ -900,9 +899,7 @@ fn run_gateway(
         allowed_hosts.push(bound_host);
     }
     let gateway = Arc::new(gateway.with_token(token).with_allowed_hosts(allowed_hosts));
-    if triggers.is_some() {
-        gateway.spawn_trigger_loop(std::time::Duration::from_secs(trigger_interval.max(1)));
-    }
+    gateway.spawn_trigger_loop(std::time::Duration::from_secs(trigger_interval.max(1)));
     if idle_timeout > 0 {
         gateway.spawn_idle_reaper(
             std::time::Duration::from_secs(30),

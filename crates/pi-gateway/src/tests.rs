@@ -505,7 +505,8 @@ fn accepts_the_correct_token_on_every_transport() {
         Some(json!({ "sessionPath": dir.join("s.jsonl").to_string_lossy() })),
         Some("secret"),
     );
-    assert_eq!(status, 201, "{body}");    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(status, 201, "{body}");
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

@@ -145,9 +145,7 @@ fn post_json_once(
     headers: &[(&str, String)],
     body_json: &str,
 ) -> Result<HttpResponse, NetError> {
-    let mut request = agent()
-        .post(url)
-        .header("content-type", "application/json");
+    let mut request = agent().post(url).header("content-type", "application/json");
     for (name, value) in headers {
         request = request.header(*name, value.as_str());
     }
