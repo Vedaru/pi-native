@@ -13,8 +13,10 @@ backoff, and reconciliation. No LLM is involved in either decision.
 
 Routing only sends write-intent work to units that are allowed to edit code
 (per ONBOARDING scope). Read-only units (`reviewer`, `planner`) receive an
-audit/verify prompt that must not commit, and a read-only dispatch is terminal
-after one attempt so it cannot be retried forever (VED-360).
+audit/verify prompt that must not commit. A read-only dispatch is terminal by
+default (VED-360), but the reviewer may post a machine-readable verdict asking
+the conductor to route the issue to a write-capable unit; `tick()` honors that
+verdict by re-routing the claim instead of dropping it (VED-365).
 """
 
 from __future__ import annotations
@@ -49,6 +51,10 @@ POLL_SECONDS = 20
 # keep one growing transcript per unit instead.
 FRESH_CONTEXT = os.environ.get("SWARM_FRESH_CONTEXT", "1") not in {"0", "false", "no"}
 
+# A read-only unit that finds the issue needs code changes posts this marker in
+# a Linear comment; the conductor then re-routes the claim to a write unit.
+ROUTE_VERDICT_RE = re.compile(r"@conductor\s+route-to:\s*(\w+)", re.IGNORECASE)
+
 # Stable role-unit session ids (the trailing segment of the session file name).
 ROLE_UNITS = {
     "planner": "18db8638ff4db8cc-0",
@@ -75,8 +81,11 @@ VERIFIER_ROLE = "verifier"
 EDITING_ROLES = {"coder", "tester", "synthesizer"}
 READ_ONLY_ROLES = set(ROLE_UNITS) - EDITING_ROLES
 
-# A claim in one of these statuses is terminal: never re-dispatch it.
+# A claim in one of these statuses is terminal: never re-dispatch it. A
+# read-only dispatch is terminal *unless* the reviewer posts a route verdict
+# (see `pending_route`), so it is checked separately from the hard terminals.
 TERMINAL_STATUSES = {"done", "declined", "blocked", "dispatching", "dispatched_readonly"}
+HARD_TERMINAL_STATUSES = TERMINAL_STATUSES - {"dispatched_readonly"}
 
 # Lifecycle states used by the verification gate (VED-369). An owner reports
 # completion by moving its card to IN_REVIEW, never straight to DONE. Only a
@@ -95,11 +104,19 @@ VERIFY_FAIL = "fail"
 AWAITING_VERIFICATION = "awaiting_verification"
 
 
-# Titles that ask for review work route to a read-only unit. Matched only as
-# a leading verb ("audit …", "review …", "verify …") so a fix that merely
-# mentions the reviewer or a "read-only" path is still routed as write work.
-REVIEW_TITLE_RE = re.compile(
-    r"^\s*(swarm\s+)?(audit|review|verify)\b", re.IGNORECASE
+# Titles that ask for review-only work route to a read-only unit. Matched only
+# as a leading verb ("review …", "verify …") so a fix that merely mentions the
+# reviewer or a "read-only" path is still routed as write work.
+#
+# `audit` is deliberately *not* in this list: the VED project titles its write
+# issues `Swarm audit: <fix list>`, so an audit prefix is implementation work
+# (VED-365). An audit title is only read-only when it says so explicitly
+# (read-only / report only).
+REVIEW_TITLE_RE = re.compile(r"^\s*(swarm\s+)?(review|verify)\b", re.IGNORECASE)
+AUDIT_TITLE_RE = re.compile(r"^\s*(swarm\s+)?audit\b", re.IGNORECASE)
+READ_ONLY_QUALIFIER_RE = re.compile(
+    r"\b(read[- ]?only|report[- ]?only|no\s+code\s+changes?|findings[- ]?only)\b",
+    re.IGNORECASE,
 )
 
 
@@ -110,10 +127,13 @@ def role_for(title: str) -> str:
     Write-intent issues must resolve to an [`EDITING_ROLES`] unit: a read-only
     role cannot implement or commit, so routing one here would loop forever
     (VED-360). Only titles that explicitly ask for a review/audit go to a
-    read-only role.
+    read-only role; an `audit` title is write work unless it asks for a
+    read-only report (VED-365).
     """
     t = title.lower()
     if REVIEW_TITLE_RE.search(title):
+        return "reviewer"
+    if AUDIT_TITLE_RE.search(title) and READ_ONLY_QUALIFIER_RE.search(title):
         return "reviewer"
     if any(word in t for word in ("plan", "priorit", "backlog", "status", "docs")):
         return "planner" if "plan" in t or "priorit" in t else "synthesizer"
@@ -455,8 +475,9 @@ def review_prompt(identifier: str, title: str, role: str) -> str:
     """Prompt for a read-only unit: audit, report, and stop.
 
     Never asks for a commit. The unit records its verdict on the issue; if the
-    issue needs code changes it says so and the conductor routes it to a
-    write-capable unit instead of retrying this read-only one.
+    issue needs code changes it posts a machine-readable route verdict and the
+    conductor re-routes it to a write-capable unit instead of retrying this
+    read-only one.
     """
     prompt = (
         f"Conductor assignment: audit Linear issue {identifier}.\n"
@@ -464,13 +485,55 @@ def review_prompt(identifier: str, title: str, role: str) -> str:
         f"Read it with `linear issue view {identifier}`. You are the read-only {role} unit: "
         f"do NOT edit files, commit, or change the issue state. Verify the claim, inspect the "
         f"relevant code, and comment your findings on {identifier} (exact files and commands). "
-        f"If a code change is required, say explicitly that it is out of your scope so the "
-        f"conductor can route it to a write-capable unit. Sign — [{role}]."
+        f"If a code change is required, post a comment containing the exact line "
+        f"`@conductor route-to: coder` so the conductor re-routes it to a write-capable unit, "
+        f"and say explicitly that it is out of your scope. Sign — [{role}]."
     )
     context = memory_context()
     if context:
         prompt += "\n\n" + context
     return prompt
+
+
+def issue_comments(identifier: str) -> list[str]:
+    """Return the bodies of an issue's comments via the Linear CLI."""
+    result = subprocess.run(
+        ["linear", "issue", "view", identifier, "--json"],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "LINEAR_IGNORE_ENV_FILE": "1"},
+    )
+    payload = json.loads(result.stdout)
+    return [node.get("body") or "" for node in payload.get("comments", {}).get("nodes", [])]
+
+
+def route_target(comments: list[str]) -> str | None:
+    """Parse the last `@conductor route-to: <role>` verdict from comments.
+
+    Returns the requested editing role, or None when there is no verdict. A
+    verdict naming a read-only role is ignored: it would re-route to another
+    unit that cannot fix the issue.
+    """
+    target = None
+    for body in comments:
+        match = ROUTE_VERDICT_RE.search(body)
+        if match:
+            target = match.group(1).lower()
+    if target in EDITING_ROLES:
+        return target
+    return None
+
+
+def pending_route(identifier: str) -> str | None:
+    """Route target requested by a read-only reviewer verdict, or None.
+
+    A verdict naming a read-only role is ignored: re-routing there would not
+    fix the issue. The caller records `rerouted` so this fires at most once.
+    """
+    try:
+        return route_target(issue_comments(identifier))
+    except Exception:
+        return None
 
 
 def prompt_for(identifier: str, title: str, role: str) -> str:
@@ -557,6 +620,7 @@ def main() -> None:
                 session_for=lambda role: ROLE_UNITS[role],
                 read_only_roles=READ_ONLY_ROLES,
                 blocked=dag_gate(),
+                reroute=pending_route,
             )
             for decision in decisions:
                 if decision.action == "dispatch":

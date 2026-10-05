@@ -113,6 +113,7 @@ class Claim:
     dispatched_at: float = 0.0
     terminal: bool = False
     read_only: bool = False
+    rerouted: bool = False
 
     def eligible(self, now: float, max_attempts: int) -> bool:
         if self.terminal:
@@ -256,6 +257,7 @@ class Orchestrator:
         session_for=None,
         read_only_roles=None,
         blocked=None,
+        reroute=None,
     ) -> list[Decision]:
         """One deterministic reconcile + dispatch pass.
 
@@ -270,6 +272,11 @@ class Orchestrator:
         dispatched yet (for example task-DAG dependencies that are not Done,
         VED-378). Blocked issues are skipped for dispatch but keep any existing
         claim, so finishing a dependency does not lose in-flight work.
+
+        ``reroute(issue)`` returns a role to force for an issue whose reviewer
+        posted a route verdict (VED-365), or ``None``. A re-route revives a
+        terminal read-only claim exactly once so the review -> coder handoff
+        happens without ping-ponging back to the reviewer.
         """
         is_busy = is_busy or (lambda _sid: False)
         read_only_roles = read_only_roles or set()
@@ -347,9 +354,21 @@ class Orchestrator:
             claim = self.claim_for(issue)
             if claim.session_id and claim.session_id in self.running:
                 continue
-            if not claim.eligible(now, self.config.max_attempts):
+            verdict_role = None
+            if reroute is not None:
+                verdict_role = reroute(issue)
+                if verdict_role:
+                    # A reviewer verdict re-opens a terminal read-only claim for
+                    # one write dispatch (VED-365).
+                    claim.terminal = False
+                    claim.read_only = False
+                    claim.rerouted = True
+            if not claim.eligible(now, self.config.max_attempts) and verdict_role is None:
                 continue
-            role = route(snapshot.get("title", "")) if route else "coder"
+            if verdict_role:
+                role = verdict_role
+            else:
+                role = route(snapshot.get("title", "")) if route else "coder"
             session_id = session_for(role) if session_for else ""
             if session_id in targeted:
                 decisions.append(

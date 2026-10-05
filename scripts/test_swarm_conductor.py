@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """Tests for the swarm conductor routing and verification gate.
 
-Covers the VED-360 routing rules and the VED-369 independent-verification gate.
+Covers the VED-360/VED-365 routing rules and the VED-369 independent-verification
+gate.
 Run with `python3 scripts/test_swarm_conductor.py`. Kept dependency-free (stdlib
-only) and importable without starting the conductor loop.
+only) and importable without starting the conductor loop. The `tick()` tests
+stub `open_issues`/`dispatch`/`issue_comments` so no gateway or Linear call is
+made.
 """
 
 from __future__ import annotations
@@ -12,6 +15,7 @@ import importlib.util
 import os
 import tempfile
 import unittest
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -26,6 +30,19 @@ def load_conductor():
 
 
 conductor = load_conductor()
+
+
+def conductor_shared_orchestrator():
+    """A fresh in-memory orchestrator for the ticket/dispatch tests."""
+    spec = importlib.util.spec_from_file_location(
+        "swarm_orchestrator", os.path.join(HERE, "swarm_orchestrator.py")
+    )
+    module = importlib.util.module_from_spec(spec)
+    import sys
+
+    sys.modules["swarm_orchestrator"] = module
+    spec.loader.exec_module(module)
+    return module.Orchestrator(module.OrchestratorConfig())
 
 
 class RoutingTests(unittest.TestCase):
@@ -53,8 +70,27 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(role, "coder")
         self.assertNotIn(role, conductor.READ_ONLY_ROLES)
 
+    def test_swarm_audit_titles_are_write_work(self):
+        # Regression for VED-365: the VED project titles write issues
+        # "Swarm audit: <fix list>"; they must reach a write-capable unit.
+        for title in (
+            "Swarm audit: RPC tool-result shape + stale session name on switch",
+            "Swarm audit: plugin randomBytes DoS",
+        ):
+            role = conductor.role_for(title)
+            self.assertEqual(role, "coder", f"{title!r} -> {role!r}")
+            self.assertIn(role, conductor.EDITING_ROLES)
+
+    def test_explicitly_read_only_audit_routes_to_reviewer(self):
+        for title in (
+            "Swarm audit: read-only review of the RPC shape",
+            "Swarm audit: report only on the plugin host",
+            "Swarm audit findings-only: memory leaks",
+        ):
+            self.assertEqual(conductor.role_for(title), "reviewer")
+
     def test_review_titles_route_to_reviewer(self):
-        for title in ("Swarm audit: rpc shape", "Review last commits", "verify the gate"):
+        for title in ("Review last commits", "verify the gate"):
             self.assertEqual(conductor.role_for(title), "reviewer")
 
     def test_status_titles_route_to_the_synthesizer(self):
@@ -74,6 +110,13 @@ class PromptTests(unittest.TestCase):
             self.assertIn("do NOT edit files, commit", prompt)
             self.assertNotIn("implement the fix", prompt)
             self.assertNotIn("Commit only the files", prompt)
+
+    def test_read_only_prompt_asks_for_a_machine_readable_verdict(self):
+        # VED-365: the reviewer promises a re-route; that promise must be a
+        # marker the conductor can parse, not prose it cannot read.
+        prompt = conductor.prompt_for("VED-1", "audit it", "reviewer")
+        self.assertIn("@conductor route-to: coder", prompt)
+        self.assertIsNotNone(conductor.ROUTE_VERDICT_RE.search(prompt))
 
     def test_prompt_signer_matches_the_role(self):
         self.assertIn("[coder]", conductor.prompt_for("VED-1", "x", "coder"))
@@ -297,22 +340,100 @@ class FreshContextTests(unittest.TestCase):
         self.assertEqual(seen["method"], "POST")
 
 
-class RetryTests(unittest.TestCase):
+class VerdictTests(unittest.TestCase):
+    def test_route_target_reads_the_last_verdict(self):
+        comments = [
+            "Reviewer verification (read-only).",
+            "Needs a code change.\n@conductor route-to: coder\nSign - [reviewer]",
+        ]
+        self.assertEqual(conductor.route_target(comments), "coder")
+
+    def test_route_target_ignores_read_only_targets(self):
+        self.assertIsNone(conductor.route_target(["@conductor route-to: reviewer"]))
+        self.assertIsNone(conductor.route_target(["@conductor route-to: planner"]))
+
+    def test_route_target_none_without_a_verdict(self):
+        self.assertIsNone(conductor.route_target(["just findings", ""]))
+
+
+class TicketTests(unittest.TestCase):
+    def setUp(self):
+        self.sent = []
+        self.comments = []
+        patches = [
+            mock.patch.object(
+                conductor,
+                "dispatch",
+                lambda session_id, text: self.sent.append((session_id, text)),
+            ),
+            mock.patch.object(conductor, "issue_comments", lambda identifier: self.comments),
+            mock.patch("builtins.print"),
+        ]
+        for patcher in patches:
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def _tick(self, orchestrator, now, title="Review the rpc shape"):
+        """Drive one orchestrator pass using the conductor's routing."""
+        board = {"VED-1": {"state": "Todo", "stateType": "unstarted", "title": title}}
+        decisions = orchestrator.tick(
+            board,
+            now=now,
+            is_busy=lambda _sid: False,
+            route=conductor.role_for,
+            session_for=lambda role: conductor.ROLE_UNITS[role],
+            read_only_roles=conductor.READ_ONLY_ROLES,
+            reroute=conductor.pending_route,
+        )
+        for decision in decisions:
+            if decision.action == "dispatch":
+                conductor.dispatch(
+                    decision.session_id,
+                    conductor.prompt_for(decision.issue, title, decision.role),
+                )
+        return decisions
+
     def test_terminal_statuses_are_recognized(self):
         for status in ("done", "declined", "blocked", "dispatched_readonly"):
             self.assertIn(status, conductor.TERMINAL_STATUSES)
 
     def test_read_only_dispatch_is_terminal_after_one_attempt(self):
-        # Simulate the conductor's claim decision for a review-routed issue.
-        record = {"attempts": 0}
-        role = conductor.role_for("Swarm audit: rpc shape")
-        self.assertIn(role, conductor.READ_ONLY_ROLES)
-        # The dispatch bookkeeping the conductor applies for read-only roles.
-        record["attempts"] += 1
-        record["status"] = "dispatched_readonly"
-        record["terminal"] = True
-        self.assertTrue(record["terminal"])
-        self.assertIn(record["status"], conductor.TERMINAL_STATUSES)
+        # A review-routed issue is audited once, then not retried.
+        orchestrator = conductor_shared_orchestrator()
+        self._tick(orchestrator, 0.0)
+        claim = orchestrator.claims["VED-1"]
+        self.assertEqual(claim.role, "reviewer")
+        self.assertTrue(claim.read_only)
+        self.assertTrue(claim.terminal)
+        self.sent.clear()
+        self._tick(orchestrator, 1.0)
+        self.assertEqual(self.sent, [])
+
+    def test_verdict_reroutes_a_read_only_claim_to_a_write_unit(self):
+        # VED-365: once the reviewer says "route to coder", the terminal
+        # read-only claim is re-dispatched to a write-capable unit.
+        orchestrator = conductor_shared_orchestrator()
+        self._tick(orchestrator, 0.0)
+        self.sent.clear()
+        self.comments = ["needs a fix\n@conductor route-to: coder\n- [reviewer]"]
+        self._tick(orchestrator, 1.0)
+        self.assertEqual(len(self.sent), 1)
+        session_id, text = self.sent[0]
+        self.assertEqual(session_id, conductor.ROLE_UNITS["coder"])
+        self.assertIn("implement the fix", text)
+        claim = orchestrator.claims["VED-1"]
+        self.assertEqual(claim.role, "coder")
+        self.assertEqual(claim.status, "dispatched")
+        self.assertTrue(claim.rerouted)
+
+    def test_reroute_happens_only_once(self):
+        orchestrator = conductor_shared_orchestrator()
+        self._tick(orchestrator, 0.0)
+        self.comments = ["@conductor route-to: coder"]
+        self._tick(orchestrator, 1.0)
+        self.sent.clear()
+        self._tick(orchestrator, 2.0)
+        self.assertEqual(self.sent, [])
 
 
 
