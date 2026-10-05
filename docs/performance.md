@@ -102,23 +102,23 @@ through the `read` tool (peak = `VmHWM`, "after" = RSS 3 s later; idle baseline
 
 ### Real-world inputs
 
-The synthetic 7000px fixtures bracket the worst case. What agents actually get
-are screenshots and phone photos. Release build, through the `read` tool:
+An agent reads what an image *says*, not its full fidelity, so every image is
+downscaled to a small, consistent target: **1024 px on the long edge, 1 MiB
+encoded** (`PIPELETS_IMAGE_MAX_DIM` / `PIPELETS_IMAGE_MAX_BYTES`). Release build,
+through the `read` tool:
 
-| input | pipelets peak | pipelets time | pi peak | pi time |
-| --- | --- | --- | --- | --- |
-| 1920x1080 screenshot PNG (1.5 MB) | **7 MB** | **0.9 ms** | 124 MB | 76 ms |
-| 2560x1440 screenshot PNG (2.6 MB) | 33 MB | 66 ms | 205 MB | 750 ms |
-| 3840x2160 screenshot PNG (5.9 MB) | 53 MB | 84 ms | 284 MB | 952 ms |
-| 3024x4032 phone photo JPEG (3.8 MB) | 46 MB | 115 ms | 361 MB | 1371 ms |
-| 6000x4000 photo JPEG (7.4 MB) | 47 MB | 127 ms | 523 MB | 1735 ms |
+| input | output | payload | pipelets peak | pipelets time | pi peak / time |
+| --- | --- | --- | --- | --- | --- |
+| 1920x1080 screenshot PNG (1.5 MB) | 1024x576 JPEG | 90 KB | **17 MB** | 31 ms | 124 MB / 76 ms |
+| 2560x1440 screenshot PNG (2.6 MB) | 1024x576 JPEG | 81 KB | **17 MB** | 30 ms | 205 MB / 750 ms |
+| 3840x2160 screenshot PNG (5.9 MB) | 1024x576 PNG | 1.0 MB | **17 MB** | 40 ms | 284 MB / 952 ms |
+| 3024x4032 phone photo JPEG (3.8 MB) | 768x1024 JPEG | 273 KB | **19 MB** | 51 ms | 361 MB / 1371 ms |
+| 6000x4000 photo JPEG (7.4 MB) | 1024x683 JPEG | 261 KB | **19 MB** | 77 ms | 523 MB / 1735 ms |
 
-The common case — a screenshot at or under 2000px — is a **passthrough**: we read
-the header, see it is within limits, and return the original bytes without
-decoding (7 MB, under 1 ms). pi decodes it to check, peaking at 124 MB. Larger
-screenshots and photos cost a 33-53 MB transient that returns to ~5 MB, and the
-retained payload matches pi to a few KB (2.0 MB / 447 / 369 / 1.25 MB / 1.07 MB),
-so the request is the same size even though the bytes differ.
+Peak is now ~17-19 MB regardless of input, and the payload is <=1 MiB. pi keeps
+the full 2000x2000 (1-2 MB payloads) and peaks at 124-523 MB. This is a
+deliberate divergence from pi on the request bytes — the image target is a
+policy choice, not a parity requirement, because the agent needs the content.
 
 ### Synthetic worst case (7000x7000)
 
@@ -190,12 +190,11 @@ image` keeps results, and reports the retained bytes:
 
 | images retained | retained | peak RSS |
 | --- | --- | --- |
-| 10 | 13.4 MB | 64 MB |
-| 20 | 26.7 MB (~1.3 MB each) | 76 MB |
+| 10 | 2.7 MB | 31 MB |
+| 20 | 5.4 MB (~261 KB each) | 31 MB |
 
-A real screenshot can encode to ~2.4 MB, so ten of them hold ~24 MB until
-compaction. CI gates both the transient (`--max-mb 80`) and the retained run
-(`--max-mb 120`).
+With the 1024 / 1 MiB target, twenty images hold ~5 MB, not ~27 MB. CI gates
+both the transient (`--max-mb 60`) and the retained run (`--max-mb 60`).
 
 ### Concurrency
 

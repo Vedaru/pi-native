@@ -17,7 +17,14 @@ use std::io::Cursor;
 pub mod decode;
 
 /// Default max encoded (base64) size: 4.5 MB, below Anthropic's 5 MB limit.
-pub const DEFAULT_MAX_BYTES: usize = (4.5 * 1024.0 * 1024.0) as usize;
+/// Default max encoded (base64) size. An agent reads what an image *says*, not
+/// its full fidelity, so this is deliberately small and consistent (1 MiB).
+pub const DEFAULT_MAX_BYTES: usize = 1024 * 1024;
+/// Default longest-edge target: small enough to grasp a screenshot or photo,
+/// large enough that UI text stays legible.
+pub const DEFAULT_MAX_DIMENSION: u32 = 1024;
+/// Default JPEG quality for the resize retries.
+pub const DEFAULT_JPEG_QUALITY: u8 = 75;
 
 /// Caps how many image decodes may run at once in one process.
 ///
@@ -103,12 +110,26 @@ pub struct ImageLimits {
 }
 
 impl Default for ImageLimits {
+    /// Small, consistent target: `PIPELETS_IMAGE_MAX_DIM` (default 1024) on the
+    /// long edge and `PIPELETS_IMAGE_MAX_BYTES` (default 1 MiB) encoded. The
+    /// agent needs to know what the image says or shows, not to preserve it, so
+    /// this deliberately downsizes below pi's 2000x2000 default.
     fn default() -> Self {
+        let max_dim = std::env::var("PIPELETS_IMAGE_MAX_DIM")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .filter(|&value| value > 0)
+            .unwrap_or(DEFAULT_MAX_DIMENSION);
+        let max_bytes = std::env::var("PIPELETS_IMAGE_MAX_BYTES")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .filter(|&value| value > 0)
+            .unwrap_or(DEFAULT_MAX_BYTES);
         Self {
-            max_width: 2000,
-            max_height: 2000,
-            max_bytes: DEFAULT_MAX_BYTES,
-            jpeg_quality: 80,
+            max_width: max_dim,
+            max_height: max_dim,
+            max_bytes,
+            jpeg_quality: DEFAULT_JPEG_QUALITY,
         }
     }
 }
