@@ -694,8 +694,14 @@ fn resolve_agent(
     let (extension_tools, commands) = load_extension_tools(extensions, extension_allow, cwd);
     tools.extend(extension_tools);
     // Tools are jailed to the working directory unless the caller explicitly
-    // opted into unrestricted execution with `--yolo`.
-    let tool_context = ToolContext::new(cwd).allow_outside(yolo);
+    // opted into unrestricted execution with `--yolo`. The system temp dir is an
+    // extra read+write root so a unit can stage and read back scratch files
+    // (Linear comment bodies, drafts) without escaping the code jail.
+    let scratch = std::env::temp_dir();
+    let tool_context = ToolContext::new(cwd)
+        .allow_outside(yolo)
+        .with_read_roots([scratch.clone()])
+        .with_write_roots([scratch]);
     let mut agent =
         Agent::new(make_provider(config), tools, system, tool_context).with_commands(commands);
     if context_window > 0 {

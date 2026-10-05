@@ -115,6 +115,12 @@ impl ToolContext {
         }
     }
 
+    /// Additional directories tools may read from.
+    pub fn with_read_roots(mut self, roots: impl IntoIterator<Item = PathBuf>) -> Self {
+        self.read_roots.extend(roots);
+        self
+    }
+
     /// Additional directories tools may write to.
     pub fn with_write_roots(mut self, roots: impl IntoIterator<Item = PathBuf>) -> Self {
         self.write_roots.extend(roots);
