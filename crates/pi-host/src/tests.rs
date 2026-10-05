@@ -136,6 +136,31 @@ fn suspend_releases_the_agent_and_wake_resumes() {
 }
 
 #[test]
+fn remove_forgets_the_unit_and_reports_unknown() {
+    let dir = temp_dir("remove");
+    let mut host = one_turn_host(&dir, "hello");
+    let id = host.open(dir.join("s.jsonl")).expect("open");
+
+    assert!(host.remove(&id), "removing a known unit returns true");
+    assert!(!host.is_running(&id));
+    assert!(!host.session_ids().contains(&id));
+    assert!(host.swarm().is_empty());
+    // A removed unit is no longer addressable.
+    match host.subscribe(&id) {
+        Err(HostError::UnknownSession(seen)) => assert_eq!(seen, id),
+        Ok(_) => panic!("expected unknown session, got Ok"),
+        Err(other) => panic!("expected unknown session, got {other:?}"),
+    }
+    assert!(!host.remove(&id), "removing twice returns false");
+
+    // The session file survives, so reopening the same path works again.
+    let reopened = host.open(dir.join("s.jsonl")).expect("reopen");
+    assert_eq!(reopened, id);
+    assert!(host.is_running(&reopened));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn unknown_session_is_an_error() {
     let dir = temp_dir("unknown");
     let mut host = one_turn_host(&dir, "hello");

@@ -463,6 +463,24 @@ impl Host {
         }
     }
 
+    /// Forget a unit entirely, releasing its agent and all in-memory state
+    /// (replay buffer, subscriber list, snapshot). Returns whether the session
+    /// was known.
+    ///
+    /// The session file on disk is the durable state and is left untouched, so
+    /// opening the same path again re-creates the unit. Removing is therefore
+    /// how a long-lived host evicts sessions it will not serve again, rather
+    /// than merely suspending them (which keeps the unit addressable).
+    pub fn remove(&mut self, session_id: &str) -> bool {
+        match self.units.remove(session_id) {
+            Some(mut unit) => {
+                unit.suspend();
+                true
+            }
+            None => false,
+        }
+    }
+
     pub fn is_running(&self, session_id: &str) -> bool {
         self.units
             .get(session_id)

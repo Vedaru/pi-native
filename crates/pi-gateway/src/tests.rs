@@ -174,6 +174,30 @@ fn pi_format_emits_pi_event_shapes() {
 }
 
 #[test]
+fn deletes_a_session_and_404s_afterwards() {
+    let dir = temp_dir("delete");
+    let server = start_gateway(&dir, "hello");
+    let id = create_session(&server, &dir);
+
+    let (status, body) = request(server.addr, "DELETE", &format!("/sessions/{id}"), None);
+    assert_eq!(status, 200, "{body}");
+    let data: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(data["removed"], json!(true));
+
+    // Gone from the listing and no longer resolvable.
+    let (status, body) = request(server.addr, "GET", "/sessions", None);
+    assert_eq!(status, 200, "{body}");
+    assert!(!body.contains(&id), "{body}");
+    let (status, body) = request(server.addr, "GET", &format!("/sessions/{id}"), None);
+    assert_eq!(status, 404, "{body}");
+
+    // Deleting an unknown session is a 404, not a 500.
+    let (status, body) = request(server.addr, "DELETE", "/sessions/missing", None);
+    assert_eq!(status, 404, "{body}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn unknown_session_is_404() {
     let dir = temp_dir("unknown");
     let server = start_gateway(&dir, "hello");

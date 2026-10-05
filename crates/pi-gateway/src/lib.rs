@@ -10,6 +10,7 @@
 //! | `GET` | `/swarm` | Status snapshot of every unit |
 //! | `POST` | `/sessions` | Open/create a session (`{"sessionPath"?: "…", "cwd"?: "…"}`) |
 //! | `GET` | `/sessions/:id` | Resolve state (subscribe → `get_state` → `state`) |
+//! | `DELETE` | `/sessions/:id` | Forget a unit (keeps the session file on disk) |
 //! | `GET` | `/sessions/:id/commands` | Extension slash commands |
 //! | `POST` | `/sessions/:id/title` | Generate a session title from the transcript |
 //! | `GET` | `/sessions/:id/events` | SSE: replay + live (`?format=pi` for pi's shapes) |
@@ -268,6 +269,7 @@ fn handle_connection(mut stream: TcpStream, gateway: Arc<Gateway>) -> std::io::R
         }
         ("POST", ["sessions"]) => create_session(&mut stream, &gateway, &request),
         ("GET", ["sessions", id]) => session_state(&mut stream, &gateway, id),
+        ("DELETE", ["sessions", id]) => remove_session(&mut stream, &gateway, id),
         ("GET", ["sessions", id, "commands"]) => session_commands(&mut stream, &gateway, id),
         ("POST", ["sessions", id, "title"]) => session_title(&mut stream, &gateway, id),
         ("GET", ["sessions", id, "events"]) => {
@@ -360,6 +362,20 @@ fn session_state(stream: &mut TcpStream, gateway: &Gateway, id: &str) {
         return;
     }
     write_json(stream, 200, &await_state(&subscription));
+}
+
+/// Forget a unit entirely. The session file on disk is untouched, so the same
+/// path can be reopened later with `POST /sessions`.
+fn remove_session(stream: &mut TcpStream, gateway: &Gateway, id: &str) {
+    if gateway.host().remove(id) {
+        write_json(stream, 200, &json!({ "removed": true }));
+    } else {
+        write_json(
+            stream,
+            404,
+            &json!({ "error": format!("unknown session: {id}") }),
+        );
+    }
 }
 
 /// Wait for the `state` event emitted in response to `get_state`.
