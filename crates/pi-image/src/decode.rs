@@ -5,8 +5,8 @@
 //! then resized it. Here the header is read first, a decode-time reduction is
 //! chosen to cover the target, and only the reduced bitmap is held:
 //!
-//! - **JPEG** uses `jpeg-decoder`'s IDCT scaling (1/8, 1/4, 1/2) so a large
-//!   JPEG is never decoded at full size.
+//! - **JPEG** uses `libjpeg-turbo-rs`'s scaled IDCT (any of the 16 libjpeg-turbo
+//!   factors) so a large JPEG is never decoded at full size.
 //! - **PNG** is decoded scanline by scanline and box-downsampled on the fly, so
 //!   only the reduced bitmap is allocated.
 //! - other formats fall back to `image`'s full decode (small in practice).

@@ -1,7 +1,7 @@
 # Image pipeline (`pi-image`)
 
 Native decode/orient/resize/encode. Images are decoded at a reduction that
-covers the target (JPEG via `jpeg-decoder`'s IDCT scaling, PNG via scanline
+covers the target (JPEG via `libjpeg-turbo-rs` scaled IDCT, PNG via scanline
 streaming), so the full-size bitmap is never materialised; the reduced bitmap is
 then resized with `fast_image_resize` (SIMD, row-streamed). Peak memory is
 independent of the source size. It matches pi's
