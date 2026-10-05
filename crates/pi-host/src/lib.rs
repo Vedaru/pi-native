@@ -506,6 +506,22 @@ impl Write for ChannelWriter {
     }
 }
 
+/// A clone of a unit's command channel, for out-of-band abort signals.
+///
+/// Holding the host lock while a trigger waits for its run would deadlock a run
+/// that calls back into the gateway; this handle aborts without that lock.
+#[derive(Clone)]
+pub struct AbortHandle(mpsc::Sender<Vec<u8>>);
+
+impl AbortHandle {
+    /// Send an `abort` command. Best effort: a dead unit drops the message.
+    pub fn abort(&self) {
+        let mut line = br#"{"type":"abort"}"#.to_vec();
+        line.push(b'\n');
+        let _ = self.0.send(line);
+    }
+}
+
 /// A handle attached to one running unit.
 pub struct Subscription {
     /// Events published before this subscription attached, oldest first.
@@ -959,6 +975,18 @@ impl Host {
 
     pub fn session_ids(&self) -> Vec<String> {
         self.units.keys().cloned().collect()
+    }
+
+    /// A handle that can signal a running unit to abort without the host lock.
+    ///
+    /// The trigger tick waits for a run to finish; holding the host lock across
+    /// that wait blocks every gateway route and can deadlock a run (like the
+    /// conductor's tick) that calls back into the gateway.
+    pub fn abort_handle(&mut self, session_id: &str) -> Option<AbortHandle> {
+        self.units
+            .get(session_id)
+            .and_then(|unit| unit.commands.clone())
+            .map(AbortHandle)
     }
 
     /// The session file behind a live unit, if it is open.

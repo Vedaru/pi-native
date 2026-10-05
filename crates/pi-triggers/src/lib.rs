@@ -17,7 +17,7 @@
 //! the changes), and records a [`Receipt`] on the run so the outcome is
 //! inspectable and attached to the card.
 
-use pi_host::Host;
+use pi_host::{AbortHandle, Host};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -432,6 +432,167 @@ pub enum RollbackPolicy {
 }
 
 /// Fires due triggers against a [`Host`].
+/// A fired trigger whose run is still in flight.
+///
+/// Splitting "send the prompt" from "wait for the run" lets the gateway release
+/// the host and trigger locks while it waits, so a run that calls back into the
+/// gateway (the conductor's tick does `GET /swarm`) does not block behind the
+/// lock that is waiting for it.
+pub struct PendingRun {
+    trigger: Trigger,
+    subscription: Option<pi_host::Subscription>,
+    session_id: String,
+    now: i64,
+    before: WorkspaceSnapshot,
+    workspace: PathBuf,
+    price: Price,
+    rollback: RollbackPolicy,
+    abort: Option<AbortHandle>,
+}
+
+impl PendingRun {
+    fn budget_breach(&self, usage: &UsageTotals) -> Option<String> {
+        let budget = &self.trigger.budget;
+        if budget.max_tokens > 0 && usage.total_tokens() > budget.max_tokens {
+            return Some("token budget exceeded".to_string());
+        }
+        if budget.max_cost_micros > 0 && self.price.cost_micros(usage) > budget.max_cost_micros {
+            return Some("cost budget exceeded".to_string());
+        }
+        None
+    }
+
+    /// Restore or park the working tree after a breach.
+    fn dispose_workspace(&self) -> Disposition {
+        let workspace = &self.workspace;
+        match self.rollback {
+            RollbackPolicy::Keep => Disposition::None,
+            RollbackPolicy::Restore => {
+                if git(workspace, &["checkout", "--", "."]).is_some()
+                    && git(workspace, &["clean", "-fd"]).is_some()
+                {
+                    Disposition::RolledBack
+                } else {
+                    Disposition::None
+                }
+            }
+            RollbackPolicy::Park => {
+                let message = format!("pi-native rollback: {} @ {}", self.trigger.id, self.now);
+                if git(workspace, &["stash", "push", "-u", "-m", &message]).is_some() {
+                    Disposition::Parked
+                } else {
+                    Disposition::None
+                }
+            }
+        }
+    }
+
+    /// Wait for the run to finish and turn it into a receipt.
+    pub fn finish(self) -> Receipt {
+        let started = Instant::now();
+        let wall_limit = if self.trigger.budget.max_seconds > 0 {
+            Duration::from_secs(self.trigger.budget.max_seconds)
+        } else {
+            UNBOUNDED_RUN_TIMEOUT
+        };
+        let mut usage = UsageTotals::default();
+        let mut stop_reason = None;
+        let mut budget_breach = None;
+        let mut aborted = false;
+
+        if let Some(subscription) = &self.subscription {
+            // A reused session replays its previous turns; only events at or
+            // after this sequence id belong to the run we just started.
+            let live_from = subscription.next_seq;
+            loop {
+                let elapsed = started.elapsed();
+                if elapsed >= wall_limit {
+                    budget_breach = Some("wall-clock budget exhausted".to_string());
+                    if let Some(abort) = &self.abort {
+                        abort.abort();
+                    }
+                    aborted = true;
+                    break;
+                }
+                let remaining = wall_limit - elapsed;
+                match subscription.recv_sequenced_timeout(remaining.min(Duration::from_secs(1))) {
+                    Ok((seq, _)) if seq < live_from => continue,
+                    Ok((_, event)) => match event.get("type").and_then(serde_json::Value::as_str) {
+                        Some("usage") => {
+                            usage.add(
+                                int_field(&event, "input"),
+                                int_field(&event, "output"),
+                                int_field(&event, "cache_read"),
+                                int_field(&event, "cache_write"),
+                            );
+                        }
+                        Some("done") => {
+                            stop_reason = event
+                                .get("stop_reason")
+                                .and_then(serde_json::Value::as_str)
+                                .map(str::to_string);
+                            break;
+                        }
+                        _ => {}
+                    },
+                    Err(pi_host::RecvError::Timeout) => continue,
+                    Err(pi_host::RecvError::Disconnected) => {
+                        budget_breach = Some("unit disconnected".to_string());
+                        break;
+                    }
+                }
+                if let Some(breach) = self.budget_breach(&usage) {
+                    budget_breach = Some(breach);
+                    if let Some(abort) = &self.abort {
+                        abort.abort();
+                    }
+                    aborted = true;
+                    break;
+                }
+            }
+        }
+
+        let after = workspace_snapshot(&self.workspace);
+        // Files the run touched are those changed now but not before it started.
+        let mut files_changed = after.changed_files(&self.before);
+        if files_changed.is_empty() {
+            files_changed = after.changed.clone();
+        }
+        let diff = after.diff.clone();
+        let (outcome, disposition) = if budget_breach.is_some() {
+            // A breached run is always contained: even a change to an
+            // already-dirty file must not survive the abort.
+            let disposition = if after.is_git {
+                self.dispose_workspace()
+            } else {
+                Disposition::None
+            };
+            (ReceiptOutcome::BudgetExceeded, disposition)
+        } else if stop_reason.is_none() && !aborted {
+            (ReceiptOutcome::Failed, Disposition::None)
+        } else {
+            (ReceiptOutcome::Completed, Disposition::None)
+        };
+
+        Receipt {
+            trigger_id: self.trigger.id.clone(),
+            session_id: self.session_id.clone(),
+            model: self.trigger.model.clone(),
+            prompt: self.trigger.prompt.clone(),
+            cost_micros: self.price.cost_micros(&usage),
+            usage,
+            exit_code: stop_reason,
+            outcome,
+            breach: budget_breach,
+            disposition,
+            files_changed,
+            diff,
+            started_at: self.now,
+            finished_at: self.now + started.elapsed().as_secs() as i64,
+        }
+    }
+}
+
 pub struct Runner {
     triggers: Vec<Trigger>,
     sessions_root: PathBuf,
@@ -485,13 +646,14 @@ impl Runner {
     /// trigger accumulates context. Each episode is driven to completion so its
     /// usage can be measured against the run budget; records are written before
     /// the return, so a restart will not repeat an episode in the same window.
-    pub fn tick<S: RunStore + ?Sized>(
+    pub fn begin_tick<S: RunStore + ?Sized>(
         &mut self,
         host: &mut Host,
         store: &mut S,
         now: i64,
-    ) -> Vec<Episode> {
+    ) -> (Vec<Episode>, Vec<PendingRun>) {
         let mut episodes = Vec::new();
+        let mut pending = Vec::new();
         // Clone the due trigger ids first so the loop can mutate `self`.
         let due: Vec<usize> = self
             .triggers
@@ -563,18 +725,20 @@ impl Runner {
                                 error: None,
                             };
                             store.record(episode.clone());
-                            // Drive the episode to completion and record its
-                            // receipt (usage/cost/disposition, VED-372).
-                            let receipt = self.run_episode(
-                                &trigger.clone(),
-                                host,
+                            // The wait happens once both locks are released:
+                            // a run that calls back into the gateway must not
+                            // block behind the lock that is waiting for it.
+                            pending.push(PendingRun {
+                                trigger: trigger.clone(),
                                 subscription,
-                                &session_id,
+                                session_id: session_id.clone(),
                                 now,
                                 before,
-                                &workspace,
-                            );
-                            store.record_receipt(receipt);
+                                workspace: workspace.clone(),
+                                price: self.price.clone(),
+                                rollback: self.rollback,
+                                abort: host.abort_handle(&session_id),
+                            });
                             episodes.push(episode);
                             self.last_fired.insert(trigger.id.clone(), now);
                         }
@@ -623,6 +787,21 @@ impl Runner {
                 }
             }
         }
+        (episodes, pending)
+    }
+
+    /// Fire every due trigger and drive each run to completion.
+    pub fn tick<S: RunStore + ?Sized>(
+        &mut self,
+        host: &mut Host,
+        store: &mut S,
+        now: i64,
+    ) -> Vec<Episode> {
+        let (episodes, pending) = self.begin_tick(host, store, now);
+        for run in pending {
+            let receipt = run.finish();
+            store.record_receipt(receipt);
+        }
         episodes
     }
 
@@ -663,159 +842,6 @@ impl Runner {
     /// Drive one episode to completion, accumulate its usage, and dispose of
     /// changes if a budget was crossed.
     #[allow(clippy::too_many_arguments)]
-    fn run_episode(
-        &self,
-        trigger: &Trigger,
-        host: &mut Host,
-        subscription: Option<pi_host::Subscription>,
-        session_id: &str,
-        now: i64,
-        before: WorkspaceSnapshot,
-        workspace: &Path,
-    ) -> Receipt {
-        let started = Instant::now();
-        let wall_limit = if trigger.budget.max_seconds > 0 {
-            Duration::from_secs(trigger.budget.max_seconds)
-        } else {
-            UNBOUNDED_RUN_TIMEOUT
-        };
-        let mut usage = UsageTotals::default();
-        let mut stop_reason = None;
-        let mut budget_breach = None;
-        let mut aborted = false;
-
-        if let Some(subscription) = subscription {
-            // A reused session replays its previous turns; only events at or
-            // after this sequence id belong to the run we just started.
-            let live_from = subscription.next_seq;
-            loop {
-                let elapsed = started.elapsed();
-                if elapsed >= wall_limit {
-                    budget_breach = Some("wall-clock budget exhausted".to_string());
-                    let _ = host.send(session_id, serde_json::json!({ "type": "abort" }));
-                    aborted = true;
-                    break;
-                }
-                let remaining = wall_limit - elapsed;
-                match subscription.recv_sequenced_timeout(remaining.min(Duration::from_secs(1))) {
-                    Ok((seq, _)) if seq < live_from => continue,
-                    Ok((_, event)) => match event.get("type").and_then(serde_json::Value::as_str) {
-                        Some("usage") => {
-                            usage.add(
-                                int_field(&event, "input"),
-                                int_field(&event, "output"),
-                                int_field(&event, "cache_read"),
-                                int_field(&event, "cache_write"),
-                            );
-                        }
-                        Some("done") => {
-                            stop_reason = event
-                                .get("stop_reason")
-                                .and_then(serde_json::Value::as_str)
-                                .map(str::to_string);
-                            break;
-                        }
-                        _ => {}
-                    },
-                    Err(pi_host::RecvError::Timeout) => continue,
-                    Err(pi_host::RecvError::Disconnected) => {
-                        budget_breach = Some("unit disconnected".to_string());
-                        break;
-                    }
-                }
-                if let Some(breach) = self.budget_breach(trigger, &usage, &before) {
-                    budget_breach = Some(breach);
-                    let _ = host.send(session_id, serde_json::json!({ "type": "abort" }));
-                    aborted = true;
-                    break;
-                }
-            }
-        }
-
-        let after = workspace_snapshot(workspace);
-        // Files the run touched are those changed now but not before it started.
-        let mut files_changed = after.changed_files(&before);
-        if files_changed.is_empty() {
-            files_changed = after.changed.clone();
-        }
-        let diff = after.diff.clone();
-        let (outcome, disposition) = if budget_breach.is_some() {
-            // A breached run is always contained: even a change to an
-            // already-dirty file must not survive the abort.
-            let disposition = if after.is_git {
-                self.dispose_workspace(workspace, trigger, now)
-            } else {
-                Disposition::None
-            };
-            (ReceiptOutcome::BudgetExceeded, disposition)
-        } else if stop_reason.is_none() && !aborted {
-            (ReceiptOutcome::Failed, Disposition::None)
-        } else {
-            (ReceiptOutcome::Completed, Disposition::None)
-        };
-
-        Receipt {
-            trigger_id: trigger.id.clone(),
-            session_id: session_id.to_string(),
-            model: trigger.model.clone(),
-            prompt: trigger.prompt.clone(),
-            cost_micros: self.price.cost_micros(&usage),
-            usage,
-            exit_code: stop_reason,
-            outcome,
-            breach: budget_breach,
-            disposition,
-            files_changed,
-            diff,
-            started_at: now,
-            finished_at: now + started.elapsed().as_secs() as i64,
-        }
-    }
-
-    /// The per-run budget crossed by the usage accumulated so far, if any.
-    fn budget_breach(
-        &self,
-        trigger: &Trigger,
-        usage: &UsageTotals,
-        before: &WorkspaceSnapshot,
-    ) -> Option<String> {
-        let budget = &trigger.budget;
-        if budget.max_tokens > 0 && usage.total_tokens() > budget.max_tokens {
-            return Some("token budget exceeded".to_string());
-        }
-        if budget.max_cost_micros > 0 && self.price.cost_micros(usage) > budget.max_cost_micros {
-            return Some("cost budget exceeded".to_string());
-        }
-        // A fresh diff is captured lazily only when a file budget would apply;
-        // there is no file budget yet, so `before` exists for the receipt.
-        let _ = before;
-        None
-    }
-
-    /// Restore or park the working tree after a breach.
-    fn dispose_workspace(&self, workspace: &Path, trigger: &Trigger, now: i64) -> Disposition {
-        match self.rollback {
-            RollbackPolicy::Keep => Disposition::None,
-            RollbackPolicy::Restore => {
-                if git(workspace, &["checkout", "--", "."]).is_some()
-                    && git(workspace, &["clean", "-fd"]).is_some()
-                {
-                    Disposition::RolledBack
-                } else {
-                    Disposition::None
-                }
-            }
-            RollbackPolicy::Park => {
-                let message = format!("pi-native rollback: {} @ {now}", trigger.id);
-                if git(workspace, &["stash", "push", "-u", "-m", &message]).is_some() {
-                    Disposition::Parked
-                } else {
-                    Disposition::None
-                }
-            }
-        }
-    }
-
     /// Add a trigger, replacing any with the same id.
     pub fn upsert(&mut self, trigger: Trigger) {
         let id = trigger.id.clone();

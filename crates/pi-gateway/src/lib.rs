@@ -145,10 +145,22 @@ impl Gateway {
         let Some(triggers) = &self.triggers else {
             return Vec::new();
         };
-        let mut runtime = triggers.lock().unwrap_or_else(|error| error.into_inner());
-        let mut host = self.host.lock().unwrap_or_else(|error| error.into_inner());
-        let TriggerRuntime { runner, store } = &mut *runtime;
-        runner.tick(&mut host, store.as_mut(), now)
+        // Fire the due triggers under both locks, then release them before
+        // waiting on the runs. A run that calls back into the gateway (the
+        // conductor's tick does `GET /swarm`) must not block behind the lock
+        // that is waiting for it (VED-389).
+        let (episodes, pending) = {
+            let mut runtime = triggers.lock().unwrap_or_else(|error| error.into_inner());
+            let mut host = self.host.lock().unwrap_or_else(|error| error.into_inner());
+            let TriggerRuntime { runner, store } = &mut *runtime;
+            runner.begin_tick(&mut host, store.as_mut(), now)
+        };
+        for run in pending {
+            let receipt = run.finish();
+            let mut runtime = triggers.lock().unwrap_or_else(|error| error.into_inner());
+            runtime.store.record_receipt(receipt);
+        }
+        episodes
     }
 
     /// Receipts recorded for finished runs, newest last. Empty when no trigger
