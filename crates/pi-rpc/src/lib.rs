@@ -689,6 +689,7 @@ impl SessionState {
         agent.replace_messages(transcript);
         self.journal = Some(journal);
         self.path = Some(path);
+        self.name = None;
         Ok(())
     }
 

@@ -224,7 +224,7 @@ impl PiEventAdapter {
                 "toolCallId": tool_call_id,
                 "toolName": name,
                 "isError": is_error,
-                "result": { "content": content },
+                "result": { "content": [{ "type": "text", "text": content }] },
             })),
             Event::TurnEnd => {
                 if self.streaming {
