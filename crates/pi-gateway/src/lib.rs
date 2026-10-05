@@ -11,6 +11,7 @@
 //! | `POST` | `/sessions` | Open/create a session (`{"sessionPath"?: "…", "cwd"?: "…"}`) |
 //! | `GET` | `/sessions/:id` | Resolve state (subscribe → `get_state` → `state`) |
 //! | `GET` | `/sessions/:id/commands` | Extension slash commands |
+//! | `POST` | `/sessions/:id/title` | Generate a session title from the transcript |
 //! | `GET` | `/sessions/:id/events` | SSE: replay + live (`?format=pi` for pi's shapes) |
 //! | `POST` | `/sessions/:id/commands` | Send a command (202 Accepted) |
 //! | `POST` | `/sessions/:id/ui_response` | Answer a `ui_request` |
@@ -238,6 +239,7 @@ fn handle_connection(mut stream: TcpStream, gateway: Arc<Gateway>) -> std::io::R
         ("POST", ["sessions"]) => create_session(&mut stream, &gateway, &request),
         ("GET", ["sessions", id]) => session_state(&mut stream, &gateway, id),
         ("GET", ["sessions", id, "commands"]) => session_commands(&mut stream, &gateway, id),
+        ("POST", ["sessions", id, "title"]) => session_title(&mut stream, &gateway, id),
         ("GET", ["sessions", id, "events"]) => {
             stream_events(stream, &gateway, id, request.query.contains("format=pi"))?;
         }
@@ -338,6 +340,34 @@ fn session_commands(stream: &mut TcpStream, gateway: &Gateway, id: &str) {
     let data = await_response(&subscription, "get_commands", |event| {
         event.get("type").and_then(Value::as_str) == Some("response")
             && event.get("command").and_then(Value::as_str) == Some("get_commands")
+    });
+    write_json(stream, 200, &data);
+}
+
+/// Generate a session title using the unit's own provider.
+fn session_title(stream: &mut TcpStream, gateway: &Gateway, id: &str) {
+    let subscription = match gateway.host().subscribe(id) {
+        Ok(subscription) => subscription,
+        Err(error) => {
+            write_json(
+                stream,
+                status_for(&error),
+                &json!({ "error": error.to_string() }),
+            );
+            return;
+        }
+    };
+    if let Err(error) = gateway.host().send(id, json!({ "type": "generate_title" })) {
+        write_json(
+            stream,
+            status_for(&error),
+            &json!({ "error": error.to_string() }),
+        );
+        return;
+    }
+    let data = await_response(&subscription, "generate_title", |event| {
+        event.get("type").and_then(Value::as_str) == Some("response")
+            && event.get("command").and_then(Value::as_str) == Some("generate_title")
     });
     write_json(stream, 200, &data);
 }

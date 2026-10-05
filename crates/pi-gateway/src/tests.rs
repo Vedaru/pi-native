@@ -266,3 +266,16 @@ fn swarm_lists_units_with_status() {
     assert!(units[0]["lastEventAt"].as_i64().unwrap_or(0) > 0);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn generates_a_session_title() {
+    let dir = temp_dir("title");
+    let server = start_gateway(&dir, "My Session Title");
+    let id = create_session(&server, &dir);
+
+    let (status, body) = request(server.addr, "POST", &format!("/sessions/{id}/title"), None);
+    assert_eq!(status, 200, "{body}");
+    let data: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(data["title"], json!("My Session Title"));
+    let _ = std::fs::remove_dir_all(&dir);
+}

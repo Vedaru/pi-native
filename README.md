@@ -144,6 +144,7 @@ pi-native --gateway --gateway-addr 127.0.0.1:30142 \
 | `POST` | `/sessions` | Open/create a session (`{"sessionPath"?: …, "cwd"?: …}`) |
 | `GET` | `/sessions/:id` | Resolved state |
 | `GET` | `/sessions/:id/commands` | Extension slash commands |
+| `POST` | `/sessions/:id/title` | Generate a session title from the transcript |
 | `GET` | `/sessions/:id/events` | SSE stream (replay + live) |
 | `POST` | `/sessions/:id/commands` | Send a command (`prompt`, `steer`, `abort`, …) |
 | `POST` | `/sessions/:id/ui_response` | Answer a `ui_request` |

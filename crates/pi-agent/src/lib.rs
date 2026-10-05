@@ -641,6 +641,97 @@ impl Agent {
         }
         tool.run(&call.arguments, &self.tool_context)
     }
+
+    /// Generate a short session title from the transcript using this agent's
+    /// provider (a one-off completion with no tools; nothing is added to the
+    /// transcript). Hosts use it to name sessions.
+    pub fn generate_title(&self) -> Result<String, AgentError> {
+        let user = format!("{}\n\n{TITLE_PROMPT}", self.title_transcript());
+        let request = CompletionRequest {
+            system: TITLE_SYSTEM_PROMPT,
+            messages: &[TranscriptMessage::UserText(user)],
+            tools: &[],
+        };
+        let turn = self.provider.complete(&request)?;
+        Ok(clean_title(&turn.text))
+    }
+
+    /// A bounded transcript of user/assistant text (tool traffic dropped).
+    fn title_transcript(&self) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        for message in &self.messages {
+            match message {
+                TranscriptMessage::UserText(text) => {
+                    parts.push(format!("User: {}", clip_text(text, 800)))
+                }
+                TranscriptMessage::UserParts(items) => {
+                    let text = text_parts(items);
+                    if !text.is_empty() {
+                        parts.push(format!("User: {}", clip_text(&text, 800)));
+                    }
+                }
+                TranscriptMessage::Assistant(blocks) => {
+                    let text: String = blocks
+                        .iter()
+                        .filter_map(|block| match block {
+                            AssistantBlock::Text { text } => Some(text.as_str()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    if !text.is_empty() {
+                        parts.push(format!("Assistant: {}", clip_text(&text, 400)));
+                    }
+                }
+                TranscriptMessage::ToolResult { .. } => {}
+            }
+        }
+        clip_text(&parts.join("\n"), 6000)
+    }
+}
+
+/// pi-web's session-title prompts.
+const TITLE_SYSTEM_PROMPT: &str =
+    "You name chat sessions from a transcript. Reply with the title only.";
+const TITLE_PROMPT: &str = "Create a concise title for this session based on the conversation above.\n\nRequirements:\n- Match the primary language used by the user.\n- Describe the user's concrete goal or the outcome, not the act of chatting.\n- Use 4-12 words for space-separated languages, or 8-24 characters for CJK text when practical.\n- Do not call any tools.\n- Return only the title as plain text, with no quotes, label, markdown, or explanation.";
+
+fn text_parts(items: &[ContentPart]) -> String {
+    items
+        .iter()
+        .filter_map(|part| match part {
+            ContentPart::Text { text } => Some(text.as_str()),
+            ContentPart::Image { .. } => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn clip_text(text: &str, max: usize) -> String {
+    let mut chars = text.chars();
+    let clipped: String = chars.by_ref().take(max).collect();
+    if chars.next().is_some() {
+        format!("{clipped}…")
+    } else {
+        clipped
+    }
+}
+
+fn clean_title(raw: &str) -> String {
+    let first = raw
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("");
+    let trimmed = first
+        .trim_matches(|ch| ch == '"' || ch == '\'' || ch == '`')
+        .trim();
+    let mut chars = trimmed.chars();
+    let clipped: String = chars.by_ref().take(80).collect();
+    if chars.next().is_some() {
+        format!("{}…", clipped.trim_end())
+    } else {
+        clipped
+    }
 }
 
 #[cfg(test)]

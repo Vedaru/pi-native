@@ -64,6 +64,8 @@ pub enum Request {
     SetSessionName {
         name: String,
     },
+    /// Generate a short session title from the transcript.
+    GenerateTitle,
     /// Queue a steering message (delivered with the next prompt).
     Steer {
         #[serde(alias = "message")]
@@ -277,6 +279,14 @@ fn apply_command(
                 serde_json::json!({ "name": name }),
             ))
         }
+        Request::GenerateTitle => match agent.generate_title() {
+            Ok(title) => Some(response(
+                id,
+                "generate_title",
+                serde_json::json!({ "title": title }),
+            )),
+            Err(error) => Some(failure(id, "generate_title", &error.to_string())),
+        },
         Request::NewSession { parent_session } => {
             match session.start_new(cwd, agent, parent_session) {
                 Ok(()) => Some(response(
@@ -659,6 +669,9 @@ impl SessionState {
     }
 
     fn set_name(&mut self, name: String) {
+        if let Some(journal) = &mut self.journal {
+            let _ = journal.set_name(&name);
+        }
         self.name = Some(name);
     }
 

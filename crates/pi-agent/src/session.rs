@@ -296,6 +296,26 @@ pub fn append_messages(session: &mut SessionFile, messages: &[TranscriptMessage]
     appended
 }
 
+/// Append a `session_info` entry recording the display name (pi's shape).
+fn append_session_info(session: &mut SessionFile, name: &str) -> String {
+    let id = new_id();
+    let timestamp = now_iso();
+    let mut data = serde_json::Map::new();
+    data.insert(
+        "name".to_string(),
+        json!(name.replace(['\r', '\n'], " ").trim()),
+    );
+    let parent_id = session.entries.last().map(|entry| entry.id.clone());
+    session.entries.push(SessionEntry {
+        kind: "session_info".to_string(),
+        id: id.clone(),
+        parent_id,
+        timestamp,
+        data,
+    });
+    id
+}
+
 /// A minimal header for a new native session. Matches pi's header shape
 /// (`type: "session"`, version 3) so pi's own tooling (including the web UI's
 /// session scanner) recognizes the file.
@@ -327,6 +347,20 @@ pub struct SessionJournal {
 }
 
 impl SessionJournal {
+    /// Append and persist a `session_info` entry with the display name.
+    pub fn set_name(&mut self, name: &str) -> std::io::Result<()> {
+        let before = self.session.entries.len();
+        append_session_info(&mut self.session, name);
+        let entry = &self.session.entries[before];
+        let line = serde_json::to_string(entry).map_err(io_err)?;
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(&self.path)?;
+        writeln!(file, "{line}")?;
+        Ok(())
+    }
+
     /// The session id from the file header.
     pub fn session_id(&self) -> &str {
         &self.session.header.id
