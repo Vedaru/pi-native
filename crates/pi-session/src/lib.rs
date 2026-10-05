@@ -225,6 +225,15 @@ impl SessionFile {
     pub fn message_entries(&self) -> impl Iterator<Item = &SessionEntry> {
         self.entries.iter().filter(|entry| entry.kind == "message")
     }
+
+    /// The latest display name from `session_info` entries, if any.
+    pub fn name(&self) -> Option<&str> {
+        self.entries
+            .iter()
+            .rev()
+            .filter(|entry| entry.kind == "session_info")
+            .find_map(|entry| entry.get("name").and_then(Value::as_str))
+    }
 }
 
 #[cfg(test)]

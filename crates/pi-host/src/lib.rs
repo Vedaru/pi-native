@@ -306,6 +306,7 @@ impl Unit {
 #[serde(rename_all = "camelCase")]
 pub struct UnitInfo {
     pub session_id: String,
+    pub name: Option<String>,
     pub cwd: String,
     pub session_path: String,
     pub running: bool,
@@ -401,6 +402,9 @@ impl Host {
             .iter()
             .map(|(session_id, unit)| UnitInfo {
                 session_id: session_id.clone(),
+                name: pi_session::SessionFile::read(&unit.session_path)
+                    .ok()
+                    .and_then(|session| session.name().map(str::to_string)),
                 cwd: unit.cwd.clone(),
                 session_path: unit.session_path.to_string_lossy().into_owned(),
                 running: unit.is_running(),

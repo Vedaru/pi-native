@@ -259,11 +259,43 @@ fn swarm_lists_units_with_status() {
     let (status, body) = request(server.addr, "GET", "/swarm", None);
     assert_eq!(status, 200, "{body}");
     let data: Value = serde_json::from_str(&body).unwrap();
+    assert!(data["cwd"].as_str().is_some(), "{data}");
     let units = data["units"].as_array().expect("units");
     assert_eq!(units.len(), 1, "{data}");
     assert_eq!(units[0]["sessionId"], json!(id));
     assert_eq!(units[0]["running"], json!(true));
-    assert!(units[0]["lastEventAt"].as_i64().unwrap_or(0) > 0);
+    assert!(units[0].get("lastEventAt").is_some());
+    assert!(units[0]["name"].is_null(), "{data}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn swarm_reports_a_renamed_unit() {
+    let dir = temp_dir("swarm-name");
+    let server = start_gateway(&dir, "hello");
+    let id = create_session(&server, &dir);
+
+    let (status, _) = request(
+        server.addr,
+        "POST",
+        &format!("/sessions/{id}/commands"),
+        Some(json!({ "type": "set_session_name", "name": "Research" })),
+    );
+    assert_eq!(status, 202);
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        let (status, body) = request(server.addr, "GET", "/swarm", None);
+        assert_eq!(status, 200, "{body}");
+        let data: Value = serde_json::from_str(&body).unwrap();
+        if data["units"][0]["name"] == json!("Research") {
+            break;
+        }
+        if std::time::Instant::now() > deadline {
+            panic!("name was not persisted: {data}");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }
 

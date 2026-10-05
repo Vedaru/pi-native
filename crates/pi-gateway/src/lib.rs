@@ -233,8 +233,11 @@ fn handle_connection(mut stream: TcpStream, gateway: Arc<Gateway>) -> std::io::R
             write_json(&mut stream, 200, &json!({ "sessions": ids }));
         }
         ("GET", ["swarm"]) => {
-            let units = gateway.host().swarm();
-            write_json(&mut stream, 200, &json!({ "units": units }));
+            let host = gateway.host();
+            let units = host.swarm();
+            let cwd = host.cwd().to_string();
+            drop(host);
+            write_json(&mut stream, 200, &json!({ "units": units, "cwd": cwd }));
         }
         ("POST", ["sessions"]) => create_session(&mut stream, &gateway, &request),
         ("GET", ["sessions", id]) => session_state(&mut stream, &gateway, id),
