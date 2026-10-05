@@ -226,32 +226,6 @@ class Orchestrator:
             claim.next_retry_at = 0.0
         return Decision(action="stop", issue=issue, session_id=session_id, reason=reason)
 
-    def apply_merge_outcomes(
-        self, merged: set[str], failed: set[str]
-    ) -> int:
-        """Fold the merge queue's outcome into the claim table (VED-377).
-
-        A merged issue is terminal and is never re-dispatched; a failed or
-        conflicted one re-opens (keeping its attempt count) so the conductor can
-        send a fix. Returns the number of claims changed.
-        """
-        changed = 0
-        for issue in merged:
-            claim = self.claim_for(issue)
-            if not claim.terminal:
-                claim.terminal = True
-                claim.status = STATUS_TERMINAL
-                self.running.pop(claim.session_id, None)
-                changed += 1
-        for issue in failed:
-            claim = self.claims.get(issue)
-            if claim is not None and claim.terminal:
-                claim.terminal = False
-                claim.status = STATUS_PENDING
-                claim.next_retry_at = 0.0
-                changed += 1
-        return changed
-
     def record_failure(self, issue: str, now: float, reason: str) -> Decision:
         """A dispatched run failed transiently; schedule a backoff retry."""
         claim = self.claim_for(issue)

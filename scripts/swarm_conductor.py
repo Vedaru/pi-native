@@ -984,9 +984,6 @@ def main() -> None:
                 cleaned_up = True
             units = orchestrator_module.fetch_units()
             now = time.time()
-            # Fold the merge queue's outcome into the claim table (VED-377): a
-            # merged issue is terminal and never re-dispatched; a failed or
-            # conflicted one re-opens (keeping its attempt count) for a fix.
             # Cards that left the board release their intent so a finished card
             # never blocks new work (VED-375 AC8/AC11).
             terminal = terminal_issues_from_board()

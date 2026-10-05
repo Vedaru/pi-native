@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Receipt producer for the swarm merge queue (VED-377).
+"""Gate receipt producer for swarm code cards (VED-377).
 
 Today the "gate" is three shell commands embedded in the conductor's dispatch
-prompt: nothing writes a machine-readable result, so a merge queue cannot know
-whether a branch actually passed. This module runs the gate and writes a
-**receipt** bound to the exact ``git rev-parse HEAD`` it ran against:
+prompt: nothing writes a machine-readable result, so there is no record that a
+card's HEAD actually passed. This module runs the gate and writes a **receipt**
+bound to the exact ``git rev-parse HEAD`` it ran against:
 
     {
       "sha": "<head at gate time>",
@@ -15,7 +15,8 @@ whether a branch actually passed. This module runs the gate and writes a
     }
 
 `gate` is green only when all three pass. A receipt is only valid for the commit
-it records, so a branch that moves after gating must be re-gated (VED-377 AC1).
+it records, so a working tree that moves after gating must be re-gated
+(VED-377 AC1).
 
 Usage:
 
