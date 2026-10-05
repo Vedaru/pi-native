@@ -1,14 +1,14 @@
 [package]
-name = "pi-rpc"
+name = "pi-triggers"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "JSON-lines RPC protocol and generic UI events"
+description = "Trigger engine: schedules, episodes, budgets, and durable run records"
 
 [dependencies]
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+pi-host = { path = "../pi-host" }
 pi-agent = { path = "../pi-agent" }
-pi-session = { path = "../pi-session" }
-pi-tools = { path = "../pi-tools" }
+time = { version = "0.3", features = ["formatting", "macros"] }

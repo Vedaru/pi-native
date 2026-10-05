@@ -7,7 +7,8 @@
 
 use crate::{AgentError, AssistantTurn, CompletionRequest, ModelProvider, ToolCall};
 use pi_net::{
-    stream_sse, OpenAiCompletionsProtocol, OpenAiResponsesProtocol, SseProtocol, StreamResult,
+    stream_sse, stream_sse_with, OpenAiCompletionsProtocol, OpenAiResponsesProtocol, SseProtocol,
+    StreamDelta, StreamResult,
 };
 use pi_providers::{
     build_openai_completions_params, build_openai_responses_params, CacheRetention, ContentBlock,
@@ -71,6 +72,17 @@ impl<P: SseProtocol + 'static> ModelProvider for HttpProvider<P> {
     fn complete(&self, request: &CompletionRequest) -> Result<AssistantTurn, AgentError> {
         let params = (self.build)(request);
         let result = stream_sse::<P>(&self.base_url, &self.api_key, &params)
+            .map_err(|error| AgentError::Provider(error.to_string()))?;
+        Ok(turn_from_stream(result))
+    }
+
+    fn stream(
+        &self,
+        request: &CompletionRequest,
+        on_delta: &mut dyn FnMut(StreamDelta),
+    ) -> Result<AssistantTurn, AgentError> {
+        let params = (self.build)(request);
+        let result = stream_sse_with::<P>(&self.base_url, &self.api_key, &params, on_delta)
             .map_err(|error| AgentError::Provider(error.to_string()))?;
         Ok(turn_from_stream(result))
     }

@@ -1,7 +1,9 @@
 # pi-native
 
-Workspace for the **pi native runtime** project: reduce pi's runtime memory by
-rewriting only the memory-heavy subsystems in Rust and removing the Node runtime.
+Workspace for the **pi native runtime** project: a headless-first Rust rewrite of
+pi that drops Node, ships as one small binary, and stays byte-identical to pi at
+the provider API — so a swarm of agent units is cheap to run and keeps pi's
+prompt-cache behavior.
 
 Linear project: *pi native runtime: Rust memory-heavy rewrite, drop Node*
 (team `VED`).
@@ -94,16 +96,82 @@ pi-native --serve --provider openai-responses --base-url https://api.openai.com/
 Flags: `--provider openai-completions|openai-responses`, `--base-url` (or
 `OPENAI_BASE_URL`), `--api-key` (or `OPENAI_API_KEY`), `--model`,
 `--max-tokens`, `--thinking-format none|deepseek`, `--session <path>` (seed and
-persist the transcript), `--context-window <tokens>` (compaction; 0 disables;
-dropped history is summarized by the model), `--yolo`. Events stream as the turn
-produces them.
+persist the transcript), `--no-session` (do not persist), `--context-window
+<tokens>` (compaction; 0 disables; dropped history is summarized by the model),
+`--yolo`, `--extension-allow <caps>`. Events stream as the turn produces them.
+
+Without `--session`, a run creates a session file under the pi agent directory
+(`$PI_CODING_AGENT_DIR`, else `~/.pi/agent`) in pi's layout:
+`sessions/--<encoded-cwd>--/<timestamp>_<id>.jsonl`. That is the same layout pi
+and pi-web read, so their session browsers can list and resume native sessions.
+
+Tools are jailed to the working directory by default: absolute paths, `..`
+escapes, and symlinks that leave it are rejected, and `--yolo` is the explicit
+opt-out. `--serve` without `--yolo` routes both tool calls **and** the
+out-of-band `bash` command through the client approval (`ui_request`); a client
+that cannot write a `ui_response` cannot get a shell.
 
 Load pi extensions/plugins with `--extension <path>` (repeatable). Tools they
-register via `pi.registerTool` are exposed to the agent and run in QuickJS:
+register via `pi.registerTool` are exposed to the agent and run in QuickJS.
+Extensions are deny-by-default for ambient access: they may register tools,
+commands, and event handlers, but filesystem, process, and network access must
+be granted with `--extension-allow read,write,exec,http`, and file/process paths
+are jailed to the working directory. Extension tools always require approval
+(they are gated exactly like `bash`/`write`/`edit`).
 
 ```bash
 pi-native --serve --extension ./extensions/my-tool.ts
+# grant an extension read-only workspace access
+pi-native --serve --extension ./my.ts --extension-allow read
 ```
+
+## Unit gateway (HTTP + SSE)
+
+`--gateway` serves the unit host over HTTP so a web UI or remote client can
+attach to long-lived agents. Sessions are addressed by id, not by a file
+descriptor; any number of clients can attach, and an idle unit releases its
+in-memory agent until the next command.
+
+```bash
+pi-native --gateway --gateway-addr 127.0.0.1:30142 \
+  --provider openai-completions --base-url … --model … --api-key …
+```
+
+| Method | Path | Meaning |
+| --- | --- | --- |
+| `GET` | `/sessions` | List session ids |
+| `POST` | `/sessions` | Open/create a session (`{"sessionPath"?}`) |
+| `GET` | `/sessions/:id` | Resolved state |
+| `GET` | `/sessions/:id/events` | SSE stream (replay + live) |
+| `POST` | `/sessions/:id/commands` | Send a command (`prompt`, `steer`, `abort`, …) |
+| `POST` | `/sessions/:id/ui_response` | Answer a `ui_request` |
+
+By default the SSE stream carries the native event envelope; add `?format=pi`
+to receive pi's canonical event stream (`agent_start`, `message_update`,
+`tool_execution_*`, `agent_settled`) through `pi_rpc::PiEventAdapter`.
+
+### Triggers
+
+`--triggers <file>` (with `--gateway`) fires scheduled prompts into long-lived
+sessions. Each trigger has a stable session, so context accumulates across
+runs; run records are appended to `.pi-native/trigger-runs.jsonl` (or
+`--trigger-runs <path>`) and are the dedupe/idempotency layer across restarts.
+
+```json
+[
+  {"id":"hourly-sweep","interval_secs":3600,"prompt":"check the queue","dedupe_window_secs":3600},
+  {"id":"standup","cron":"0 9 * * 1-5","prompt":"summarize yesterday","max_runs_per_window":1,"budget_window_secs":86400}
+]
+```
+
+```bash
+pi-native --gateway --triggers ./triggers.json --trigger-interval 1 \
+  --provider openai-completions --base-url … --model … --api-key …
+```
+
+Schedules are `interval_secs` or a 5-field `cron` (`min hour day month weekday`).
+Budgets are dedupe windows and `max_runs_per_window`; model-level budgets
+(iterations, tokens, wall-clock) come from the agent configuration.
 
 ## Prompt-cache primitives (`pi-cache`)
 

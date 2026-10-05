@@ -119,6 +119,18 @@ pub struct StreamResult {
     pub usage: Usage,
 }
 
+/// An incremental piece of a provider stream, forwarded as it arrives.
+#[derive(Debug, Clone, PartialEq)]
+pub enum StreamDelta {
+    Text(String),
+    Thinking(String),
+    ToolCall {
+        id: Option<String>,
+        name: Option<String>,
+        arguments: Option<String>,
+    },
+}
+
 /// A provider SSE protocol: where to POST, how to authenticate, and how to turn
 /// events into a result. Implementations are stateful parsers.
 pub trait SseProtocol: Default {
@@ -129,8 +141,8 @@ pub trait SseProtocol: Default {
     fn endpoint(base_url: &str, params: &Self::Params) -> String;
     /// Auth and version headers; the transport adds `content-type` and `accept`.
     fn headers(api_key: &str) -> Vec<(&'static str, String)>;
-    /// Consume one SSE frame.
-    fn ingest(&mut self, event_type: &str, data: &str);
+    /// Consume one SSE frame, returning any incremental delta it carried.
+    fn ingest(&mut self, event_type: &str, data: &str) -> Option<StreamDelta>;
     /// Finish and produce the result.
     fn into_result(self) -> StreamResult;
 }
@@ -149,6 +161,20 @@ pub fn stream_sse<P>(
 where
     P: SseProtocol,
 {
+    stream_sse_with::<P>(base_url, api_key, params, &mut |_| {})
+}
+
+/// Like [`stream_sse`], but forwards each [`StreamDelta`] to `on_delta` as it
+/// arrives (before the final result is assembled).
+pub fn stream_sse_with<P>(
+    base_url: &str,
+    api_key: &str,
+    params: &P::Params,
+    on_delta: &mut dyn FnMut(StreamDelta),
+) -> Result<StreamResult, NetError>
+where
+    P: SseProtocol,
+{
     let body =
         serde_json::to_string(params).map_err(|error| NetError::Encode(error.to_string()))?;
     let url = P::endpoint(base_url, params);
@@ -157,9 +183,52 @@ where
     let response = post_json(&url, &headers, &body)?;
     let mut protocol = P::default();
     read_sse(response.into_reader(), |event_type, data| {
-        protocol.ingest(event_type, data);
+        if let Some(delta) = protocol.ingest(event_type, data) {
+            on_delta(delta);
+        }
     })?;
     Ok(protocol.into_result())
+}
+
+fn completion_delta(event: &OpenAiCompletionsStreamEvent) -> Option<StreamDelta> {
+    match event {
+        OpenAiCompletionsStreamEvent::TextDelta { delta } => Some(StreamDelta::Text(delta.clone())),
+        OpenAiCompletionsStreamEvent::ReasoningDelta { delta } => {
+            Some(StreamDelta::Thinking(delta.clone()))
+        }
+        OpenAiCompletionsStreamEvent::ToolCallDelta {
+            id,
+            name,
+            arguments,
+            ..
+        } => Some(StreamDelta::ToolCall {
+            id: id.clone(),
+            name: name.clone(),
+            arguments: arguments.clone(),
+        }),
+        _ => None,
+    }
+}
+
+fn response_delta(event: &OpenAiResponsesStreamEvent) -> Option<StreamDelta> {
+    match event {
+        OpenAiResponsesStreamEvent::TextDelta { delta } => Some(StreamDelta::Text(delta.clone())),
+        OpenAiResponsesStreamEvent::ToolCallStart { call_id, name, .. } => {
+            Some(StreamDelta::ToolCall {
+                id: Some(call_id.clone()),
+                name: Some(name.clone()),
+                arguments: None,
+            })
+        }
+        OpenAiResponsesStreamEvent::ToolCallArgsDelta { call_id, delta } => {
+            Some(StreamDelta::ToolCall {
+                id: Some(call_id.clone()),
+                name: None,
+                arguments: Some(delta.clone()),
+            })
+        }
+        _ => None,
+    }
 }
 
 /// OpenAI-compatible Chat Completions protocol (DeepSeek, Xiaomi, OpenAI).
@@ -177,8 +246,11 @@ impl SseProtocol for OpenAiCompletionsProtocol {
     fn headers(api_key: &str) -> Vec<(&'static str, String)> {
         vec![("authorization", format!("Bearer {api_key}"))]
     }
-    fn ingest(&mut self, _event_type: &str, data: &str) {
-        self.events.push(self.stream.handle(data));
+    fn ingest(&mut self, _event_type: &str, data: &str) -> Option<StreamDelta> {
+        let event = self.stream.handle(data);
+        let delta = completion_delta(&event);
+        self.events.push(event);
+        delta
     }
     fn into_result(self) -> StreamResult {
         let (text, content) = collect_completions(&self.events);
@@ -206,8 +278,11 @@ impl SseProtocol for OpenAiResponsesProtocol {
     fn headers(api_key: &str) -> Vec<(&'static str, String)> {
         vec![("authorization", format!("Bearer {api_key}"))]
     }
-    fn ingest(&mut self, event_type: &str, data: &str) {
-        self.events.push(self.stream.handle(event_type, data));
+    fn ingest(&mut self, event_type: &str, data: &str) -> Option<StreamDelta> {
+        let event = self.stream.handle(event_type, data);
+        let delta = response_delta(&event);
+        self.events.push(event);
+        delta
     }
     fn into_result(self) -> StreamResult {
         let (text, content) = collect_response(&self.events);

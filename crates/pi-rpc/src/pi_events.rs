@@ -1,0 +1,439 @@
+//! Adapter from the native RPC event stream to pi's JSON event stream.
+//!
+//! pi's canonical event shapes are documented in
+//! `@earendil-works/pi-coding-agent/docs/json.md` and are what `pi-web` and
+//! pi's own `RpcClient` consume. [`PiEventAdapter`] folds the native events
+//! into those shapes, synthesizing the message lifecycle (`message_start`,
+//! `message_update`, `message_end`) that the native stream does not carry.
+//!
+//! The adapter is transport-free: the HTTP/SSE gateway (VED-341) and a pi-web
+//! adapter (VED-342) both drive it.
+
+use crate::Event;
+use serde_json::{json, Value};
+
+/// Stateful translator; one per attached session stream.
+pub struct PiEventAdapter {
+    message_counter: u64,
+    /// A `message_start` was emitted and no `message_end` yet.
+    streaming: bool,
+    text_started: bool,
+    thinking_started: bool,
+    /// True once a streaming delta supplied the current text.
+    saw_delta: bool,
+    text: String,
+    thinking: String,
+    tool_calls: Vec<(String, String, Value)>,
+    next_content_index: usize,
+    last_usage: Option<Value>,
+}
+
+impl Default for PiEventAdapter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PiEventAdapter {
+    pub fn new() -> Self {
+        Self {
+            message_counter: 0,
+            streaming: false,
+            text_started: false,
+            thinking_started: false,
+            saw_delta: false,
+            text: String::new(),
+            thinking: String::new(),
+            tool_calls: Vec::new(),
+            next_content_index: 0,
+            last_usage: None,
+        }
+    }
+
+    fn begin_message(&mut self, out: &mut Vec<Value>) {
+        if self.streaming {
+            return;
+        }
+        let id = format!("msg-{}", self.message_counter);
+        self.message_counter += 1;
+        self.streaming = true;
+        self.text_started = false;
+        self.thinking_started = false;
+        self.saw_delta = false;
+        self.text.clear();
+        self.thinking.clear();
+        self.tool_calls.clear();
+        self.next_content_index = 0;
+        out.push(json!({
+            "type": "message_start",
+            "message": { "id": id, "role": "assistant", "content": [] }
+        }));
+    }
+
+    fn assistant_message(&self) -> Value {
+        let mut content: Vec<Value> = Vec::new();
+        if !self.thinking.is_empty() {
+            content.push(json!({ "type": "thinking", "thinking": self.thinking }));
+        }
+        if !self.text.is_empty() {
+            content.push(json!({ "type": "text", "text": self.text }));
+        }
+        for (id, name, arguments) in &self.tool_calls {
+            content.push(json!({
+                "type": "toolCall",
+                "id": id,
+                "name": name,
+                "arguments": arguments,
+            }));
+        }
+        let mut message = json!({ "role": "assistant", "content": content });
+        if let Some(usage) = &self.last_usage {
+            message["usage"] = usage.clone();
+        }
+        message
+    }
+
+    /// Translate one native event into pi-shaped events (possibly none).
+    pub fn translate(&mut self, event: &Event) -> Vec<Value> {
+        let mut out = Vec::new();
+        match event {
+            Event::AgentStart => out.push(json!({ "type": "agent_start" })),
+            Event::TurnStart => {
+                // Usage belongs to the turn that is starting.
+                self.last_usage = None;
+                out.push(json!({ "type": "turn_start" }));
+            }
+            Event::AssistantDelta { text } => {
+                self.begin_message(&mut out);
+                let index = self.next_content_index;
+                if !self.text_started {
+                    self.text_started = true;
+                    self.next_content_index += 1;
+                    out.push(json!({
+                        "type": "message_update",
+                        "assistantMessageEvent": { "type": "text_start", "contentIndex": index }
+                    }));
+                }
+                self.text.push_str(text);
+                self.saw_delta = true;
+                out.push(json!({
+                    "type": "message_update",
+                    "assistantMessageEvent": {
+                        "type": "text_delta",
+                        "contentIndex": index,
+                        "delta": text,
+                    }
+                }));
+            }
+            Event::ThinkingDelta { text } => {
+                self.begin_message(&mut out);
+                let index = self.next_content_index;
+                if !self.thinking_started {
+                    self.thinking_started = true;
+                    self.next_content_index += 1;
+                    out.push(json!({
+                        "type": "message_update",
+                        "assistantMessageEvent": { "type": "thinking_start", "contentIndex": index }
+                    }));
+                }
+                self.thinking.push_str(text);
+                out.push(json!({
+                    "type": "message_update",
+                    "assistantMessageEvent": {
+                        "type": "thinking_delta",
+                        "contentIndex": index,
+                        "delta": text,
+                    }
+                }));
+            }
+            Event::AssistantText { text } => {
+                if self.saw_delta && self.streaming {
+                    // The deltas already delivered the text; this is the
+                    // authoritative value for the final message.
+                    self.text = text.clone();
+                } else {
+                    self.begin_message(&mut out);
+                    let index = self.next_content_index;
+                    if !self.text_started {
+                        self.text_started = true;
+                        self.next_content_index += 1;
+                        out.push(json!({
+                            "type": "message_update",
+                            "assistantMessageEvent": { "type": "text_start", "contentIndex": index }
+                        }));
+                    }
+                    self.text = text.clone();
+                    out.push(json!({
+                        "type": "message_update",
+                        "assistantMessageEvent": {
+                            "type": "text_delta",
+                            "contentIndex": index,
+                            "delta": text,
+                        }
+                    }));
+                }
+            }
+            Event::ToolStart {
+                tool_call_id,
+                name,
+                input,
+            } => {
+                self.begin_message(&mut out);
+                let index = self.next_content_index;
+                self.next_content_index += 1;
+                self.tool_calls
+                    .push((tool_call_id.clone(), name.clone(), input.clone()));
+                out.push(json!({
+                    "type": "message_update",
+                    "assistantMessageEvent": {
+                        "type": "toolcall_start",
+                        "contentIndex": index,
+                        "id": tool_call_id,
+                        "toolName": name,
+                    }
+                }));
+                out.push(json!({
+                    "type": "message_update",
+                    "assistantMessageEvent": {
+                        "type": "toolcall_end",
+                        "contentIndex": index,
+                        "toolCall": { "id": tool_call_id, "name": name, "arguments": input }
+                    }
+                }));
+                out.push(json!({
+                    "type": "tool_execution_start",
+                    "toolCallId": tool_call_id,
+                    "toolName": name,
+                    "args": input,
+                }));
+            }
+            Event::ToolEnd {
+                tool_call_id,
+                name,
+                is_error,
+                content,
+            } => out.push(json!({
+                "type": "tool_execution_end",
+                "toolCallId": tool_call_id,
+                "toolName": name,
+                "isError": is_error,
+                "result": { "content": content },
+            })),
+            Event::TurnEnd => {
+                if self.streaming {
+                    let message = self.assistant_message();
+                    out.push(json!({ "type": "message_end", "message": message.clone() }));
+                    out.push(json!({
+                        "type": "turn_end",
+                        "message": message,
+                        "toolResults": [],
+                    }));
+                    self.streaming = false;
+                    self.text_started = false;
+                } else {
+                    out.push(
+                        json!({ "type": "turn_end", "message": Value::Null, "toolResults": [] }),
+                    );
+                }
+            }
+            Event::Done { stop_reason } => out.push(json!({
+                "type": "agent_end",
+                "messages": [],
+                "willRetry": false,
+                "stopReason": stop_reason,
+            })),
+            Event::AgentSettled => out.push(json!({ "type": "agent_settled" })),
+            Event::Usage {
+                input,
+                output,
+                cache_read,
+                cache_write,
+            } => {
+                self.last_usage = Some(json!({
+                    "input": input,
+                    "output": output,
+                    "cacheRead": cache_read,
+                    "cacheWrite": cache_write,
+                }));
+            }
+            Event::Compacted { dropped, summary } => out.push(json!({
+                "type": "compaction_end",
+                "dropped": dropped,
+                "summary": summary,
+            })),
+            // Pass extension UI through; a UI service answers it directly.
+            Event::UiRequest {
+                id,
+                kind,
+                prompt,
+                options,
+            } => out.push(json!({
+                "type": "extension_ui_request",
+                "id": id,
+                "method": kind,
+                "title": prompt,
+                "options": options,
+            })),
+            // Responses, state, ready, and errors already use a stable envelope.
+            Event::Ready { .. }
+            | Event::Response { .. }
+            | Event::State { .. }
+            | Event::Error { .. } => {}
+        }
+        out
+    }
+}
+
+/// Translate a whole native event sequence (convenience for tests/gateways).
+pub fn translate_all(events: &[Event]) -> Vec<Value> {
+    let mut adapter = PiEventAdapter::new();
+    let mut out = Vec::new();
+    for event in events {
+        out.extend(adapter.translate(event));
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn types(events: &[Value]) -> Vec<&str> {
+        events
+            .iter()
+            .filter_map(|event| event.get("type").and_then(Value::as_str))
+            .collect()
+    }
+
+    #[test]
+    fn streamed_deltas_are_not_duplicated_by_the_final_text() {
+        let native = vec![
+            Event::TurnStart,
+            Event::AssistantDelta { text: "Hel".into() },
+            Event::AssistantDelta { text: "lo".into() },
+            // The authoritative full text arrives after the deltas.
+            Event::AssistantText {
+                text: "Hello".into(),
+            },
+            Event::TurnEnd,
+        ];
+        let events = translate_all(&native);
+        let deltas: Vec<&Value> = events
+            .iter()
+            .filter(|event| event["assistantMessageEvent"]["type"] == json!("text_delta"))
+            .collect();
+        assert_eq!(deltas.len(), 2, "{events:?}");
+        assert_eq!(deltas[0]["assistantMessageEvent"]["delta"], json!("Hel"));
+        assert_eq!(deltas[1]["assistantMessageEvent"]["delta"], json!("lo"));
+        let message_end = events
+            .iter()
+            .find(|event| event["type"] == json!("message_end"))
+            .expect("message_end");
+        assert_eq!(message_end["message"]["content"][0]["text"], json!("Hello"));
+    }
+
+    #[test]
+    fn thinking_deltas_become_thinking_blocks() {
+        let native = vec![
+            Event::TurnStart,
+            Event::ThinkingDelta { text: "hmm".into() },
+            Event::AssistantText {
+                text: "done".into(),
+            },
+            Event::TurnEnd,
+        ];
+        let events = translate_all(&native);
+        let message_end = events
+            .iter()
+            .find(|event| event["type"] == json!("message_end"))
+            .expect("message_end");
+        assert_eq!(
+            message_end["message"]["content"][0]["type"],
+            json!("thinking")
+        );
+        assert_eq!(
+            message_end["message"]["content"][0]["thinking"],
+            json!("hmm")
+        );
+        assert_eq!(message_end["message"]["content"][1]["text"], json!("done"));
+    }
+
+    #[test]
+    fn a_text_turn_reconstructs_the_pi_lifecycle() {
+        let native = vec![
+            Event::AgentStart,
+            Event::TurnStart,
+            Event::AssistantText {
+                text: "hello".into(),
+            },
+            Event::TurnEnd,
+            Event::Done {
+                stop_reason: Some("end_turn".into()),
+            },
+            Event::AgentSettled,
+        ];
+        let events = translate_all(&native);
+        assert_eq!(
+            types(&events),
+            vec![
+                "agent_start",
+                "turn_start",
+                "message_start",
+                "message_update",
+                "message_update",
+                "message_end",
+                "turn_end",
+                "agent_end",
+                "agent_settled",
+            ]
+        );
+        let message_end = events
+            .iter()
+            .find(|event| event["type"] == json!("message_end"))
+            .expect("message_end");
+        assert_eq!(message_end["message"]["content"][0]["text"], json!("hello"));
+        let delta = events
+            .iter()
+            .find(|event| event["assistantMessageEvent"]["type"] == json!("text_delta"))
+            .expect("delta");
+        assert_eq!(delta["assistantMessageEvent"]["delta"], json!("hello"));
+    }
+
+    #[test]
+    fn tool_calls_get_ids_and_execution_events() {
+        let native = vec![
+            Event::TurnStart,
+            Event::AssistantText {
+                text: "working".into(),
+            },
+            Event::ToolStart {
+                tool_call_id: "call-1".into(),
+                name: "bash".into(),
+                input: json!({ "command": "ls" }),
+            },
+            Event::ToolEnd {
+                tool_call_id: "call-1".into(),
+                name: "bash".into(),
+                is_error: false,
+                content: "ok".into(),
+            },
+            Event::TurnEnd,
+        ];
+        let events = translate_all(&native);
+        let start = events
+            .iter()
+            .find(|event| event["type"] == json!("tool_execution_start"))
+            .expect("tool start");
+        assert_eq!(start["toolCallId"], json!("call-1"));
+        assert_eq!(start["toolName"], json!("bash"));
+        let message_end = events
+            .iter()
+            .find(|event| event["type"] == json!("message_end"))
+            .expect("message_end");
+        assert_eq!(
+            message_end["message"]["content"][1]["type"],
+            json!("toolCall")
+        );
+        assert_eq!(message_end["message"]["content"][1]["id"], json!("call-1"));
+    }
+}

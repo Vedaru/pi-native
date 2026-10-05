@@ -183,3 +183,41 @@ fn journal_rewrites_after_compaction() {
     assert!(matches!(&seeded[0], TranscriptMessage::UserText(text) if text == "summary"));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn new_session_header_matches_pi() {
+    let (dir, path) = temp_session_path("header-shape");
+    let _ = SessionJournal::open(path.clone(), "/tmp").expect("open");
+    // pi (and pi-web's session scanner) only accepts `type: "session"`.
+    let first_line = std::fs::read_to_string(&path)
+        .expect("read")
+        .lines()
+        .next()
+        .expect("header line")
+        .to_string();
+    let header: serde_json::Value = serde_json::from_str(&first_line).expect("json header");
+    assert_eq!(header["type"], json!("session"));
+    assert_eq!(header["version"], json!(3));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn new_session_path_uses_the_pi_layout() {
+    let base = std::env::temp_dir().join(format!("pi-agent-dir-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let cwd = std::path::Path::new("/home/me/proj");
+    let path = new_session_path_in(&base, cwd).expect("create");
+    assert!(
+        path.starts_with(base.join("sessions").join("--home-me-proj--")),
+        "{path:?}"
+    );
+    let name = path.file_name().unwrap().to_string_lossy().to_string();
+    assert!(name.ends_with(".jsonl"), "{name}");
+    let session = pi_session::SessionFile::read(&path).expect("read");
+    assert_eq!(session.header.kind, "session");
+    assert_eq!(session.header.version, Some(3));
+    // Filename id and header id must agree, or pi-web cannot address the session.
+    let file_id = name.trim_end_matches(".jsonl").rsplit('_').next().unwrap();
+    assert_eq!(session.header.id, file_id);
+    let _ = std::fs::remove_dir_all(&base);
+}

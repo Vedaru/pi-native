@@ -69,7 +69,7 @@ fn openai_agent_executes_a_tool_then_finishes() {
         "no bash tool start: {events:?}"
     );
     assert!(
-        events.iter().any(|event| matches!(event, AgentEvent::ToolEnd { name, content, is_error: false } if name == "bash" && content.contains("hi"))),
+        events.iter().any(|event| matches!(event, AgentEvent::ToolEnd { name, content, is_error: false, .. } if name == "bash" && content.contains("hi"))),
         "bash did not run or return hi: {events:?}"
     );
     assert!(events.contains(&AgentEvent::AssistantText("done".into())));

@@ -3,6 +3,21 @@ use super::*;
 const SAMPLE: &str = include_str!("../fixtures/session-sample.jsonl");
 
 #[test]
+fn encodes_cwd_the_way_pi_does() {
+    // pi: strip one leading separator, replace `/`, `\`, `:` with `-`, wrap in `--`.
+    assert_eq!(encode_cwd_dir(Path::new("/home/me")), "--home-me--");
+    assert_eq!(
+        encode_cwd_dir(Path::new("/home/me/proj")),
+        "--home-me-proj--"
+    );
+    assert_eq!(encode_cwd_dir(Path::new("/")), "----");
+    assert_eq!(encode_cwd_dir(Path::new("/a/b:c")), "--a-b-c--");
+
+    let dir = session_dir_for(Path::new("/agent"), Path::new("/home/me"));
+    assert!(dir.ends_with("sessions/--home-me--"));
+}
+
+#[test]
 fn parses_a_real_session_sample() {
     let session = SessionFile::parse(SAMPLE).expect("parses");
     assert_eq!(session.header.kind, "session");

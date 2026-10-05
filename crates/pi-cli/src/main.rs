@@ -49,6 +49,21 @@ struct Cli {
     /// Connect to a local unit and drive it from the terminal.
     #[arg(long)]
     client: bool,
+    /// Serve the HTTP + SSE gateway for unit agents (web UI / remote clients).
+    #[arg(long)]
+    gateway: bool,
+    /// Bind address for `--gateway`.
+    #[arg(long, default_value = "127.0.0.1:30142")]
+    gateway_addr: String,
+    /// Load trigger definitions from a JSON array file (requires `--gateway`).
+    #[arg(long)]
+    triggers: Option<PathBuf>,
+    /// Durable trigger run records for `--triggers`.
+    #[arg(long)]
+    trigger_runs: Option<PathBuf>,
+    /// How often the trigger loop wakes, in seconds.
+    #[arg(long, default_value_t = 1)]
+    trigger_interval: u64,
     /// Non-interactive: run one prompt through the agent and print the result.
     #[arg(short = 'p', long = "print")]
     print: Option<String>,
@@ -82,8 +97,14 @@ struct Cli {
     /// Load a pi extension/plugin file (repeatable).
     #[arg(long = "extension", short = 'e')]
     extensions: Vec<PathBuf>,
-    /// Accepted for parity with pi's benchmark invocation; sessions are not
-    /// persisted yet, so this is a no-op.
+    /// Extra capabilities to grant `--extension` plugins: read, write, exec,
+    /// http (repeatable or comma-separated). Without this, extensions may
+    /// register tools but cannot touch the filesystem, spawn processes, or use
+    /// the network; paths are jailed to the working directory.
+    #[arg(long = "extension-allow", value_delimiter = ',')]
+    extension_allow: Vec<String>,
+    /// Do not persist the session. Without this, a run with no `--session`
+    /// creates a file under the pi agent directory (`~/.pi/agent/sessions`).
     #[arg(long = "no-session")]
     no_session: bool,
     /// Allow approval-required tools (bash/write/edit) without asking.
@@ -171,7 +192,9 @@ fn main() {
             cli.yolo,
             cli.context_window,
             cli.session.as_deref(),
+            cli.no_session,
             &cli.extensions,
+            &cli.extension_allow,
         );
         return;
     }
@@ -181,7 +204,22 @@ fn main() {
             cli.yolo,
             cli.context_window,
             cli.session.as_deref(),
+            cli.no_session,
             &cli.extensions,
+            &cli.extension_allow,
+        );
+        return;
+    }
+    if cli.gateway {
+        run_gateway(
+            cli.provider_config(),
+            cli.context_window,
+            &cli.extensions,
+            &cli.extension_allow,
+            &cli.gateway_addr,
+            cli.triggers.as_deref(),
+            cli.trigger_runs.as_deref(),
+            cli.trigger_interval,
         );
         return;
     }
@@ -205,7 +243,9 @@ fn main() {
             cli.yolo,
             cli.context_window,
             cli.session.as_deref(),
+            cli.no_session,
             &cli.extensions,
+            &cli.extension_allow,
         );
         return;
     }
@@ -251,23 +291,41 @@ fn run_rpc() {
 }
 
 /// Run one prompt through the agent and print the result.
+#[allow(clippy::too_many_arguments)]
 fn run_print(
     prompt: &str,
     config: &ProviderConfig,
     yolo: bool,
     context_window: usize,
     session: Option<&std::path::Path>,
+    no_session: bool,
     extensions: &[PathBuf],
+    extension_allow: &[String],
 ) {
     let cwd = std::env::current_dir().unwrap_or_default();
     let system = system_prompt_for(&cwd);
-    let mut agent = resolve_agent(config, yolo, true, context_window, &system, extensions);
-    let mut journal = open_session(&mut agent, session, &cwd);
+    let mut agent = resolve_agent(
+        config,
+        yolo,
+        true,
+        context_window,
+        &system,
+        extensions,
+        extension_allow,
+    );
+    let session = resolve_session(session, no_session, &cwd);
+    let mut journal = open_session(&mut agent, session.as_deref(), &cwd);
     agent.push_user(prompt);
     match agent.run() {
         Ok(events) => {
             for event in events {
                 match event {
+                    AgentEvent::AgentStart
+                    | AgentEvent::TurnStart
+                    | AgentEvent::TurnEnd
+                    | AgentEvent::AssistantDelta(_)
+                    | AgentEvent::ThinkingDelta(_)
+                    | AgentEvent::AgentSettled => {}
                     AgentEvent::AssistantText(text) => println!("{text}"),
                     AgentEvent::ToolStart { name, .. } => eprintln!("[tool {name} start]"),
                     AgentEvent::ToolEnd { name, is_error, .. } => {
@@ -554,6 +612,7 @@ fn system_prompt_for(cwd: &std::path::Path) -> String {
 ///
 /// One generic path: the provider is chosen here, the loop/tools are the same.
 /// Resolved provider settings. Nothing vendor-specific is assumed.
+#[derive(Clone)]
 struct ProviderConfig {
     provider: String,
     model: String,
@@ -638,6 +697,7 @@ fn resolve_agent(
     context_window: usize,
     system: &str,
     extensions: &[PathBuf],
+    extension_allow: &[String],
 ) -> Agent {
     let approver: Rc<dyn Approver> = if yolo {
         Rc::new(AllowAll)
@@ -648,9 +708,12 @@ fn resolve_agent(
     };
     let cwd = std::env::current_dir().unwrap_or_default();
     let mut tools = default_tools();
-    tools.extend(load_extension_tools(extensions));
-    let mut agent = Agent::new(make_provider(config), tools, system, ToolContext::new(cwd))
-        .with_approver(approver);
+    tools.extend(load_extension_tools(extensions, extension_allow, &cwd));
+    // Tools are jailed to the working directory unless the caller explicitly
+    // opted into unrestricted execution with `--yolo`.
+    let tool_context = ToolContext::new(cwd).allow_outside(yolo);
+    let mut agent =
+        Agent::new(make_provider(config), tools, system, tool_context).with_approver(approver);
     if context_window > 0 {
         // Compaction summarizes dropped history with the model (pi's behavior).
         agent = agent
@@ -658,6 +721,28 @@ fn resolve_agent(
             .with_summarizer(Arc::new(ProviderSummarizer::new(make_provider(config))));
     }
     agent
+}
+
+/// Resolve the session file to use: explicit `--session`, a fresh file in the
+/// pi agent dir, or none with `--no-session`.
+fn resolve_session(
+    session: Option<&std::path::Path>,
+    no_session: bool,
+    cwd: &std::path::Path,
+) -> Option<PathBuf> {
+    if no_session {
+        return None;
+    }
+    if let Some(path) = session {
+        return Some(path.to_path_buf());
+    }
+    match pi_agent::new_session_path(cwd) {
+        Ok(path) => Some(path),
+        Err(error) => {
+            eprintln!("pi-native: cannot create a session file: {error}");
+            None
+        }
+    }
 }
 
 /// Seed the transcript from `--session` (if given) and return a journal that
@@ -686,12 +771,22 @@ fn run_serve(
     yolo: bool,
     context_window: usize,
     session: Option<&std::path::Path>,
+    no_session: bool,
     extensions: &[PathBuf],
+    extension_allow: &[String],
 ) {
     let cwd = std::env::current_dir().unwrap_or_default();
     let system = system_prompt_for(&cwd);
-    let mut agent = resolve_agent(config, yolo, false, context_window, &system, extensions);
-    let path = session.map(|path| path.to_path_buf());
+    let mut agent = resolve_agent(
+        config,
+        yolo,
+        false,
+        context_window,
+        &system,
+        extensions,
+        extension_allow,
+    );
+    let path = resolve_session(session, no_session, &cwd);
     let cwd_string = cwd.to_string_lossy().into_owned();
     // Without `--yolo`, approval-required tools ask the connected client over
     // the protocol (`ui_request` / `ui_response`). Session navigation commands
@@ -706,13 +801,82 @@ fn run_serve(
     let _ = result;
 }
 
+/// Serve the HTTP + SSE gateway. Each session is an independent unit and any
+/// number of clients can attach to it. With `--triggers`, a background loop
+/// fires scheduled prompts into their long-lived sessions.
+#[allow(clippy::too_many_arguments)]
+fn run_gateway(
+    config: ProviderConfig,
+    context_window: usize,
+    extensions: &[PathBuf],
+    extension_allow: &[String],
+    addr: &str,
+    triggers: Option<&std::path::Path>,
+    trigger_runs: Option<&std::path::Path>,
+    trigger_interval: u64,
+) {
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let system = system_prompt_for(&cwd);
+    let extensions = extensions.to_vec();
+    let extension_allow = extension_allow.to_vec();
+    let factory = move || {
+        resolve_agent(
+            &config,
+            false,
+            false,
+            context_window,
+            &system,
+            &extensions,
+            &extension_allow,
+        )
+    };
+    let host = pi_host::Host::new(cwd.to_string_lossy().to_string(), factory);
+    let listener = match std::net::TcpListener::bind(addr) {
+        Ok(listener) => listener,
+        Err(error) => {
+            eprintln!("pi-native: cannot bind {addr}: {error}");
+            std::process::exit(1);
+        }
+    };
+    let gateway = match triggers {
+        Some(path) => {
+            let triggers = pi_triggers::load_triggers(path).unwrap_or_else(|error| {
+                eprintln!("pi-native: {error}");
+                std::process::exit(1);
+            });
+            let runs = trigger_runs
+                .map(PathBuf::from)
+                .unwrap_or_else(|| cwd.join(".pi-native").join("trigger-runs.jsonl"));
+            let store = pi_triggers::JsonlRuns::open(&runs).unwrap_or_else(|error| {
+                eprintln!("pi-native: cannot open {}: {error}", runs.display());
+                std::process::exit(1);
+            });
+            let sessions = cwd.join(".pi-native").join("trigger-sessions");
+            let runner = pi_triggers::Runner::new(triggers, sessions);
+            Arc::new(pi_gateway::Gateway::with_triggers(
+                host,
+                runner,
+                Box::new(store),
+            ))
+        }
+        None => Arc::new(pi_gateway::Gateway::new(host)),
+    };
+    if triggers.is_some() {
+        gateway.spawn_trigger_loop(std::time::Duration::from_secs(trigger_interval.max(1)));
+    }
+    eprintln!("pi-native gateway listening on http://{addr}");
+    pi_gateway::serve(listener, gateway);
+}
+
 /// A minimal terminal client: spawn a unit serving the protocol and drive it.
 fn run_client(
     config: &ProviderConfig,
     yolo: bool,
     context_window: usize,
     session: Option<&std::path::Path>,
+    no_session: bool,
     extensions: &[PathBuf],
+    extension_allow: &[String],
 ) {
     let exe = std::env::current_exe().expect("current executable");
     let mut command = ProcessCommand::new(exe);
@@ -743,8 +907,14 @@ fn run_client(
     if let Some(path) = session {
         command.arg("--session").arg(path);
     }
+    if no_session {
+        command.arg("--no-session");
+    }
     for extension in extensions {
         command.arg("--extension").arg(extension);
+    }
+    for capability in extension_allow {
+        command.arg("--extension-allow").arg(capability);
     }
     let mut child = match command.stdin(Stdio::piped()).stdout(Stdio::piped()).spawn() {
         Ok(child) => child,
@@ -915,8 +1085,16 @@ impl Tool for PluginTool {
         self.parameters.clone()
     }
 
+    /// Tools from extensions can run arbitrary plugin code (file/process/HTTP
+    /// side effects), so they always go through the same approval gate as
+    /// `bash`/`write`/`edit`.
+    fn requires_approval(&self) -> bool {
+        true
+    }
+
     fn run(&self, input: &serde_json::Value, _ctx: &ToolContext) -> ToolResult {
-        // pi's default policy is permissive for explicitly loaded extensions.
+        // Extension code runs under the extension policy (deny-by-default for
+        // ambient access) and always requires approval.
         match self.instance.call_tool(&self.name, input) {
             Ok(value) => {
                 let is_error = value
@@ -961,10 +1139,24 @@ fn tool_result_text(value: &serde_json::Value) -> String {
 }
 
 /// Load each `--extension` file and expose the tools it registered.
-fn load_extension_tools(paths: &[PathBuf]) -> Vec<Box<dyn Tool>> {
+fn load_extension_tools(
+    paths: &[PathBuf],
+    allowed: &[String],
+    cwd: &std::path::Path,
+) -> Vec<Box<dyn Tool>> {
+    let mut policy = PluginPolicy::for_extension(cwd);
+    for name in allowed {
+        match name.trim().to_ascii_lowercase().as_str() {
+            "read" => policy = policy.allow(pi_plugins::Capability::Read),
+            "write" => policy = policy.allow(pi_plugins::Capability::Write),
+            "exec" => policy = policy.allow(pi_plugins::Capability::Exec),
+            "http" => policy = policy.allow(pi_plugins::Capability::Http),
+            other => eprintln!("pi-native: unknown extension capability `{other}`"),
+        }
+    }
     let mut tools: Vec<Box<dyn Tool>> = Vec::new();
     for path in paths {
-        match PluginInstance::from_file(PluginPolicy::permissive(), path) {
+        match PluginInstance::from_file(policy.clone(), path) {
             Ok(instance) => {
                 let instance = Rc::new(instance);
                 for spec in instance.tools() {

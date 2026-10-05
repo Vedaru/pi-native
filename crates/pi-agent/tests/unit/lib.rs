@@ -84,22 +84,13 @@ fn runs_a_tool_call_then_finishes() {
 
     let events = agent.run().expect("runs");
 
-    assert!(events.contains(&AgentEvent::ToolStart {
-        name: "echo".into(),
-        input: json!({ "text": "hi" })
-    }));
-    assert!(events.contains(&AgentEvent::ToolEnd {
-        name: "echo".into(),
-        is_error: false,
-        content: "echoed: hi".into()
-    }));
+    assert!(events.iter().any(|event| matches!(event, AgentEvent::ToolStart { name, input, .. } if name == "echo" && *input == json!({ "text": "hi" }))));
+    assert!(events.iter().any(|event| matches!(event, AgentEvent::ToolEnd { name, is_error: false, content, .. } if name == "echo" && content == "echoed: hi")));
     assert!(events.contains(&AgentEvent::AssistantText("done".into())));
-    assert_eq!(
-        events.last(),
-        Some(&AgentEvent::Done {
-            stop_reason: Some("end_turn".into())
-        })
-    );
+    assert!(events.contains(&AgentEvent::Done {
+        stop_reason: Some("end_turn".into())
+    }));
+    assert_eq!(events.last(), Some(&AgentEvent::AgentSettled));
 
     // user, assistant(tool call), tool result, assistant(text)
     assert_eq!(agent.messages().len(), 4);
@@ -137,6 +128,7 @@ fn unknown_tool_is_reported_and_the_loop_continues() {
                 name,
                 is_error,
                 content,
+                ..
             } => Some((name.clone(), *is_error, content.clone())),
             _ => None,
         })
@@ -158,12 +150,10 @@ fn iteration_bound_stops_a_runaway_loop() {
     agent.push_user("go");
 
     let events = agent.run().expect("runs");
-    assert_eq!(
-        events.last(),
-        Some(&AgentEvent::Done {
-            stop_reason: Some("max_iterations".into())
-        })
-    );
+    assert!(events.contains(&AgentEvent::Done {
+        stop_reason: Some("max_iterations".into())
+    }));
+    assert_eq!(events.last(), Some(&AgentEvent::AgentSettled));
 }
 
 fn bash_turn() -> AssistantTurn {

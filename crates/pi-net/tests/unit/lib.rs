@@ -26,10 +26,8 @@ const COMPLETIONS_SSE: &str = concat!(
     "data: [DONE]\n\n",
 );
 
-#[test]
-fn streams_openai_completions_sse_with_usage() {
-    let base = serve_once(COMPLETIONS_SSE);
-    let params = pi_providers::build_openai_completions_params(
+fn completions_params() -> serde_json::Value {
+    pi_providers::build_openai_completions_params(
         "deepseek-flash".into(),
         "system",
         &[],
@@ -51,7 +49,13 @@ fn streams_openai_completions_sse_with_usage() {
             off_supported: true,
             reasoning_effort: None,
         },
-    );
+    )
+}
+
+#[test]
+fn streams_openai_completions_sse_with_usage() {
+    let base = serve_once(COMPLETIONS_SSE);
+    let params = completions_params();
     let result = stream_openai_completions(&base, "test-key", &params).expect("streams");
     assert_eq!(result.message_id.as_deref(), Some("chatcmpl-1"));
     assert_eq!(result.text, "Hello");
@@ -60,6 +64,20 @@ fn streams_openai_completions_sse_with_usage() {
     assert_eq!(result.usage.cache_read, 60);
     assert_eq!(result.usage.output, 5);
     assert_eq!(result.usage.cache_hit_rate(), Some(0.6));
+}
+
+#[test]
+fn stream_sse_with_forwards_text_deltas() {
+    let base = serve_once(COMPLETIONS_SSE);
+    let params = completions_params();
+    let mut deltas = Vec::new();
+    let result =
+        stream_sse_with::<OpenAiCompletionsProtocol>(&base, "test-key", &params, &mut |delta| {
+            deltas.push(delta)
+        })
+        .expect("streams");
+    assert_eq!(result.text, "Hello");
+    assert_eq!(deltas, vec![StreamDelta::Text("Hello".into())]);
 }
 
 const RESPONSES_SSE: &str = concat!(

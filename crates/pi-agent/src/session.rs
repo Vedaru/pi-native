@@ -6,18 +6,69 @@
 //! round-trips through the same files pi writes.
 
 use pi_providers::{AssistantBlock, ContentPart, TranscriptMessage};
-use pi_session::{build_context, SessionEntry, SessionFile, SessionHeader};
+use pi_session::{build_context, session_dir_for, SessionEntry, SessionFile, SessionHeader};
 use serde_json::{json, Value};
 use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
+/// pi's timestamp precision on disk is milliseconds (`Date.toISOString()`).
+const ISO_MILLIS: &[time::format_description::FormatItem<'static>] = time::macros::format_description!(
+    "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:3]Z"
+);
+
 fn now_iso() -> String {
     time::OffsetDateTime::now_utc()
-        .format(&time::format_description::well_known::Rfc3339)
+        .format(ISO_MILLIS)
         .unwrap_or_default()
+}
+
+/// The pi agent directory: `$PI_CODING_AGENT_DIR`, else `~/.pi/agent`.
+pub fn agent_dir() -> PathBuf {
+    if let Some(dir) = std::env::var_os("PI_CODING_AGENT_DIR") {
+        return expand_tilde(PathBuf::from(dir));
+    }
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .unwrap_or_default();
+    PathBuf::from(home).join(".pi").join("agent")
+}
+
+fn expand_tilde(path: PathBuf) -> PathBuf {
+    if let Ok(stripped) = path.strip_prefix("~") {
+        if let Some(home) = std::env::var_os("HOME") {
+            return PathBuf::from(home).join(stripped);
+        }
+    }
+    path
+}
+
+/// Create a fresh session file under the pi agent directory and return its path.
+///
+/// The header is written immediately so its id and timestamp match the file
+/// name, which is the layout pi and pi-web expect:
+/// `<agent>/sessions/--<encoded-cwd>--/<timestamp>_<id>.jsonl`.
+pub fn new_session_path(cwd: &Path) -> std::io::Result<PathBuf> {
+    new_session_path_in(&agent_dir(), cwd)
+}
+
+/// Like [`new_session_path`] but with an explicit agent directory (testable).
+pub fn new_session_path_in(agent_dir: &Path, cwd: &Path) -> std::io::Result<PathBuf> {
+    let dir = session_dir_for(agent_dir, cwd);
+    std::fs::create_dir_all(&dir)?;
+    let id = new_id();
+    let timestamp = now_iso();
+    let file_timestamp = timestamp.replace([':', '.'], "-");
+    let path = dir.join(format!("{file_timestamp}_{id}.jsonl"));
+    let session = SessionFile {
+        header: session_header(&id, &timestamp, &cwd.to_string_lossy()),
+        entries: Vec::new(),
+    };
+    session.write(&path).map_err(io_err)?;
+    Ok(path)
 }
 
 fn new_id() -> String {
@@ -245,14 +296,16 @@ pub fn append_messages(session: &mut SessionFile, messages: &[TranscriptMessage]
     appended
 }
 
-/// A minimal header for a new native session.
-fn new_session_header(cwd: &str) -> SessionHeader {
+/// A minimal header for a new native session. Matches pi's header shape
+/// (`type: "session"`, version 3) so pi's own tooling (including the web UI's
+/// session scanner) recognizes the file.
+fn session_header(id: &str, timestamp: &str, cwd: &str) -> SessionHeader {
     SessionHeader {
-        kind: "header".to_string(),
-        id: new_id(),
-        timestamp: now_iso(),
+        kind: "session".to_string(),
+        id: id.to_string(),
+        timestamp: timestamp.to_string(),
         cwd: cwd.to_string(),
-        version: Some(1),
+        version: Some(3),
         parent_session: None,
         extra: serde_json::Map::new(),
     }
@@ -274,6 +327,11 @@ pub struct SessionJournal {
 }
 
 impl SessionJournal {
+    /// The session id from the file header.
+    pub fn session_id(&self) -> &str {
+        &self.session.header.id
+    }
+
     /// Open an existing session (returning its transcript to seed) or create a
     /// new file with just the header.
     pub fn open(
@@ -285,8 +343,10 @@ impl SessionJournal {
             let transcript = messages_from_session(&session);
             (session, transcript)
         } else {
+            let id = new_id();
+            let timestamp = now_iso();
             let session = SessionFile {
-                header: new_session_header(cwd),
+                header: session_header(&id, &timestamp, cwd),
                 entries: Vec::new(),
             };
             session.write(&path).map_err(io_err)?;

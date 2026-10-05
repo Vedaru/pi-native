@@ -9,10 +9,37 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use std::path::{Path, PathBuf};
 
 pub mod context;
 
 pub use context::{build_context, ContextMessage};
+
+/// pi's cwd-to-directory encoding for session storage.
+///
+/// Mirrors `getDefaultSessionDirPath`: strip one leading separator, replace
+/// `/`, `\\`, and `:` with `-`, then wrap in `--…--`.
+/// `/home/me` becomes `--home-me--`.
+pub fn encode_cwd_dir(cwd: &Path) -> String {
+    let text = cwd.to_string_lossy();
+    let mut chars = text.chars().peekable();
+    let mut stripped = String::new();
+    if let Some('/' | '\\') = chars.peek() {
+        chars.next();
+    }
+    for ch in chars {
+        stripped.push(match ch {
+            '/' | '\\' | ':' => '-',
+            other => other,
+        });
+    }
+    format!("--{stripped}--")
+}
+
+/// The `sessions/<encoded-cwd>` directory under an agent directory.
+pub fn session_dir_for(agent_dir: &Path, cwd: &Path) -> PathBuf {
+    agent_dir.join("sessions").join(encode_cwd_dir(cwd))
+}
 
 #[derive(Debug)]
 pub enum SessionError {

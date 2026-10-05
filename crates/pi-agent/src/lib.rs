@@ -24,8 +24,8 @@ pub use providers::{
     openai_completions_provider, openai_responses_provider, turn_from_stream, HttpProvider,
 };
 pub use session::{
-    append_compaction, append_messages, message_value, messages_from_session, transcript_values,
-    SessionJournal,
+    agent_dir, append_compaction, append_messages, message_value, messages_from_session,
+    new_session_path, new_session_path_in, transcript_values, SessionJournal,
 };
 
 /// A tool call requested by the model.
@@ -73,19 +73,34 @@ impl std::error::Error for AgentError {}
 /// Something the agent produced during a turn.
 #[derive(Debug, Clone, PartialEq)]
 pub enum AgentEvent {
+    /// A low-level agent run started (pi's `agent_start`).
+    AgentStart,
+    /// One assistant turn (a model call plus its tool calls) started.
+    TurnStart,
+    /// Incremental assistant text, forwarded while the provider streams.
+    AssistantDelta(String),
+    /// Incremental thinking text, forwarded while the provider streams.
+    ThinkingDelta(String),
     AssistantText(String),
     ToolStart {
+        tool_call_id: String,
         name: String,
         input: Value,
     },
     ToolEnd {
+        tool_call_id: String,
         name: String,
         is_error: bool,
         content: String,
     },
+    /// One assistant turn ended. The adapter turns this plus the text/tool events
+    /// into pi's `turn_end`.
+    TurnEnd,
     Done {
         stop_reason: Option<String>,
     },
+    /// The loop will not continue automatically (pi's `agent_settled`).
+    AgentSettled,
     /// Context was compacted: `dropped` older messages were replaced by `summary`.
     Compacted {
         dropped: usize,
@@ -161,6 +176,18 @@ impl<F: Fn(usize) -> AssistantTurn + Send + Sync> ModelProvider for FnProvider<F
 /// `Send + Sync` so a second instance can power the compaction summarizer.
 pub trait ModelProvider: Send + Sync {
     fn complete(&self, request: &CompletionRequest<'_>) -> Result<AssistantTurn, AgentError>;
+
+    /// Stream a turn, forwarding incremental deltas as they arrive. Providers
+    /// that cannot stream use the default, which calls [`Self::complete`] and
+    /// emits no deltas.
+    fn stream(
+        &self,
+        request: &CompletionRequest<'_>,
+        on_delta: &mut dyn FnMut(pi_net::StreamDelta),
+    ) -> Result<AssistantTurn, AgentError> {
+        let _ = on_delta;
+        self.complete(request)
+    }
 }
 
 /// Default tokens reserved for the prompt tail and the model's response, matching
@@ -292,6 +319,13 @@ impl Agent {
     /// Replace the approval hook (e.g. after a protocol client connects).
     pub fn set_approver(&mut self, approver: Rc<dyn Approver>) {
         self.approver = approver;
+    }
+
+    /// Ask the configured approver about a tool invocation. Exposed so
+    /// out-of-band commands (e.g. the protocol `bash` command) take the same
+    /// approval path as tools run inside a turn.
+    pub fn approve(&self, tool: &str, input: &Value) -> Approval {
+        self.approver.approve(tool, input)
     }
 
     /// Bound retained context to the most recent `max_messages` entries.
@@ -489,14 +523,26 @@ impl Agent {
     /// Run the model/tool loop, streaming each event to `on_event` as it occurs.
     pub fn run_with<F: FnMut(&AgentEvent)>(&mut self, mut on_event: F) -> Result<(), AgentError> {
         let tools: Vec<ToolSpec> = self.tools.iter().map(|tool| tool.spec()).collect();
+        on_event(&AgentEvent::AgentStart);
 
         for _ in 0..self.max_iterations {
+            on_event(&AgentEvent::TurnStart);
             let request = CompletionRequest {
                 system: &self.system,
                 messages: &self.messages,
                 tools: &tools,
             };
-            let turn = self.provider.complete(&request)?;
+            let turn = self.provider.stream(&request, &mut |delta| match delta {
+                pi_net::StreamDelta::Text(text) => {
+                    on_event(&AgentEvent::AssistantDelta(text));
+                }
+                pi_net::StreamDelta::Thinking(text) => {
+                    on_event(&AgentEvent::ThinkingDelta(text));
+                }
+                // Tool-call argument deltas are already represented by the
+                // complete tool call in `turn.tool_calls` (ToolStart below).
+                pi_net::StreamDelta::ToolCall { .. } => {}
+            })?;
             if let Some(usage) = &turn.usage {
                 on_event(&AgentEvent::Usage(usage.clone()));
             }
@@ -526,19 +572,23 @@ impl Agent {
             }
 
             if turn.tool_calls.is_empty() {
+                on_event(&AgentEvent::TurnEnd);
                 on_event(&AgentEvent::Done {
                     stop_reason: turn.stop_reason.clone(),
                 });
+                on_event(&AgentEvent::AgentSettled);
                 return Ok(());
             }
 
             for call in &turn.tool_calls {
                 on_event(&AgentEvent::ToolStart {
+                    tool_call_id: call.id.clone(),
                     name: call.name.clone(),
                     input: call.arguments.clone(),
                 });
                 let result = self.run_tool(call);
                 on_event(&AgentEvent::ToolEnd {
+                    tool_call_id: call.id.clone(),
                     name: call.name.clone(),
                     is_error: result.is_error,
                     content: result.content.clone(),
@@ -555,11 +605,13 @@ impl Agent {
             if let Some(event) = self.enforce_context() {
                 on_event(&event);
             }
+            on_event(&AgentEvent::TurnEnd);
         }
 
         on_event(&AgentEvent::Done {
             stop_reason: Some("max_iterations".to_string()),
         });
+        on_event(&AgentEvent::AgentSettled);
         Ok(())
     }
 

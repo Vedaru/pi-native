@@ -1,0 +1,15 @@
+[package]
+name = "pi-gateway"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "HTTP + SSE gateway over the pi unit host"
+
+[dependencies]
+serde_json = { workspace = true }
+pi-agent = { path = "../pi-agent" }
+pi-host = { path = "../pi-host" }
+pi-rpc = { path = "../pi-rpc" }
+pi-triggers = { path = "../pi-triggers" }
+time = "0.3"

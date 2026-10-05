@@ -64,13 +64,32 @@ is no concurrent run to steer); `get_commands` returns built-ins only.
 | Type | Fields | Meaning |
 | --- | --- | --- |
 | `ready` | `version` | Sent once at startup |
-| `assistant_text` | `text` | A chunk of model text |
-| `tool_start` | `name`, `input` | A tool call began |
-| `tool_end` | `name`, `is_error`, `content` | A tool call finished |
-| `done` | `stop_reason` | The turn finished |
+| `agent_start` / `agent_settled` | — | A run started / will not continue automatically |
+| `turn_start` / `turn_end` | — | One model call and its tool calls |
+| `assistant_delta` / `thinking_delta` | `text` | Incremental provider output while streaming |
+| `assistant_text` | `text` | The authoritative text for the turn |
+| `tool_start` | `tool_call_id`, `name`, `input` | A tool call began |
+| `tool_end` | `tool_call_id`, `name`, `is_error`, `content` | A tool call finished |
+| `done` | `stop_reason` | The agent loop finished |
 | `state` | `messages` | Reply to `get_state` |
 | `ui_request` | `id`, `kind`, `prompt`, `options` | A generic UI request |
 | `error` | `message` | A protocol or turn error |
+
+## pi event compatibility
+
+pi and pi-web consume pi's canonical event stream
+(`@earendil-works/pi-coding-agent/docs/json.md`): `agent_start/end/settled`,
+`turn_start/end`, `message_start/update/end` with `assistantMessageEvent`
+deltas, and `tool_execution_start/update/end` with tool-call ids. The native
+stream above is the transport; `pi_rpc::PiEventAdapter` (and `translate_all`)
+folds it into those exact shapes, including synthesized `message_start` /
+`message_update` / `message_end` and `toolCallId`. The tool-call ids are carried
+natively (`tool_call_id`) so the adapter does not have to invent them.
+
+The provider streams incrementally: `assistant_delta` and `thinking_delta`
+arrive as they are produced (from `pi_net::stream_sse_with`), and the adapter
+emits `text_delta` / `thinking_delta` for each. `assistant_text` is the
+authoritative final value for the turn and does not duplicate the deltas.
 
 ## Generic UI
 
@@ -88,6 +107,9 @@ message.
 - `serve_unit` backs approvals with the protocol: an approval-required tool
   emits `ui_request { kind: "confirm" }` and blocks the turn until the matching
   `ui_response` arrives. `--serve` uses it unless `--yolo`.
+- Requests that arrive while an approval is pending (for example a
+  `get_state` from a polling UI) are queued and replayed once the approval is
+  answered; they are not consumed and dropped.
 - `get_state` returns the unit's resolved context (`system` + `transcript` in
   pi's message shape), so a UI service can render it without owning the session.
 - The memory benchmark's `pi-native --rpc` idle mode is separate from this

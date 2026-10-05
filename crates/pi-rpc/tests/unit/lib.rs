@@ -22,12 +22,16 @@ fn prompt_runs_the_agent_and_reports_events() {
     assert_eq!(
         events,
         vec![
+            Event::AgentStart,
+            Event::TurnStart,
             Event::AssistantText {
                 text: "hello".into()
             },
+            Event::TurnEnd,
             Event::Done {
                 stop_reason: Some("end_turn".into())
-            }
+            },
+            Event::AgentSettled,
         ]
     );
 }
@@ -250,4 +254,86 @@ fn serve_session_answers_model_thinking_and_bash() {
     assert!(text.contains("\"level\":\"xhigh\""), "{text}");
     assert!(text.contains("\"command\":\"bash\""), "{text}");
     assert!(text.contains("out-of-band"), "{text}");
+}
+
+#[test]
+fn out_of_band_bash_is_denied_without_approval() {
+    let mut agent = agent_with(vec![]);
+    let input = "{\"type\":\"bash\",\"command\":\"echo pwned\"}\n";
+    let buf = SessionBuf(std::rc::Rc::new(std::cell::RefCell::new(Vec::new())));
+    serve_unit(
+        &mut agent,
+        std::io::Cursor::new(input.as_bytes().to_vec()),
+        buf.clone(),
+    )
+    .expect("serves");
+    let text = String::from_utf8(buf.0.borrow().clone()).unwrap();
+    // The client was asked, then EOF denied the command.
+    assert!(text.contains("\"type\":\"ui_request\""), "{text}");
+    assert!(text.contains("\"command\":\"bash\""), "{text}");
+    assert!(text.contains("\"success\":false"), "{text}");
+    assert!(
+        !text.contains("\"output\""),
+        "bash ran without approval: {text}"
+    );
+}
+
+#[test]
+fn commands_during_approval_are_replayed_not_dropped() {
+    let mut agent = agent_with(vec![]);
+    agent.push_user("seed");
+    let input = concat!(
+        "{\"type\":\"bash\",\"command\":\"echo approved\"}\n",
+        "{\"type\":\"get_state\"}\n",
+        "{\"type\":\"ui_response\",\"id\":\"ui-0\",\"value\":\"allow\"}\n",
+    );
+    let buf = SessionBuf(std::rc::Rc::new(std::cell::RefCell::new(Vec::new())));
+    serve_unit(
+        &mut agent,
+        std::io::Cursor::new(input.as_bytes().to_vec()),
+        buf.clone(),
+    )
+    .expect("serves");
+    let text = String::from_utf8(buf.0.borrow().clone()).unwrap();
+    assert!(text.contains("approved"), "bash did not run: {text}");
+    // `get_state` arrived while the approval was pending; it must still be answered
+    // (a `state` event, emitted after the bash response).
+    assert!(text.contains("\"type\":\"state\""), "{text}");
+    let state_at = text.find("\"type\":\"state\"").expect("state event");
+    let bash_at = text.find("\"command\":\"bash\"").expect("bash response");
+    assert!(
+        state_at > bash_at,
+        "state must be replayed after approval: {text}"
+    );
+}
+
+#[test]
+fn export_html_rejects_a_path_outside_the_workspace() {
+    let mut agent = agent_with(vec![]);
+    let workspace = std::env::temp_dir().join(format!("pi-rpc-export-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&workspace);
+    std::fs::create_dir_all(&workspace).expect("workspace");
+    let outside =
+        std::env::temp_dir().join(format!("pi-rpc-export-escape-{}.html", std::process::id()));
+    let _ = std::fs::remove_file(&outside);
+
+    let input = format!(
+        "{{\"type\":\"export_html\",\"outputPath\":{:?}}}\n",
+        outside.to_string_lossy()
+    );
+    let buf = SessionBuf(std::rc::Rc::new(std::cell::RefCell::new(Vec::new())));
+    serve_unit_session(
+        &mut agent,
+        None,
+        &workspace.to_string_lossy(),
+        std::io::Cursor::new(input.into_bytes()),
+        buf.clone(),
+        |_| {},
+    )
+    .expect("serves");
+    let text = String::from_utf8(buf.0.borrow().clone()).unwrap();
+    assert!(text.contains("\"success\":false"), "{text}");
+    assert!(!outside.exists(), "export escaped the workspace");
+
+    let _ = std::fs::remove_dir_all(&workspace);
 }

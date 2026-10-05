@@ -17,7 +17,11 @@ use pi_agent::{
 };
 use pi_session::SessionFile;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+pub mod pi_events;
+
+pub use pi_events::{translate_all, PiEventAdapter};
 
 /// A protocol version, so clients can detect incompatible changes.
 pub const PROTOCOL_VERSION: u32 = 1;
@@ -136,15 +140,26 @@ pub enum Request {
 }
 
 /// An event emitted by a unit.
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Event {
     Ready {
         version: u32,
     },
+    /// pi-shaped lifecycle events (see `pi_events` for the adapter).
+    AgentStart,
+    TurnStart,
+    TurnEnd,
+    AgentSettled,
+    AssistantDelta {
+        text: String,
+    },
+    ThinkingDelta {
+        text: String,
+    },
     /// The reply to a command, using pi's envelope.
     Response {
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
         command: String,
         success: bool,
@@ -154,10 +169,12 @@ pub enum Event {
         text: String,
     },
     ToolStart {
+        tool_call_id: String,
         name: String,
         input: serde_json::Value,
     },
     ToolEnd {
+        tool_call_id: String,
         name: String,
         is_error: bool,
         content: String,
@@ -398,7 +415,15 @@ fn apply_command(
             command,
             exclude_from_context,
         } => {
-            let (output, exit_code) = run_shell(&command, cwd);
+            // Out-of-band commands take the same approval path as a tool call;
+            // otherwise anyone who can write to the protocol fd has a shell.
+            let approval = serde_json::json!({ "command": command });
+            if agent.approve("bash", &approval) == Approval::Deny {
+                return Some(failure(id, "bash", "bash: denied (no approval)"));
+            }
+            let result = pi_tools::shell::run_shell(&command, Path::new(cwd), None);
+            let output = result.output;
+            let exit_code = result.exit_code;
             if !exclude_from_context {
                 agent.push_user(format!("$ {command}\n{output}"));
                 session.persist(agent);
@@ -411,14 +436,24 @@ fn apply_command(
         }
         Request::AbortBash => Some(response(id, "abort_bash", serde_json::json!({}))),
         Request::ExportHtml { output_path } => {
-            let path = output_path.map(PathBuf::from).unwrap_or_else(|| {
-                session
-                    .path
-                    .as_ref()
-                    .and_then(|path| path.parent().map(PathBuf::from))
-                    .unwrap_or_else(|| PathBuf::from(cwd))
-                    .join("session.html")
-            });
+            let base = session
+                .path
+                .as_ref()
+                .and_then(|path| path.parent().map(PathBuf::from))
+                .unwrap_or_else(|| PathBuf::from(cwd));
+            let path = match output_path {
+                // An explicit path is an arbitrary file write unless jailed; keep
+                // it inside the session directory or the workspace.
+                Some(requested) => {
+                    let context = pi_tools::ToolContext::new(base.clone())
+                        .with_write_roots([PathBuf::from(cwd)]);
+                    match context.resolve_write(&requested) {
+                        Ok(path) => path,
+                        Err(error) => return Some(failure(id, "export_html", &error.to_string())),
+                    }
+                }
+                None => base.join("session.html"),
+            };
             match export_html(agent, &path) {
                 Ok(()) => Some(response(
                     id,
@@ -508,22 +543,6 @@ fn last_assistant_text(agent: &Agent) -> Option<String> {
         })
 }
 
-fn run_shell(command: &str, cwd: &str) -> (String, i32) {
-    match std::process::Command::new("sh")
-        .arg("-c")
-        .arg(command)
-        .current_dir(cwd)
-        .output()
-    {
-        Ok(output) => {
-            let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
-            text.push_str(&String::from_utf8_lossy(&output.stderr));
-            (text, output.status.code().unwrap_or(-1))
-        }
-        Err(error) => (error.to_string(), -1),
-    }
-}
-
 fn export_html(agent: &Agent, path: &std::path::Path) -> std::io::Result<()> {
     let mut body = String::from("<h1>pi-native session</h1>");
     for message in transcript_values(agent.messages()) {
@@ -544,13 +563,29 @@ fn escape_html(text: &str) -> String {
 
 fn from_agent_event(event: AgentEvent) -> Event {
     match event {
+        AgentEvent::AgentStart => Event::AgentStart,
+        AgentEvent::TurnStart => Event::TurnStart,
+        AgentEvent::TurnEnd => Event::TurnEnd,
+        AgentEvent::AgentSettled => Event::AgentSettled,
+        AgentEvent::AssistantDelta(text) => Event::AssistantDelta { text },
+        AgentEvent::ThinkingDelta(text) => Event::ThinkingDelta { text },
         AgentEvent::AssistantText(text) => Event::AssistantText { text },
-        AgentEvent::ToolStart { name, input } => Event::ToolStart { name, input },
+        AgentEvent::ToolStart {
+            tool_call_id,
+            name,
+            input,
+        } => Event::ToolStart {
+            tool_call_id,
+            name,
+            input,
+        },
         AgentEvent::ToolEnd {
+            tool_call_id,
             name,
             is_error,
             content,
         } => Event::ToolEnd {
+            tool_call_id,
             name,
             is_error,
             content,
@@ -888,6 +923,8 @@ fn build_tree(entries: &[serde_json::Value]) -> (Vec<serde_json::Value>, Option<
 struct SharedIo<R, W> {
     reader: std::cell::RefCell<R>,
     writer: std::cell::RefCell<W>,
+    /// Requests read while an approval was pending; replayed before more input.
+    pending: std::cell::RefCell<std::collections::VecDeque<(Option<String>, Request)>>,
 }
 
 impl<R: std::io::BufRead, W: std::io::Write> SharedIo<R, W> {
@@ -899,9 +936,21 @@ impl<R: std::io::BufRead, W: std::io::Write> SharedIo<R, W> {
         }
     }
 
+    /// Put requests read during an approval back, in order, so the serve loop
+    /// handles them instead of dropping them.
+    fn requeue_all(&self, items: Vec<(Option<String>, Request)>) {
+        let mut pending = self.pending.borrow_mut();
+        for item in items {
+            pending.push_back(item);
+        }
+    }
+
     /// The next valid request with its optional correlation id, or `None` at end
     /// of input. Invalid lines emit an `error` event and are skipped.
     fn next_request(&self) -> Option<(Option<String>, Request)> {
+        if let Some(item) = self.pending.borrow_mut().pop_front() {
+            return Some(item);
+        }
         loop {
             let mut line = String::new();
             match self.reader.borrow_mut().read_line(&mut line) {
@@ -1005,6 +1054,7 @@ pub fn serve_with<R: std::io::BufRead, W: std::io::Write, F: FnMut(&Agent)>(
     let io = std::rc::Rc::new(SharedIo {
         reader: std::cell::RefCell::new(reader),
         writer: std::cell::RefCell::new(writer),
+        pending: std::cell::RefCell::new(std::collections::VecDeque::new()),
     });
     let mut session = SessionState::empty();
     drive(agent, &io, &mut session, ".", after_turn);
@@ -1086,6 +1136,7 @@ fn serve_session_inner<
     let io = std::rc::Rc::new(SharedIo {
         reader: std::cell::RefCell::new(reader),
         writer: std::cell::RefCell::new(writer),
+        pending: std::cell::RefCell::new(std::collections::VecDeque::new()),
     });
     if approvals {
         agent.set_approver(std::rc::Rc::new(ProtocolApprover {
@@ -1114,13 +1165,15 @@ impl<R: std::io::BufRead, W: std::io::Write> Approver for ProtocolApprover<R, W>
             prompt: format!("Run {tool} with {input}?"),
             options: vec!["allow".to_string(), "deny".to_string()],
         });
-        while let Some((_, request)) = self.io.next_request() {
+        let mut deferred: Vec<(Option<String>, Request)> = Vec::new();
+        while let Some((request_id, request)) = self.io.next_request() {
             if let Request::UiResponse {
                 id: response_id,
                 value,
             } = request
             {
                 if response_id == id {
+                    self.io.requeue_all(deferred);
                     let text = value.as_str().map(str::to_ascii_lowercase);
                     let allow = value.as_bool().unwrap_or(false)
                         || matches!(text.as_deref(), Some("y" | "yes" | "allow" | "true"));
@@ -1130,8 +1183,18 @@ impl<R: std::io::BufRead, W: std::io::Write> Approver for ProtocolApprover<R, W>
                         Approval::Deny
                     };
                 }
+                deferred.push((
+                    request_id,
+                    Request::UiResponse {
+                        id: response_id,
+                        value,
+                    },
+                ));
+            } else {
+                deferred.push((request_id, request));
             }
         }
+        self.io.requeue_all(deferred);
         Approval::Deny
     }
 }
