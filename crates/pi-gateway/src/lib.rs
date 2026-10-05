@@ -639,10 +639,11 @@ fn reset_session(stream: &mut TcpStream, gateway: &Gateway, id: &str) {
     ) {
         return;
     }
-    let data = await_response(&subscription, "reset", |event| {
+    let data = await_response(&subscription, |event| {
         event.get("type").and_then(Value::as_str) == Some("response")
             && event.get("command").and_then(Value::as_str) == Some("reset")
-    });
+    })
+    .unwrap_or_else(|error| await_error(error, "reset"));
     write_json(stream, 200, &data);
 }
 
