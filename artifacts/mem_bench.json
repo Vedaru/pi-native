@@ -1,6 +1,6 @@
 {
   "schema": "pipelets.mem_bench.v1",
-  "generated_at": "2026-10-05T07:42:21.741681+00:00",
+  "generated_at": "2026-10-05T09:43:46.536156+00:00",
   "host": {
     "platform": "Linux-7.1.8-aw88399-x86_64-with-glibc2.43",
     "machine": "x86_64",
@@ -25,15 +25,15 @@
       "settle_seconds": 4.0,
       "sample_interval_seconds": 1.0,
       "samples_bytes": [
-        117547008,
-        117547008,
-        117551104
+        116535296,
+        116535296,
+        116535296
       ],
       "sample_count": 3,
-      "rss_bytes": 117547008,
-      "rss_min_bytes": 117547008,
-      "rss_max_bytes": 117551104,
-      "rss_spread_bytes": 4096
+      "rss_bytes": 116535296,
+      "rss_min_bytes": 116535296,
+      "rss_max_bytes": 116535296,
+      "rss_spread_bytes": 0
     },
     {
       "target": "pi-rust",
@@ -62,19 +62,19 @@
       "kind": "native",
       "command": "/home/vedaru/Projects/pi-native/target/release/pipelets --rpc --no-session",
       "binary": "/home/vedaru/Projects/pi-native/target/release/pipelets",
-      "binary_sha256": "59ca4fd578046edcecbeea9230e688440fbfdf8045b3ac159486f293ceb5c9fd",
+      "binary_sha256": "0be0b4b6628581c73bc4791c439ce2336723dc2785a8c0a65c1952cfd267b840",
       "taxonomy": "cold-idle",
       "settle_seconds": 4.0,
       "sample_interval_seconds": 1.0,
       "samples_bytes": [
-        4808704,
-        4808704,
-        4808704
+        4632576,
+        4632576,
+        4632576
       ],
       "sample_count": 3,
-      "rss_bytes": 4808704,
-      "rss_min_bytes": 4808704,
-      "rss_max_bytes": 4808704,
+      "rss_bytes": 4632576,
+      "rss_min_bytes": 4632576,
+      "rss_max_bytes": 4632576,
       "rss_spread_bytes": 0
     }
   ]

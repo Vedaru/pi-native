@@ -21,10 +21,10 @@ python3 scripts/swarm_stress.py --units 32 --mode idle
 
 | | pipelets | pi-node |
 | --- | --- | --- |
-| shipped runtime | one **8.4 MB** binary (3.6 MB tarball) | Node + `node_modules` |
-| cold-idle RSS (`--rpc`) | **4.3 MB** | 112.1 MB |
-| cold-idle RSS (`--gateway`) | **5.3 MB** | — |
-| ratio | — | **0.04×** (≈24× smaller) |
+| shipped runtime | one **8.4 MB** binary (3.5 MB tarball) | Node + `node_modules` |
+| cold-idle RSS (`--rpc`) | **4.3 MB** | 111.1 MB |
+| cold-idle RSS (`--gateway`) | **5.0 MB** | — |
+| ratio | — | **0.04×** (≈25× smaller) |
 | idle CPU (3 s) | **0.001 s** (no busy-wait) | — |
 
 A bare Rust `fn main` reports ~2.3 MB, mostly shared libc, so ~4.3 MB is close
@@ -44,11 +44,11 @@ memory and CPU. 20,000 calls each:
 
 | Tool | Wall | Peak RSS | CPU |
 | --- | --- | --- | --- |
-| `ls` | 0.03 s | 5.1 MB | 0.03 s |
-| `grep` | 0.32 s | 6.7 MB | 0.32 s |
-| `find` | 0.28 s | 6.4 MB | 0.28 s |
-| `edit` | 0.08 s | 5.2 MB | 0.08 s |
-| `read` (40 KB each, 819 MB total) | 0.39 s | 5.1 MB | 0.39 s |
+| `ls` | 0.03 s | 5.2 MB | 0.03 s |
+| `grep` | 0.32 s | 6.5 MB | 0.32 s |
+| `find` | 0.32 s | 6.3 MB | 0.32 s |
+| `edit` | 0.08 s | 5.4 MB | 0.08 s |
+| `read` (40 KB each, 819 MB total) | 0.38 s | 5.2 MB | 0.38 s |
 
 Tools stream with bounded buffers: a 200 MB file read peaks at ~5 MB. Without
 the window, 50,000 `ls` turns: **0.07 s / 5.1 MB**.
@@ -62,7 +62,7 @@ token-based compaction (pi's rule: compact when estimated tokens exceed
 | Workload | Compactions | Peak RSS | CPU |
 | --- | --- | --- | --- |
 | `ls` (tiny messages) | 5 | 8.8 MB | 0.04 s |
-| `read` (40 KB results) | 1,176 (~1 per 17 turns) | 6.1 MB | 0.41 s |
+| `read` (40 KB results) | 1,176 (~1 per 17 turns) | 6.1 MB | 0.40 s |
 
 The kept tail is capped at half the threshold, so compaction cannot churn (a
 misconfigured window/reserve once caused ~2 compactions per turn). Growth is
@@ -84,12 +84,12 @@ per-unit RSS (release build):
 
 | Swarm | Per unit | Total |
 | --- | --- | --- |
-| 8 idle (`--rpc`) | 4.4 MB | 35.3 MB |
-| 32 idle (`--rpc`) | 4.5 MB | 143.0 MB |
-| 8 busy (`read` sessions, 5k turns) | 6.2 MB | 49.5 MB |
+| 8 idle (`--rpc`) | 4.4 MB | 35.2 MB |
+| 32 idle (`--rpc`) | 4.4 MB | 141.7 MB |
+| 8 busy (`read` sessions, 5k turns) | 6.2 MB | 49.3 MB |
 
 Because the dynamic build shares libc pages, a swarm costs less than the
-per-unit sum suggests. An idle unit is ~4.5 MB, so a 32-agent swarm fits in
+per-unit sum suggests. An idle unit is ~4.4 MB, so a 32-agent swarm fits in
 ~143 MB — the same order as **one** pi-node process.
 
 ## Session store
