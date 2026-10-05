@@ -21,6 +21,27 @@ fn read_returns_file_contents() {
 }
 
 #[test]
+fn read_attaches_an_image() {
+    use base64::Engine as _;
+    let ctx = temp_ctx();
+    // A 4x4 PNG.
+    let png = base64::engine::general_purpose::STANDARD
+        .decode("iVBORw0KGgoAAAANSUhEUgAAAAQAAAAECAIAAAAmkwkpAAAAFElEQVR4nGPkEpFjgAEmBiSAmwMADKgARF46dO4AAAAASUVORK5CYII=")
+        .expect("decode png");
+    std::fs::write(ctx.cwd.join("a.png"), &png).expect("write");
+    let result = ReadTool.run(&serde_json::json!({ "path": "a.png" }), &ctx);
+    assert!(!result.is_error, "{}", result.content);
+    assert!(
+        result.content.starts_with("Read image file [image/png]"),
+        "{}",
+        result.content
+    );
+    assert_eq!(result.images.len(), 1);
+    assert_eq!(result.images[0].mime_type, "image/png");
+    assert!(!result.images[0].data.is_empty());
+}
+
+#[test]
 fn read_missing_file_is_an_error() {
     let ctx = temp_ctx();
     let result = ReadTool.run(&serde_json::json!({ "path": "nope.txt" }), &ctx);

@@ -609,12 +609,17 @@ impl Agent {
                     is_error: result.is_error,
                     content: result.content.clone(),
                 });
+                let mut content = vec![ContentPart::Text {
+                    text: result.content,
+                }];
+                content.extend(result.images.into_iter().map(|image| ContentPart::Image {
+                    data: image.data,
+                    mime_type: image.mime_type,
+                }));
                 self.push(TranscriptMessage::ToolResult {
                     tool_call_id: call.id.clone(),
                     tool_name: call.name.clone(),
-                    content: vec![ContentPart::Text {
-                        text: result.content,
-                    }],
+                    content,
                     is_error: result.is_error,
                 });
             }

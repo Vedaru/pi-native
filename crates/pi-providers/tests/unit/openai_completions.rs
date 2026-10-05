@@ -12,6 +12,7 @@ fn options() -> OpenAiCompletionsBuildOptions {
         max_tokens_field: MaxTokensField::MaxTokens,
         supports_developer_role: false,
         supports_strict_mode: true,
+        supports_image_input: true,
         requires_reasoning_content_on_assistant_messages: true,
         reasoning: true,
         thinking_format: ThinkingFormat::Deepseek,
@@ -95,6 +96,48 @@ fn matches_captured_pi_openai_completions_tool_use() {
     assert_eq!(
         actual, expected,
         "openai-completions tool-use differs from pi"
+    );
+}
+
+#[test]
+fn tool_result_image_becomes_a_followup_user_message() {
+    let value = build_openai_completions_params(
+        "m".into(),
+        "s",
+        &[],
+        &[TranscriptMessage::ToolResult {
+            tool_call_id: "call_1".into(),
+            tool_name: "read".into(),
+            content: vec![
+                ContentPart::Text {
+                    text: "Read image file [image/png]".into(),
+                },
+                ContentPart::Image {
+                    data: "AAAA".into(),
+                    mime_type: "image/png".into(),
+                },
+            ],
+            is_error: false,
+        }],
+        &options(),
+    );
+    let messages = value["messages"].as_array().expect("messages");
+    let tool = messages
+        .iter()
+        .find(|m| m["role"] == json!("tool"))
+        .expect("tool message");
+    assert_eq!(tool["content"], json!("Read image file [image/png]"));
+    let user = messages
+        .iter()
+        .find(|m| m["role"] == json!("user"))
+        .expect("user message");
+    assert_eq!(
+        user["content"][0]["text"],
+        json!("Attached image(s) from tool result:")
+    );
+    assert_eq!(
+        user["content"][1]["image_url"]["url"],
+        json!("data:image/png;base64,AAAA")
     );
 }
 

@@ -221,10 +221,20 @@ fn canonicalize_lenient(path: &Path) -> PathBuf {
     }
 }
 
+/// An image produced by a tool, attached to the result. Mirrors pi's image
+/// content block: base64 data plus its MIME type.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImageAttachment {
+    pub data: String,
+    pub mime_type: String,
+}
+
 /// A tool result.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ToolResult {
     pub content: String,
+    /// Images the tool produced (usually none); pi sends them as attachments.
+    pub images: Vec<ImageAttachment>,
     pub is_error: bool,
 }
 
@@ -232,6 +242,7 @@ impl ToolResult {
     pub fn ok(content: impl Into<String>) -> Self {
         Self {
             content: content.into(),
+            images: Vec::new(),
             is_error: false,
         }
     }
@@ -239,8 +250,18 @@ impl ToolResult {
     pub fn error(content: impl Into<String>) -> Self {
         Self {
             content: content.into(),
+            images: Vec::new(),
             is_error: true,
         }
+    }
+
+    /// Attach an image (base64 `data` and `mime_type`) to the result.
+    pub fn with_image(mut self, data: impl Into<String>, mime_type: impl Into<String>) -> Self {
+        self.images.push(ImageAttachment {
+            data: data.into(),
+            mime_type: mime_type.into(),
+        });
+        self
     }
 }
 
@@ -265,6 +286,47 @@ pub trait Tool {
             input_schema: self.input_schema(),
             strict: self.strict(),
         }
+    }
+}
+
+/// The inline image types pi accepts, sniffed from the file header (pi's
+/// `detectSupportedImageMimeTypeFromFile`).
+fn image_mime_type(header: &[u8]) -> Option<&'static str> {
+    if header.starts_with(&[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]) {
+        return Some("image/png");
+    }
+    if header.starts_with(&[0xff, 0xd8, 0xff]) {
+        return Some("image/jpeg");
+    }
+    if header.starts_with(b"GIF87a") || header.starts_with(b"GIF89a") {
+        return Some("image/gif");
+    }
+    if header.len() >= 12 && &header[0..4] == b"RIFF" && &header[8..12] == b"WEBP" {
+        return Some("image/webp");
+    }
+    None
+}
+
+/// Read an image file and return pi's `read` text note plus the resized image.
+///
+/// Mirrors pi's `read` image branch: `Read image file [<mime>]` followed by the
+/// `[Image: original WxH, displayed at wxh...]` note when it was scaled.
+fn read_image(mime_type: &str, bytes: &[u8]) -> ToolResult {
+    match pi_image::resize_image(bytes, &pi_image::ImageLimits::default()) {
+        Some(resized) => {
+            let mut note = format!("Read image file [{}]", resized.mime_type);
+            if resized.was_resized {
+                let scale = resized.original_width as f64 / resized.width as f64;
+                note.push_str(&format!(
+                    "\n[Image: original {}x{}, displayed at {}x{}. Multiply coordinates by {:.2} to map to original image.]",
+                    resized.original_width, resized.original_height, resized.width, resized.height, scale
+                ));
+            }
+            ToolResult::ok(note).with_image(resized.data_base64, resized.mime_type)
+        }
+        None => ToolResult::ok(format!(
+            "Read image file [{mime_type}]\n[Image omitted: could not be resized below the inline image size limit.]"
+        )),
     }
 }
 
@@ -304,6 +366,21 @@ impl Tool for ReadTool {
             Ok(path) => path,
             Err(error) => return ToolResult::error(format!("read: {error}")),
         };
+        // Sniff the header for a supported image before falling back to
+        // line-based text reading (pi's `read` does the same).
+        {
+            use std::io::Read as _;
+            let mut header = [0u8; 16];
+            if let Ok(mut probe) = std::fs::File::open(&resolved) {
+                let read = probe.read(&mut header).unwrap_or(0);
+                if let Some(mime) = image_mime_type(&header[..read]) {
+                    return match std::fs::read(&resolved) {
+                        Ok(bytes) => read_image(mime, &bytes),
+                        Err(error) => ToolResult::error(format!("read: {path}: {error}")),
+                    };
+                }
+            }
+        }
         // Stream line by line; never load the whole file.
         let file = match std::fs::File::open(&resolved) {
             Ok(file) => file,

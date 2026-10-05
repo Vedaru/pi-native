@@ -36,6 +36,8 @@ pub struct OpenAiCompletionsBuildOptions {
     pub max_tokens_field: MaxTokensField,
     pub supports_developer_role: bool,
     pub supports_strict_mode: bool,
+    /// Whether the model accepts image input; image tool results are attached.
+    pub supports_image_input: bool,
     /// DeepSeek-style compat: assistant messages carry `reasoning_content`.
     pub requires_reasoning_content_on_assistant_messages: bool,
     pub reasoning: bool,
@@ -195,6 +197,7 @@ fn convert_messages(
     instruction_role: &str,
     system_text: &str,
     requires_reasoning_content: bool,
+    supports_image_input: bool,
 ) -> Vec<Value> {
     let mut out = Vec::new();
     if !system_text.is_empty() {
@@ -263,11 +266,38 @@ fn convert_messages(
                     })
                     .collect::<Vec<_>>()
                     .join("\n");
+                let images: Vec<&ContentPart> = content
+                    .iter()
+                    .filter(|p| matches!(p, ContentPart::Image { .. }))
+                    .collect();
+                let tool_text = if !joined.is_empty() {
+                    joined
+                } else if !images.is_empty() {
+                    "(see attached image)".to_string()
+                } else {
+                    "(no tool output)".to_string()
+                };
                 out.push(json!({
                     "role": "tool",
                     "tool_call_id": tool_call_id,
-                    "content": joined,
+                    "content": tool_text,
                 }));
+                // The `tool` role cannot carry images, so pi sends them as a
+                // follow-up user message when the model accepts image input.
+                if !images.is_empty() && supports_image_input {
+                    let mut parts = vec![
+                        json!({ "type": "text", "text": "Attached image(s) from tool result:" }),
+                    ];
+                    for image in images {
+                        if let ContentPart::Image { data, mime_type } = image {
+                            parts.push(json!({
+                                "type": "image_url",
+                                "image_url": { "url": format!("data:{mime_type};base64,{data}") },
+                            }));
+                        }
+                    }
+                    out.push(json!({ "role": "user", "content": parts }));
+                }
             }
         }
     }
@@ -315,6 +345,7 @@ pub fn build_openai_completions_params(
             instruction_role,
             system_text,
             options.requires_reasoning_content_on_assistant_messages,
+            options.supports_image_input,
         )),
     );
     params.insert("stream".into(), json!(true));

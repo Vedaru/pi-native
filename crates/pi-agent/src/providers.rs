@@ -193,6 +193,7 @@ pub fn openai_completions_provider(
                 max_tokens_field: MaxTokensField::MaxTokens,
                 supports_developer_role: false,
                 supports_strict_mode: true,
+                supports_image_input: true,
                 requires_reasoning_content_on_assistant_messages: requires_reasoning,
                 reasoning: true,
                 thinking_format,

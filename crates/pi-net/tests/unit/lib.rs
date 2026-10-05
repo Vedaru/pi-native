@@ -42,6 +42,7 @@ fn completions_params() -> serde_json::Value {
             max_tokens_field: pi_providers::MaxTokensField::MaxTokens,
             supports_developer_role: false,
             supports_strict_mode: true,
+            supports_image_input: true,
             requires_reasoning_content_on_assistant_messages: true,
             reasoning: true,
             thinking_format: pi_providers::ThinkingFormat::Deepseek,
@@ -106,9 +107,9 @@ fn streams_openai_responses_sse_with_usage() {
             supports_long_cache_retention: true,
             supports_explicit_prompt_cache_mode: false,
             supports_strict_mode: true,
+            supports_image_input: true,
             supports_developer_role: true,
             reasoning: true,
-            supports_image_input: true,
             strict: false,
         },
     );

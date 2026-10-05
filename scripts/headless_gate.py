@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
 """Headless-worker dependency gate.
 
-A swarm unit is a headless worker: it prints, serves RPC, or drives the
-gateway, and it never draws a terminal. Projects that ship a TUI as just
-another mode still compile the TUI in; this one does not build it at all, and
-this gate keeps it that way. It fails if a UI-only crate - a terminal renderer,
-a clipboard, an image codec, a GUI toolkit - ever enters `pipelets`'s normal
-dependency tree.
+A swarm unit draws no terminal and needs no clipboard or GUI. It may decode
+images: the `read` tool attaches them to the model, which is agent input, not
+rendering.
 
 Names are matched exactly, not as substrings: `webpki-roots` is a TLS
 dependency, not the `webp` image codec, and this gate must not confuse them.
@@ -46,12 +43,9 @@ FORBIDDEN = frozenset(
         "copypasta",
         "cli-clipboard",
         "x11-clipboard",
-        # Image codecs / rendering
-        "image",
-        "imageproc",
-        "photon-rs",
+        # Terminal image renderers (display-only; image *decoding* is allowed,
+        # because `read` attaches images to the model)
         "viuer",
-        "imgref",
         "sixel",
         "kitty",
         # GUI toolkits / GPU
@@ -108,9 +102,9 @@ def main() -> int:
             file=sys.stderr,
         )
         print(
-            "  A headless swarm worker must not link a TUI, clipboard, or image "
-            "codec. Move the dependency to a UI crate that depends on core, "
-            "not into the worker.",
+            "  A headless swarm worker must not link a TUI, clipboard, or GUI. "
+            "Image decoding is allowed (agent input); rendering is not. Move a "
+            "display dependency to a UI crate that depends on core, not into the worker.",
             file=sys.stderr,
         )
         return 1

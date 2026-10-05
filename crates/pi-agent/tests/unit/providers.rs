@@ -96,6 +96,7 @@ fn thinking_level_is_the_only_thing_that_changes_the_request() {
                 max_tokens_field: MaxTokensField::MaxTokens,
                 supports_developer_role: false,
                 supports_strict_mode: true,
+                supports_image_input: true,
                 requires_reasoning_content_on_assistant_messages: true,
                 reasoning: true,
                 thinking_format: ThinkingFormat::Deepseek,

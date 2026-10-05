@@ -51,6 +51,7 @@ crates/pi-session/     pi JSONL session store
 crates/pi-providers/   request builders with pi's cache placement
 crates/pi-tools/       core tools (read, bash, edit, write, …)
 crates/pi-plugins/     embedded QuickJS + pi extension API bridge
+crates/pi-image/       native image decode/resize/encode for `read` attachments
 docs/                  guides and ADRs
 scripts/               benchmark, stress, parity, and memory gates
 ```
@@ -124,6 +125,7 @@ example extensions load through the host (84/87).
 | [gateway.md](docs/gateway.md) | HTTP/SSE routes, triggers, budgets |
 | [providers.md](docs/providers.md) | provider flags, prompt cache, wire parity |
 | [session-store.md](docs/session-store.md) | JSONL format, context building, compaction |
+| [images.md](docs/images.md) | native image pipeline (read attachments) |
 | [rpc-protocol.md](docs/rpc-protocol.md) | JSON-lines unit protocol |
 | [plugin-conformance.md](docs/plugin-conformance.md) | extension compatibility |
 | [scope.md](docs/scope.md) | in/out of scope and hard constraints |

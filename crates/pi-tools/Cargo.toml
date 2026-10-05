@@ -9,9 +9,13 @@ description = "Core coding-agent tools (read, bash, ls, ...)"
 [dependencies]
 serde_json = { workspace = true }
 pi-providers = { path = "../pi-providers" }
+pi-image = { path = "../pi-image" }
 ignore = "0.4"
 regex = "1"
 globset = "0.4"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[dev-dependencies]
+base64 = "0.22"
