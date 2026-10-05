@@ -36,11 +36,11 @@ fn wait_for(subscription: &Subscription, kind: &str, timeout: Duration) -> Optio
             return None;
         }
         match subscription.recv_timeout(remaining) {
-            Some(event) if event.get("type").and_then(Value::as_str) == Some(kind) => {
+            Ok(event) if event.get("type").and_then(Value::as_str) == Some(kind) => {
                 return Some(event)
             }
-            Some(_) => continue,
-            None => return None,
+            Ok(_) => continue,
+            Err(_) => return None,
         }
     }
 }

@@ -20,7 +20,7 @@
 //! unless `?format=pi` asks for pi's canonical stream through
 //! [`pi_rpc::PiEventAdapter`].
 
-use pi_host::{Host, HostError, Subscription};
+use pi_host::{Host, HostError, RecvError, Subscription};
 use pi_rpc::{Event, PiEventAdapter};
 use pi_triggers::{Episode, RunStore, Runner};
 use serde_json::{json, Value};
@@ -34,6 +34,8 @@ use std::time::Duration;
 const SSE_HEARTBEAT: Duration = Duration::from_secs(15);
 /// How long a state request waits for the unit to answer.
 const STATE_TIMEOUT: Duration = Duration::from_secs(5);
+/// Largest request body the gateway will buffer; larger requests get a 413.
+const MAX_BODY: usize = 1 << 20;
 
 /// Shared, thread-safe host plus the routing logic.
 pub struct Gateway {
@@ -84,6 +86,16 @@ impl Gateway {
         });
     }
 
+    /// Periodically suspend units idle for `idle`, releasing their agents.
+    pub fn spawn_idle_reaper(self: &Arc<Self>, interval: Duration, idle: Duration) {
+        let gateway = self.clone();
+        std::thread::spawn(move || loop {
+            std::thread::sleep(interval);
+            let now = time::OffsetDateTime::now_utc().unix_timestamp();
+            let _ = gateway.host().reap_idle(idle, now);
+        });
+    }
+
     fn host(&self) -> MutexGuard<'_, Host> {
         self.host.lock().unwrap_or_else(|error| error.into_inner())
     }
@@ -125,6 +137,15 @@ struct Request {
     body: Vec<u8>,
 }
 
+/// Why `read_request` stopped reading.
+enum ReadOutcome {
+    Request(Request),
+    /// The peer closed before sending a full request.
+    Closed,
+    /// `Content-Length` (or the header block) exceeded [`MAX_BODY`].
+    TooLarge,
+}
+
 impl Request {
     fn json(&self) -> Option<Value> {
         serde_json::from_slice(&self.body).ok()
@@ -135,7 +156,7 @@ fn find_header_end(buffer: &[u8]) -> Option<usize> {
     buffer.windows(4).position(|window| window == b"\r\n\r\n")
 }
 
-fn read_request(stream: &mut TcpStream) -> std::io::Result<Option<Request>> {
+fn read_request(stream: &mut TcpStream) -> std::io::Result<ReadOutcome> {
     let mut buffer = Vec::new();
     let mut chunk = [0u8; 8192];
     let header_end = loop {
@@ -144,11 +165,11 @@ fn read_request(stream: &mut TcpStream) -> std::io::Result<Option<Request>> {
         }
         let read = stream.read(&mut chunk)?;
         if read == 0 {
-            return Ok(None);
+            return Ok(ReadOutcome::Closed);
         }
         buffer.extend_from_slice(&chunk[..read]);
         if buffer.len() > 64 * 1024 {
-            return Ok(None);
+            return Ok(ReadOutcome::Closed);
         }
     };
     let head = String::from_utf8_lossy(&buffer[..header_end]).to_string();
@@ -169,6 +190,9 @@ fn read_request(stream: &mut TcpStream) -> std::io::Result<Option<Request>> {
             }
         }
     }
+    if content_length > MAX_BODY {
+        return Ok(ReadOutcome::TooLarge);
+    }
     let mut body = buffer[header_end + 4..].to_vec();
     while body.len() < content_length {
         let read = stream.read(&mut chunk)?;
@@ -178,7 +202,7 @@ fn read_request(stream: &mut TcpStream) -> std::io::Result<Option<Request>> {
         body.extend_from_slice(&chunk[..read]);
     }
     body.truncate(content_length);
-    Ok(Some(Request {
+    Ok(ReadOutcome::Request(Request {
         method,
         path,
         query,
@@ -193,6 +217,7 @@ fn write_headers(stream: &mut TcpStream, status: u16, content_type: &str, length
         202 => "Accepted",
         400 => "Bad Request",
         404 => "Not Found",
+        413 => "Payload Too Large",
         _ => "Error",
     };
     let head = format!(
@@ -216,8 +241,17 @@ fn status_for(error: &HostError) -> u16 {
 }
 
 fn handle_connection(mut stream: TcpStream, gateway: Arc<Gateway>) -> std::io::Result<()> {
-    let Some(request) = read_request(&mut stream)? else {
-        return Ok(());
+    let request = match read_request(&mut stream)? {
+        ReadOutcome::Request(request) => request,
+        ReadOutcome::Closed => return Ok(()),
+        ReadOutcome::TooLarge => {
+            write_json(
+                &mut stream,
+                413,
+                &json!({ "error": "request body too large" }),
+            );
+            return Ok(());
+        }
     };
     let segments: Vec<&str> = request.path.trim_matches('/').split('/').collect();
     match (request.method.as_str(), segments.as_slice()) {
@@ -376,15 +410,20 @@ fn await_response(
             return json!({ "error": format!("timed out waiting for {label}") });
         }
         match subscription.recv_timeout(remaining) {
-            Some(event) if predicate(&event) => {
+            Ok(event) if predicate(&event) => {
                 // A `state` event is the payload; a `response` carries it in `data`.
                 if event.get("type").and_then(Value::as_str) == Some("response") {
                     return event.get("data").cloned().unwrap_or(Value::Null);
                 }
                 return event;
             }
-            Some(_) => continue,
-            None => return json!({ "error": format!("unit closed before {label} arrived") }),
+            Ok(_) => continue,
+            Err(RecvError::Timeout) => {
+                return json!({ "error": format!("timed out waiting for {label}") })
+            }
+            Err(RecvError::Disconnected) => {
+                return json!({ "error": format!("unit closed before {label} arrived") })
+            }
         }
     }
 }
@@ -454,7 +493,7 @@ fn stream_events(
     }
     loop {
         match subscription.recv_timeout(SSE_HEARTBEAT) {
-            Some(event) => {
+            Ok(event) => {
                 let payloads = if pi_format {
                     translate(&mut adapter, &event)
                 } else {
@@ -473,12 +512,15 @@ fn stream_events(
                     return Ok(());
                 }
             }
-            None => {
+            Err(RecvError::Timeout) => {
                 if stream.write_all(b": keepalive\n\n").is_err() {
                     return Ok(());
                 }
                 let _ = stream.flush();
             }
+            // The unit was suspended or its subscriber lagged and was dropped:
+            // close the stream instead of heartbeating a dead unit forever.
+            Err(RecvError::Disconnected) => return Ok(()),
         }
     }
 }

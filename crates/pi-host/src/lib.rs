@@ -17,12 +17,16 @@ use serde_json::Value;
 use std::collections::{HashMap, VecDeque};
 use std::io::{BufReader, Read, Write};
 use std::path::PathBuf;
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// How many recent events a late subscriber can replay.
 pub const REPLAY_LIMIT: usize = 1024;
+
+/// How many events a live subscriber may lag behind before it is dropped.
+pub const SUBSCRIBER_QUEUE: usize = 256;
 
 #[derive(Debug)]
 pub enum HostError {
@@ -48,17 +52,34 @@ impl std::error::Error for HostError {}
 /// State shared between a unit's writer thread and its subscribers.
 #[derive(Default)]
 struct Shared {
-    subscribers: Mutex<Vec<Sender<Value>>>,
+    subscribers: Mutex<Vec<SyncSender<Value>>>,
     replay: Mutex<VecDeque<Value>>,
     /// Most recent event type and its unix-seconds timestamp, for the swarm view.
     last_event: Mutex<Option<String>>,
     last_event_at: Mutex<i64>,
     /// Session display name, cached against the session file's mtime.
     name_cache: Mutex<Option<(u64, Option<String>)>>,
+    /// Unix-seconds of the last command or event, used by the idle reaper.
+    last_activity: AtomicI64,
 }
 
 impl Shared {
+    fn touch(&self) {
+        self.last_activity.store(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_secs() as i64)
+                .unwrap_or(0),
+            Ordering::Relaxed,
+        );
+    }
+
+    fn idle_for(&self, now: i64) -> i64 {
+        now - self.last_activity.load(Ordering::Relaxed)
+    }
+
     fn publish(&self, event: Value) {
+        self.touch();
         if let Some(kind) = event.get("type").and_then(Value::as_str) {
             if let Ok(mut last) = self.last_event.lock() {
                 *last = Some(kind.to_string());
@@ -86,7 +107,9 @@ impl Shared {
             .subscribers
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        subscribers.retain(|sender| sender.send(event.clone()).is_ok());
+        // A full queue means the subscriber is not keeping up: drop it rather
+        // than buffering without bound. It can re-subscribe and replay.
+        subscribers.retain(|sender| sender.try_send(event.clone()).is_ok());
     }
 
     fn subscribe(&self) -> (Vec<Value>, Receiver<Value>) {
@@ -98,7 +121,7 @@ impl Shared {
             .subscribers
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = mpsc::sync_channel(SUBSCRIBER_QUEUE);
         subscribers.push(tx);
         (replay.iter().cloned().collect(), rx)
     }
@@ -227,13 +250,30 @@ pub struct Subscription {
     rx: Receiver<Value>,
 }
 
+/// Outcome of [`Subscription::recv_timeout`].
+#[derive(Debug)]
+pub enum RecvError {
+    /// No event arrived before the timeout elapsed; the unit is still alive.
+    Timeout,
+    /// The unit was suspended and dropped this subscriber (or the subscriber
+    /// lagged and was dropped); it will never produce another event.
+    Disconnected,
+}
+
 impl Subscription {
     /// Receive the next event, waiting up to `timeout`.
-    pub fn recv_timeout(&self, timeout: Duration) -> Option<Value> {
-        self.rx.recv_timeout(timeout).ok()
+    ///
+    /// A timeout and a disconnected unit are distinguished so callers (the SSE
+    /// loop in particular) can close instead of heartbeating a dead unit.
+    pub fn recv_timeout(&self, timeout: Duration) -> Result<Value, RecvError> {
+        match self.rx.recv_timeout(timeout) {
+            Ok(value) => Ok(value),
+            Err(mpsc::RecvTimeoutError::Timeout) => Err(RecvError::Timeout),
+            Err(mpsc::RecvTimeoutError::Disconnected) => Err(RecvError::Disconnected),
+        }
     }
 
-    /// Receive without blocking.
+    /// Receive without blocking. `None` means no event is ready *right now*.
     pub fn try_recv(&self) -> Option<Value> {
         self.rx.try_recv().ok()
     }
@@ -264,6 +304,7 @@ impl Unit {
             let _ =
                 pi_rpc::serve_session(&mut agent, Some(path), &unit_cwd, reader, writer, |_| {});
         });
+        shared.touch();
         Self {
             session_path,
             cwd,
@@ -275,6 +316,7 @@ impl Unit {
     }
 
     fn send(&mut self, command: &Value) -> Result<(), HostError> {
+        self.shared.touch();
         if self.commands.is_none() {
             self.wake();
         }
@@ -292,6 +334,7 @@ impl Unit {
         if self.commands.is_some() {
             return;
         }
+        self.shared.touch();
         let (tx, rx) = mpsc::channel::<Vec<u8>>();
         let writer = ChannelWriter::new(self.shared.clone());
         let path = self.session_path.clone();
@@ -412,6 +455,29 @@ impl Host {
             .get(session_id)
             .map(Unit::is_running)
             .unwrap_or(false)
+    }
+
+    /// Suspend every running unit that has been idle for at least `idle`.
+    ///
+    /// A unit is idle when it has no live subscribers and no command or event
+    /// since `now - idle`. Suspending drops the agent (the session file is the
+    /// durable state); a later `send` wakes it. Returns the suspended ids.
+    pub fn reap_idle(&mut self, idle: Duration, now: i64) -> Vec<String> {
+        let idle_secs = idle.as_secs() as i64;
+        let victims: Vec<String> = self
+            .units
+            .iter()
+            .filter(|(_, unit)| unit.is_running())
+            .filter(|(_, unit)| unit.shared.subscriber_count() == 0)
+            .filter(|(_, unit)| unit.shared.idle_for(now) >= idle_secs)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in &victims {
+            if let Some(unit) = self.units.get_mut(id) {
+                unit.suspend();
+            }
+        }
+        victims
     }
 
     pub fn session_ids(&self) -> Vec<String> {

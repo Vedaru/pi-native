@@ -64,6 +64,9 @@ struct Cli {
     /// How often the trigger loop wakes, in seconds.
     #[arg(long, default_value_t = 1)]
     trigger_interval: u64,
+    /// Suspend a gateway unit after this many idle seconds; 0 disables (default 900).
+    #[arg(long, default_value_t = 900)]
+    idle_timeout: u64,
     /// Non-interactive: run one prompt through the agent and print the result.
     #[arg(short = 'p', long = "print")]
     print: Option<String>,
@@ -220,6 +223,7 @@ fn main() {
             cli.triggers.as_deref(),
             cli.trigger_runs.as_deref(),
             cli.trigger_interval,
+            cli.idle_timeout,
         );
         return;
     }
@@ -785,6 +789,7 @@ fn run_gateway(
     triggers: Option<&std::path::Path>,
     trigger_runs: Option<&std::path::Path>,
     trigger_interval: u64,
+    idle_timeout: u64,
 ) {
     let cwd = std::env::current_dir().unwrap_or_default();
     let extensions = extensions.to_vec();
@@ -835,6 +840,12 @@ fn run_gateway(
     };
     if triggers.is_some() {
         gateway.spawn_trigger_loop(std::time::Duration::from_secs(trigger_interval.max(1)));
+    }
+    if idle_timeout > 0 {
+        gateway.spawn_idle_reaper(
+            std::time::Duration::from_secs(30),
+            std::time::Duration::from_secs(idle_timeout),
+        );
     }
     eprintln!("pi-native gateway listening on http://{addr}");
     pi_gateway::serve(listener, gateway);
