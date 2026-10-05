@@ -37,6 +37,20 @@ fn scales_down_to_the_dimension_limit() {
 }
 
 #[test]
+fn resizes_a_large_image_below_the_limits() {
+    // 3000x2500 exceeds both dimensions; the engine must bring it under
+    // 2000x2000 with a bounded working set (fast_image_resize is row-streamed).
+    let input = png(3000, 2500);
+    let result = resize_image(&input, &ImageLimits::default()).expect("resizes");
+    assert!(result.was_resized);
+    assert!(result.width <= 2000 && result.height <= 2000);
+    assert_eq!(
+        (result.original_width, result.original_height),
+        (3000, 2500)
+    );
+}
+
+#[test]
 fn honors_the_byte_limit() {
     let input = png(800, 800);
     let limits = ImageLimits {

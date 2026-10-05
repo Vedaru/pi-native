@@ -21,13 +21,13 @@ python3 scripts/swarm_stress.py --units 32 --mode idle
 
 | | pipelets | pi-node |
 | --- | --- | --- |
-| shipped runtime | one **8.4 MB** binary (3.5 MB tarball) | Node + `node_modules` |
-| cold-idle RSS (`--rpc`) | **4.3 MB** | 111.1 MB |
-| cold-idle RSS (`--gateway`) | **5.0 MB** | — |
+| shipped runtime | one **11.9 MB** binary (4.6 MB tarball) | Node + `node_modules` |
+| cold-idle RSS (`--rpc`) | **4.6 MB** | 111.3 MB |
+| cold-idle RSS (`--gateway`) | **5.1 MB** | — |
 | ratio | — | **0.04×** (≈25× smaller) |
 | idle CPU (3 s) | **0.001 s** (no busy-wait) | — |
 
-A bare Rust `fn main` reports ~2.3 MB, mostly shared libc, so ~4.3 MB is close
+A bare Rust `fn main` reports ~2.3 MB, mostly shared libc, so ~4.6 MB is close
 to the floor for a process that has loaded the agent loop, tools, RPC, and the
 plugin host. A static build idles lower (~3.3 MB) but stops sharing libc pages
 across a swarm, so the dynamic build is kept.
@@ -91,6 +91,25 @@ per-unit RSS (release build):
 Because the dynamic build shares libc pages, a swarm costs less than the
 per-unit sum suggests. An idle unit is ~4.4 MB, so a 32-agent swarm fits in
 ~143 MB — the same order as **one** pi-node process.
+
+## Images (`read` attachments)
+
+An image read decodes and resizes it with `fast_image_resize` (SIMD,
+row-streamed), so peak memory is independent of the source size, then encodes
+PNG/JPEG under the inline limit. `--stress-tool image` decodes and resizes a
+2100x2100 PNG per call:
+
+| | Value |
+| --- | --- |
+| 50 resizes | 1.15 s, **43 MB** peak, 1.15 s CPU |
+| one 2100x2100 -> 2000x2000 | ~23 ms |
+| one 9000x9000 -> 2000x2000 | ~190 ms, still **43 MB** peak |
+
+The engine replaced `image`'s own Lanczos3, which built a full
+`source_width x target_height` RGBA-f32 transient (288 MB for a 9000x9000
+input): 50 resizes went from **6.15 s / 94 MB to 1.15 s / 43 MB**. There is no
+size refusal — like pi, a huge image is resized, and the working set stays flat.
+CI gates it with `stress_gate.py --tools image --max-mb 80 --max-cpu 5`.
 
 ## Session store
 

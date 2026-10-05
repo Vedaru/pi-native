@@ -10,3 +10,4 @@ description = "Native image resize/encode pipeline (replaces photon WASM)"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
 base64 = "0.22"
 kamadak-exif = "0.6"
+fast_image_resize = { version = "6", features = ["image"] }

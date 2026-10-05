@@ -128,7 +128,7 @@ struct Cli {
     /// the tool directly.
     #[arg(long)]
     stress_session: bool,
-    /// Tool used by --stress: ls (default), grep, find, edit, or read.
+    /// Tool used by --stress: ls (default), grep, find, edit, read, or image.
     #[arg(long, default_value = "ls")]
     stress_tool: String,
     /// Context byte budget in MB for --stress; 0 disables (compaction is the bound).
@@ -382,6 +382,10 @@ fn stress_workspace(tool: &str) -> std::path::PathBuf {
     if tool == "read" {
         let _ = std::fs::write(dir.join("big.txt"), "x".repeat(40 * 1024));
     }
+    if tool == "image" {
+        // Larger than the inline limit, so every call decodes and resizes.
+        let _ = std::fs::write(dir.join("image.png"), pi_image::solid_png(2100, 2100));
+    }
     dir
 }
 
@@ -390,6 +394,7 @@ fn stress_args(tool: &str, index: usize) -> serde_json::Value {
         "grep" => serde_json::json!({ "pattern": "needle" }),
         "find" => serde_json::json!({ "pattern": "*.txt" }),
         "read" => serde_json::json!({ "path": "big.txt" }),
+        "image" => serde_json::json!({ "path": "image.png" }),
         "edit" => {
             // Alternate A<->B so every edit targets unique text.
             let (old, new) = if index.is_multiple_of(2) {
@@ -409,7 +414,9 @@ fn run_stress_tool(turns: usize, tool: &str) {
     let dir = stress_workspace(tool);
     let ctx = ToolContext::new(&dir);
     let tools = all_tools();
-    let Some(selected) = tools.iter().find(|candidate| candidate.name() == tool) else {
+    // `image` exercises the `read` tool's image decode/resize path.
+    let tool_name = if tool == "image" { "read" } else { tool };
+    let Some(selected) = tools.iter().find(|candidate| candidate.name() == tool_name) else {
         eprintln!("pipelets --stress: unknown tool `{tool}`");
         std::process::exit(2);
     };

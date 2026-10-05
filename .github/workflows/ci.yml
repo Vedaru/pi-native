@@ -71,6 +71,8 @@ jobs:
         run: python3 scripts/stress_gate.py --binary target/release/pipelets --turns 20000 --tools ls grep find edit read --max-mb 100 --max-cpu 5
       - name: Pressure gate (session/compaction)
         run: python3 scripts/stress_gate.py --binary target/release/pipelets --turns 20000 --tools read --max-mb 100 --max-cpu 5 --session
+      - name: Pressure gate (image decode/resize)
+        run: python3 scripts/stress_gate.py --binary target/release/pipelets --turns 50 --tools image --max-mb 80 --max-cpu 5 --skip-idle
       - name: Swarm gate
         run: |
           python3 scripts/swarm_stress.py --binary target/release/pipelets --units 8 --mode idle --max-total-mb 100

@@ -14,6 +14,7 @@ path = "src/main.rs"
 pi-cache = { path = "../pi-cache" }
 pi-agent = { path = "../pi-agent" }
 pi-tools = { path = "../pi-tools" }
+pi-image = { path = "../pi-image" }
 pi-rpc = { path = "../pi-rpc" }
 pi-host = { path = "../pi-host" }
 pi-gateway = { path = "../pi-gateway" }

@@ -1,6 +1,8 @@
 # Image pipeline (`pi-image`)
 
-Native decode/orient/resize/encode, replacing pi's photon WASM. It matches pi's
+Native decode/orient/resize/encode, replacing pi's photon WASM. Resizing
+uses `fast_image_resize` (SIMD, row-streamed), so peak memory is independent
+of the source size. It matches pi's
 strategy: keep the original if within limits, otherwise fit to `maxWidth` /
 `maxHeight`, then return the first encoding under `maxBytes` in pi's order (PNG,
 then JPEG at the configured quality and 85/70/55/40), shrinking by 25% per
