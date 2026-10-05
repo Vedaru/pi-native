@@ -21,13 +21,13 @@ python3 scripts/swarm_stress.py --units 32 --mode idle
 
 | | pipelets | pi-node |
 | --- | --- | --- |
-| shipped runtime | one **8.6 MB** binary (3.6 MB tarball) | Node + `node_modules` |
-| cold-idle RSS (`--rpc`) | **4.6 MB** | 112.1 MB |
+| shipped runtime | one **8.4 MB** binary (3.6 MB tarball) | Node + `node_modules` |
+| cold-idle RSS (`--rpc`) | **4.3 MB** | 112.1 MB |
 | cold-idle RSS (`--gateway`) | **5.3 MB** | — |
 | ratio | — | **0.04×** (≈24× smaller) |
 | idle CPU (3 s) | **0.001 s** (no busy-wait) | — |
 
-A bare Rust `fn main` reports ~2.3 MB, mostly shared libc, so ~4.6 MB is close
+A bare Rust `fn main` reports ~2.3 MB, mostly shared libc, so ~4.3 MB is close
 to the floor for a process that has loaded the agent loop, tools, RPC, and the
 plugin host. A static build idles lower (~3.3 MB) but stops sharing libc pages
 across a swarm, so the dynamic build is kept.
@@ -115,5 +115,5 @@ strip = true
 ```
 
 Fat LTO + `opt-level=2` measured smaller and not slower than thin/3 (binary
-~8.6 MB, idle 4.6 MB). CI's `memory-gate` job installs pi-node and the reference
+~8.4 MB, idle 4.3 MB). CI's `memory-gate` job installs pi-node and the reference
 Rust port and re-runs `scripts/mem_gate.py` on every change.

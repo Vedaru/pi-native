@@ -729,7 +729,6 @@ SCOPE_HINTS = (
     (r"pi-host|host::|Host::", "crates/pi-host"),
     (r"pi-rpc|rpc\b", "crates/pi-rpc"),
     (r"pi-agent", "crates/pi-agent"),
-    (r"pi-tui", "crates/pi-tui"),
     (r"pi-cli", "crates/pi-cli"),
     (r"pi-plugins|plugin", "crates/pi-plugins"),
     (r"pi-providers|provider", "crates/pi-providers"),

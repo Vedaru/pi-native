@@ -9,7 +9,7 @@ the HTTP+SSE gateway; a conductor drives many of them at once.
 
 - **Bare core.** The agent loop, tools, session store, provider transport, and
   plugin host — and nothing else. No editor, no cloud, no per-user daemon.
-- **Low memory.** ~4.6 MB idle in `--rpc`, ~5.3 MB serving a unit; bounded I/O,
+- **Low memory.** ~4.3 MB idle in `--rpc`, ~5.3 MB serving a unit; bounded I/O,
   token-based compaction, and a windowed transcript keep long sessions flat.
 - **Low CPU.** Idle costs ~0.001 s of CPU per 3 s (no busy-wait); tools stream
   bounded buffers and a 20k-call tool run stays under a second of CPU.
@@ -27,8 +27,8 @@ Measured 2026-10-05 (release build, x86_64; see [performance](docs/performance.m
 
 | | pipelets | pi-node |
 | --- | --- | --- |
-| shipped runtime | one **8.6 MB** binary | Node + `node_modules` |
-| idle RSS (`--rpc`) | **4.6 MB** | 112.1 MB |
+| shipped runtime | one **8.4 MB** binary | Node + `node_modules` |
+| idle RSS (`--rpc`) | **4.3 MB** | 112.1 MB |
 | idle RSS (`--gateway`) | **5.3 MB** | — |
 | idle CPU | **~0.001 s / 3 s** | — |
 
@@ -51,7 +51,6 @@ crates/pi-session/     pi JSONL session store
 crates/pi-providers/   request builders with pi's cache placement
 crates/pi-tools/       core tools (read, bash, edit, write, …)
 crates/pi-plugins/     embedded QuickJS + pi extension API bridge
-crates/pi-tui/         native TUI renderer core
 docs/                  guides and ADRs
 scripts/               benchmark, stress, parity, and swarm harnesses
 ```
@@ -81,9 +80,6 @@ OPENAI_API_KEY=… pipelets \
 
 # a unit: protocol on stdio
 pipelets --serve --provider openai-completions --base-url … --model …
-
-# drive a local unit from the terminal
-pipelets --client
 ```
 
 Sessions persist in pi's layout so pi and pi-web can list and resume them

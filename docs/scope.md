@@ -20,7 +20,7 @@ scope.
 | Surface | Notes |
 | --- | --- |
 | Tools: `read`, `bash`, `edit`, `write`, `grep`, `find`, `ls` | plus powershell on Windows |
-| Modes: interactive TUI, print, JSON, RPC | |
+| Modes: print, JSON, RPC (headless; no TUI) | |
 | Sessions: JSONL with branching; context building; compaction | `pi-session` |
 | Providers and streaming | OpenAI Responses/Completions — `pi-providers`, `pi-net` |
 | Extensions, skills, prompt templates, themes, packages | the plugin wrapper (`pi-plugins`) |
@@ -65,11 +65,11 @@ are not part of the shipped binary.
 | Issue | Core surface |
 | --- | --- |
 | VED-302/316/317 | memory benchmark |
-| VED-303/319 | architecture decisions (host, TUI) |
+| VED-303/319 | architecture decisions (host; TUI dropped) |
 | VED-304 | plugin wrapper (extensions) |
 | VED-305 | providers and streaming |
 | VED-306 | sessions and context |
-| VED-307 | TUI (native renderer + JS component bridge) |
+| VED-307 | TUI — dropped; a swarm unit is headless |
 | VED-308 | images |
 | VED-309 | syntax highlighting |
 | VED-310 | delta / replicated state |

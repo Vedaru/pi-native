@@ -17,7 +17,7 @@ This is **not a full port of pi**. Plugins/extensions are explicitly out of
 scope for rewriting:
 
 - Rewrite only the memory-heavy **core** in Rust (providers/HTTP, cache, SSE,
-session/context, TUI render hot paths).
+session/context).
 - Keep a **JS plugin wrapper** so existing pi plugins load and run unchanged.
 - The wrapper is an embedded JS runtime (`rquickjs`) with `swc` transpilation,
 exposing a hostcall API that mirrors pi's extension API.
@@ -47,7 +47,8 @@ A reference native port (`Dicklesworthstone/pi_agent_rust`) was measured at
    capability policy per request.
 4. **Native providers and HTTP.** SSE streaming implemented natively (no
    `undici`, no provider SDKs).
-5. **Native TUI** via `crossterm` (plus a component layer we control).
+5. **Headless only.** A unit prints, serves RPC, or drives the gateway; there is
+   no bundled TUI (ADR 0002, superseded by [ADR 0005](0005-drop-tui.md)).
 6. **Optional `wasmtime`** behind a feature flag, only if a WebAssembly
    polyfill is needed for extensions that require it.
 
@@ -134,7 +135,7 @@ the shim is extended.
 - Transpilation and module loading must match enough of `jiti`'s behavior for
   real extensions to load.
 - Runtime selection is by entrypoint type (JS/TS vs native descriptor).
-- Memory budget: idle headless <= 25 MB; steady-state TUI <= 60 MB.
+- Memory budget: idle headless <= 25 MB.
 
 ## Reversibility
 

@@ -39,6 +39,7 @@ FORBIDDEN = frozenset(
         "pancurses",
         "cursive",
         "tui-input",
+        "pi-tui",
         # Clipboards
         "arboard",
         "clipboard",
