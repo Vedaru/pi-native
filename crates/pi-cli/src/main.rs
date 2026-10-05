@@ -55,6 +55,9 @@ struct Cli {
     /// Bind address for `--gateway`.
     #[arg(long, default_value = "127.0.0.1:30142")]
     gateway_addr: String,
+    /// Require client approval before bash/write/edit. Off by default (matches pi).
+    #[arg(long)]
+    confirm_tools: bool,
     /// Load trigger definitions from a JSON array file (requires `--gateway`).
     #[arg(long)]
     triggers: Option<PathBuf>,
@@ -217,6 +220,7 @@ fn main() {
             &cli.extensions,
             &cli.extension_allow,
             &cli.gateway_addr,
+            cli.confirm_tools,
             cli.triggers.as_deref(),
             cli.trigger_runs.as_deref(),
             cli.trigger_interval,
@@ -816,6 +820,7 @@ fn run_gateway(
     extensions: &[PathBuf],
     extension_allow: &[String],
     addr: &str,
+    confirm_tools: bool,
     triggers: Option<&std::path::Path>,
     trigger_runs: Option<&std::path::Path>,
     trigger_interval: u64,
@@ -828,7 +833,7 @@ fn run_gateway(
         let system = system_prompt_for(path);
         resolve_agent(
             &config,
-            false,
+            !confirm_tools,
             false,
             context_window,
             &system,
@@ -838,6 +843,12 @@ fn run_gateway(
         )
     };
     let host = pi_host::Host::new(cwd.to_string_lossy().to_string(), factory);
+    // pi has no per-tool approval; only ask when `--confirm-tools` opts in.
+    let host = if confirm_tools {
+        host
+    } else {
+        host.without_approvals()
+    };
     let listener = match std::net::TcpListener::bind(addr) {
         Ok(listener) => listener,
         Err(error) => {

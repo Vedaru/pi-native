@@ -153,6 +153,10 @@ By default the SSE stream carries the native event envelope; add `?format=pi`
 to receive pi's canonical event stream (`agent_start`, `message_update`,
 `tool_execution_*`, `agent_settled`) through `pi_rpc::PiEventAdapter`.
 
+Units run tools without asking, matching pi. Pass `--confirm-tools` to route
+`bash`/`write`/`edit` (and approval-required extension tools) through a client
+`ui_request`/`ui_response` dialog instead.
+
 ### Triggers
 
 `--triggers <file>` (with `--gateway`) fires scheduled prompts into long-lived
