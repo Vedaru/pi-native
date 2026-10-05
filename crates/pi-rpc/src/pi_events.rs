@@ -23,6 +23,9 @@ pub struct PiEventAdapter {
     saw_delta: bool,
     text: String,
     thinking: String,
+    /// Content index of the current text/thinking block (stable across deltas).
+    text_index: usize,
+    thinking_index: usize,
     tool_calls: Vec<(String, String, Value)>,
     next_content_index: usize,
     last_usage: Option<Value>,
@@ -44,6 +47,8 @@ impl PiEventAdapter {
             saw_delta: false,
             text: String::new(),
             thinking: String::new(),
+            text_index: 0,
+            thinking_index: 0,
             tool_calls: Vec::new(),
             next_content_index: 0,
             last_usage: None,
@@ -62,6 +67,8 @@ impl PiEventAdapter {
         self.saw_delta = false;
         self.text.clear();
         self.thinking.clear();
+        self.text_index = 0;
+        self.thinking_index = 0;
         self.tool_calls.clear();
         self.next_content_index = 0;
         out.push(json!({
@@ -105,13 +112,13 @@ impl PiEventAdapter {
             }
             Event::AssistantDelta { text } => {
                 self.begin_message(&mut out);
-                let index = self.next_content_index;
                 if !self.text_started {
                     self.text_started = true;
+                    self.text_index = self.next_content_index;
                     self.next_content_index += 1;
                     out.push(json!({
                         "type": "message_update",
-                        "assistantMessageEvent": { "type": "text_start", "contentIndex": index }
+                        "assistantMessageEvent": { "type": "text_start", "contentIndex": self.text_index }
                     }));
                 }
                 self.text.push_str(text);
@@ -120,20 +127,20 @@ impl PiEventAdapter {
                     "type": "message_update",
                     "assistantMessageEvent": {
                         "type": "text_delta",
-                        "contentIndex": index,
+                        "contentIndex": self.text_index,
                         "delta": text,
                     }
                 }));
             }
             Event::ThinkingDelta { text } => {
                 self.begin_message(&mut out);
-                let index = self.next_content_index;
                 if !self.thinking_started {
                     self.thinking_started = true;
+                    self.thinking_index = self.next_content_index;
                     self.next_content_index += 1;
                     out.push(json!({
                         "type": "message_update",
-                        "assistantMessageEvent": { "type": "thinking_start", "contentIndex": index }
+                        "assistantMessageEvent": { "type": "thinking_start", "contentIndex": self.thinking_index }
                     }));
                 }
                 self.thinking.push_str(text);
@@ -141,7 +148,7 @@ impl PiEventAdapter {
                     "type": "message_update",
                     "assistantMessageEvent": {
                         "type": "thinking_delta",
-                        "contentIndex": index,
+                        "contentIndex": self.thinking_index,
                         "delta": text,
                     }
                 }));
@@ -153,13 +160,13 @@ impl PiEventAdapter {
                     self.text = text.clone();
                 } else {
                     self.begin_message(&mut out);
-                    let index = self.next_content_index;
                     if !self.text_started {
                         self.text_started = true;
+                        self.text_index = self.next_content_index;
                         self.next_content_index += 1;
                         out.push(json!({
                             "type": "message_update",
-                            "assistantMessageEvent": { "type": "text_start", "contentIndex": index }
+                            "assistantMessageEvent": { "type": "text_start", "contentIndex": self.text_index }
                         }));
                     }
                     self.text = text.clone();
@@ -167,7 +174,7 @@ impl PiEventAdapter {
                         "type": "message_update",
                         "assistantMessageEvent": {
                             "type": "text_delta",
-                            "contentIndex": index,
+                            "contentIndex": self.text_index,
                             "delta": text,
                         }
                     }));
@@ -325,6 +332,9 @@ mod tests {
         assert_eq!(deltas.len(), 2, "{events:?}");
         assert_eq!(deltas[0]["assistantMessageEvent"]["delta"], json!("Hel"));
         assert_eq!(deltas[1]["assistantMessageEvent"]["delta"], json!("lo"));
+        // Deltas of one text block share its content index.
+        assert_eq!(deltas[0]["assistantMessageEvent"]["contentIndex"], json!(0));
+        assert_eq!(deltas[1]["assistantMessageEvent"]["contentIndex"], json!(0));
         let message_end = events
             .iter()
             .find(|event| event["type"] == json!("message_end"))
