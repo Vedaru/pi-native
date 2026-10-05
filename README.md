@@ -27,7 +27,7 @@ Measured 2026-10-05 (release build, x86_64; see [performance](docs/performance.m
 
 | | pipelets | pi-node |
 | --- | --- | --- |
-| shipped runtime | one **12.1 MB** binary | Node + `node_modules` |
+| shipped runtime | one **12.4 MB** binary | Node + `node_modules` |
 | idle RSS (`--rpc`) | **4.4 MB** | 111.3 MB |
 | idle RSS (`--gateway`) | **5.0 MB** | — |
 | idle CPU | **~0.001 s / 3 s** | — |

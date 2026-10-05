@@ -21,7 +21,7 @@ python3 scripts/swarm_stress.py --units 32 --mode idle
 
 | | pipelets | pi-node |
 | --- | --- | --- |
-| shipped runtime | one **12.1 MB** binary (4.6 MB tarball) | Node + `node_modules` |
+| shipped runtime | one **12.4 MB** binary (4.6 MB tarball) | Node + `node_modules` |
 | cold-idle RSS (`--rpc`) | **4.4 MB** | 111.3 MB |
 | cold-idle RSS (`--gateway`) | **5.0 MB** | — |
 | ratio | — | **0.04×** (≈25× smaller) |
