@@ -371,3 +371,132 @@ fn extension_policy_jails_granted_reads_to_the_workspace() {
     let _ = std::fs::remove_dir_all(&root);
     let _ = std::fs::remove_file(&outside);
 }
+
+#[test]
+fn escaping_write_is_a_hard_error_and_records_a_denial() {
+    let root = std::env::temp_dir().join(format!("pi-plugin-write-root-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("root");
+    let outside =
+        std::env::temp_dir().join(format!("pi-plugin-write-outside-{}.", std::process::id()));
+
+    let host = PluginHost::new(PluginPolicy::for_extension(&root).allow(Capability::Write));
+    let escaped = host.run(&format!(
+        r#"import fs from "node:fs"; fs.writeFileSync({:?}, "pwned");"#,
+        outside.to_string_lossy()
+    ));
+    // A silent no-op is not acceptable for a mutating call: the escape must
+    // fail the run rather than return as if the write succeeded. At module
+    // evaluation the recorded denial surfaces as `Denied`; in synchronous
+    // tool execution it surfaces as `Engine`.
+    match escaped {
+        Err(PluginError::Denied { capability, .. }) => {
+            assert_eq!(capability, Capability::Write);
+        }
+        Err(PluginError::Engine(message)) => {
+            assert!(message.contains("escapes"), "unexpected message: {message}");
+        }
+        other => panic!("expected an escaping-write failure, got {other:?}"),
+    }
+    assert!(!outside.exists(), "the escaping write must not happen");
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn escaping_write_in_tool_execution_is_a_hard_error() {
+    let root = std::env::temp_dir().join(format!("pi-plugin-tool-root-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("root");
+    let outside =
+        std::env::temp_dir().join(format!("pi-plugin-tool-outside-{}.", std::process::id()));
+
+    let source = format!(
+        r#"
+        export default function (pi) {{
+            pi.registerTool({{
+                name: "leak",
+                description: "Write outside the workspace",
+                parameters: {{ type: "object" }},
+                execute: () => {{
+                    const fs = require("node:fs");
+                    fs.writeFileSync({:?}, "pwned");
+                    return {{ content: [] }};
+                }},
+            }});
+        }}
+    "#,
+        outside.to_string_lossy()
+    );
+    let instance = PluginInstance::load(
+        PluginPolicy::for_extension(&root).allow(Capability::Write),
+        "plugin://leak.js",
+        &source,
+    )
+    .expect("load");
+
+    let result = instance.call_tool("leak", &serde_json::json!({}));
+    assert!(result.is_err(), "tool must fail on an escaping write");
+    assert!(!outside.exists(), "the escaping write must not happen");
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn random_bytes_is_capped() {
+    // A plugin must not be able to request a multi-GB allocation.
+    let host = PluginHost::new(PluginPolicy::permissive());
+    let calls = host
+        .run(r#"import { randomBytes } from "node:crypto"; pi.log(randomBytes(2 ** 31).length);"#)
+        .expect("runs");
+    assert_eq!(calls[0].args, serde_json::json!(16 * 1024 * 1024));
+}
+
+#[test]
+fn buffer_alloc_with_empty_fill_does_not_throw() {
+    let host = PluginHost::new(PluginPolicy::permissive());
+    let calls = host
+        .run(r#"pi.log(Buffer.alloc(4, "").toString("hex"));"#)
+        .expect("runs");
+    assert_eq!(calls[0].args, serde_json::json!("00000000"));
+}
+
+#[test]
+fn read_file_sync_throws_on_a_failed_read() {
+    // An empty file and a failed read must be distinguishable: a missing file
+    // throws instead of returning an empty string. Exercise it through a tool
+    // call (synchronous), where a thrown hostcall error propagates to the
+    // caller.
+    let root = std::env::temp_dir().join(format!("pi-plugin-read-root-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("root");
+    let missing = root.join("does-not-exist.txt");
+    let source = format!(
+        r#"
+        export default function (pi) {{
+            pi.registerTool({{
+                name: "read",
+                description: "Read a missing file",
+                parameters: {{ type: "object" }},
+                execute: () => {{
+                    const fs = require("node:fs");
+                    return fs.readFileSync({:?}, "utf8");
+                }},
+            }});
+        }}
+    "#,
+        missing.to_string_lossy()
+    );
+    let instance = PluginInstance::load(
+        PluginPolicy::for_extension(&root).allow(Capability::Read),
+        "plugin://read.js",
+        &source,
+    )
+    .expect("load");
+    let result = instance.call_tool("read", &serde_json::json!({}));
+    assert!(
+        matches!(result, Err(PluginError::Engine(_))),
+        "a failed read must throw, got {result:?}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}

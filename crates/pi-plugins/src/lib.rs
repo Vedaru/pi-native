@@ -572,14 +572,15 @@ impl PluginHost {
                         "fs.readFileSync",
                         &path,
                     ) {
-                        Some(resolved) => std::fs::read_to_string(&resolved).map_err(|e| {
-                            rquickjs::Error::new_from_js_message(
-                                "fs",
-                                "readFileSync",
-                                e.to_string(),
-                            )
-                        }),
-                        None => Ok(String::new()),
+                        GateOutcome::Allowed(resolved) => std::fs::read_to_string(&resolved)
+                            .map_err(|e| {
+                                rquickjs::Error::new_from_js_message(
+                                    "fs",
+                                    "readFileSync",
+                                    e.to_string(),
+                                )
+                            }),
+                        GateOutcome::Denied | GateOutcome::Escaped(_) => Ok(String::new()),
                     }
                 },
             ),
@@ -593,18 +594,28 @@ impl PluginHost {
         );
         fs.set(
             "writeFileSync",
-            Function::new(ctx.clone(), move |path: String, data: String| {
-                if let Some(resolved) = gate_path(
-                    &policy,
-                    &calls,
-                    &denials,
-                    Capability::Write,
-                    "fs.writeFileSync",
-                    &path,
-                ) {
-                    let _ = std::fs::write(&resolved, data);
-                }
-            }),
+            Function::new(
+                ctx.clone(),
+                move |path: String, data: String| -> rquickjs::Result<()> {
+                    if let Some(resolved) = gate_write_path(
+                        &policy,
+                        &calls,
+                        &denials,
+                        Capability::Write,
+                        "fs.writeFileSync",
+                        &path,
+                    )? {
+                        std::fs::write(&resolved, data).map_err(|error| {
+                            rquickjs::Error::new_from_js_message(
+                                "fs",
+                                "writeFileSync",
+                                error.to_string(),
+                            )
+                        })?;
+                    }
+                    Ok(())
+                },
+            ),
         )?;
 
         // existsSync(path) -> bool
@@ -624,6 +635,7 @@ impl PluginHost {
                     "fs.existsSync",
                     &path,
                 )
+                .allowed()
                 .map(|resolved| resolved.exists())
                 .unwrap_or(false)
             }),
@@ -645,7 +657,8 @@ impl PluginHost {
                     Capability::Read,
                     "fs.readdirSync",
                     &path,
-                ) else {
+                )
+                .allowed() else {
                     return Vec::new();
                 };
                 std::fs::read_dir(&resolved)
@@ -667,22 +680,33 @@ impl PluginHost {
         );
         fs.set(
             "mkdirSync",
-            Function::new(ctx.clone(), move |path: String, recursive: Option<bool>| {
-                if let Some(resolved) = gate_path(
-                    &policy,
-                    &calls,
-                    &denials,
-                    Capability::Write,
-                    "fs.mkdirSync",
-                    &path,
-                ) {
-                    let _ = if recursive.unwrap_or(false) {
-                        std::fs::create_dir_all(&resolved)
-                    } else {
-                        std::fs::create_dir(&resolved)
-                    };
-                }
-            }),
+            Function::new(
+                ctx.clone(),
+                move |path: String, recursive: Option<bool>| -> rquickjs::Result<()> {
+                    if let Some(resolved) = gate_write_path(
+                        &policy,
+                        &calls,
+                        &denials,
+                        Capability::Write,
+                        "fs.mkdirSync",
+                        &path,
+                    )? {
+                        let result = if recursive.unwrap_or(false) {
+                            std::fs::create_dir_all(&resolved)
+                        } else {
+                            std::fs::create_dir(&resolved)
+                        };
+                        result.map_err(|error| {
+                            rquickjs::Error::new_from_js_message(
+                                "fs",
+                                "mkdirSync",
+                                error.to_string(),
+                            )
+                        })?;
+                    }
+                    Ok(())
+                },
+            ),
         )?;
 
         // unlinkSync(path)
@@ -693,17 +717,20 @@ impl PluginHost {
         );
         fs.set(
             "unlinkSync",
-            Function::new(ctx.clone(), move |path: String| {
-                if let Some(resolved) = gate_path(
+            Function::new(ctx.clone(), move |path: String| -> rquickjs::Result<()> {
+                if let Some(resolved) = gate_write_path(
                     &policy,
                     &calls,
                     &denials,
                     Capability::Write,
                     "fs.unlinkSync",
                     &path,
-                ) {
-                    let _ = std::fs::remove_file(&resolved);
+                )? {
+                    std::fs::remove_file(&resolved).map_err(|error| {
+                        rquickjs::Error::new_from_js_message("fs", "unlinkSync", error.to_string())
+                    })?;
                 }
+                Ok(())
             }),
         )?;
 
@@ -715,25 +742,40 @@ impl PluginHost {
         );
         fs.set(
             "appendFileSync",
-            Function::new(ctx.clone(), move |path: String, data: String| {
-                if let Some(resolved) = gate_path(
-                    &policy,
-                    &calls,
-                    &denials,
-                    Capability::Write,
-                    "fs.appendFileSync",
-                    &path,
-                ) {
-                    use std::io::Write as _;
-                    if let Ok(mut file) = std::fs::OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open(&resolved)
-                    {
-                        let _ = file.write_all(data.as_bytes());
+            Function::new(
+                ctx.clone(),
+                move |path: String, data: String| -> rquickjs::Result<()> {
+                    if let Some(resolved) = gate_write_path(
+                        &policy,
+                        &calls,
+                        &denials,
+                        Capability::Write,
+                        "fs.appendFileSync",
+                        &path,
+                    )? {
+                        use std::io::Write as _;
+                        let mut file = std::fs::OpenOptions::new()
+                            .create(true)
+                            .append(true)
+                            .open(&resolved)
+                            .map_err(|error| {
+                                rquickjs::Error::new_from_js_message(
+                                    "fs",
+                                    "appendFileSync",
+                                    error.to_string(),
+                                )
+                            })?;
+                        file.write_all(data.as_bytes()).map_err(|error| {
+                            rquickjs::Error::new_from_js_message(
+                                "fs",
+                                "appendFileSync",
+                                error.to_string(),
+                            )
+                        })?;
                     }
-                }
-            }),
+                    Ok(())
+                },
+            ),
         )?;
 
         // copyFileSync(src, dest)
@@ -744,28 +786,61 @@ impl PluginHost {
         );
         fs.set(
             "copyFileSync",
-            Function::new(ctx.clone(), move |src: String, dest: String| {
-                if record(
-                    &policy,
-                    &calls,
-                    &denials,
-                    Capability::Write,
-                    "fs.copyFileSync",
-                    serde_json::json!({ "src": src, "dest": dest }),
-                ) {
-                    match (policy.resolve_path(&src), policy.resolve_path(&dest)) {
-                        (Ok(src), Ok(dest)) => {
-                            let _ = std::fs::copy(&src, &dest);
-                        }
-                        _ => record_denied(
-                            &denials,
-                            Capability::Write,
-                            "fs.copyFileSync",
-                            serde_json::json!({ "src": src, "dest": dest, "reason": "outside workspace" }),
-                        ),
+            Function::new(
+                ctx.clone(),
+                move |src: String, dest: String| -> rquickjs::Result<()> {
+                    let allowed = record(
+                        &policy,
+                        &calls,
+                        &denials,
+                        Capability::Write,
+                        "fs.copyFileSync",
+                        serde_json::json!({ "src": src, "dest": dest }),
+                    );
+                    if !allowed {
+                        return Ok(());
                     }
-                }
-            }),
+                    // Both ends must stay inside the workspace; an escape is a
+                    // hard error rather than a silent copy miss.
+                    let src = match gate_path(
+                        &policy,
+                        &calls,
+                        &denials,
+                        Capability::Read,
+                        "fs.copyFileSync",
+                        &src,
+                    ) {
+                        GateOutcome::Allowed(resolved) => resolved,
+                        GateOutcome::Denied => return Ok(()),
+                        GateOutcome::Escaped(reason) => {
+                            return Err(rquickjs::Error::new_from_js_message(
+                                "fs",
+                                "copyFileSync",
+                                format!("source `{src}` escapes the plugin workspace: {reason}"),
+                            ));
+                        }
+                    };
+                    let dest = match gate_write_path(
+                        &policy,
+                        &calls,
+                        &denials,
+                        Capability::Write,
+                        "fs.copyFileSync",
+                        &dest,
+                    )? {
+                        Some(resolved) => resolved,
+                        None => return Ok(()),
+                    };
+                    std::fs::copy(&src, &dest).map_err(|error| {
+                        rquickjs::Error::new_from_js_message(
+                            "fs",
+                            "copyFileSync",
+                            error.to_string(),
+                        )
+                    })?;
+                    Ok(())
+                },
+            ),
         )?;
 
         // rmSync(path, recursive?)
@@ -776,22 +851,29 @@ impl PluginHost {
         );
         fs.set(
             "rmSync",
-            Function::new(ctx.clone(), move |path: String, recursive: Option<bool>| {
-                if let Some(resolved) = gate_path(
-                    &policy,
-                    &calls,
-                    &denials,
-                    Capability::Write,
-                    "fs.rmSync",
-                    &path,
-                ) {
-                    let _ = if recursive.unwrap_or(false) {
-                        std::fs::remove_dir_all(&resolved)
-                    } else {
-                        std::fs::remove_file(&resolved)
-                    };
-                }
-            }),
+            Function::new(
+                ctx.clone(),
+                move |path: String, recursive: Option<bool>| -> rquickjs::Result<()> {
+                    if let Some(resolved) = gate_write_path(
+                        &policy,
+                        &calls,
+                        &denials,
+                        Capability::Write,
+                        "fs.rmSync",
+                        &path,
+                    )? {
+                        let result = if recursive.unwrap_or(false) {
+                            std::fs::remove_dir_all(&resolved)
+                        } else {
+                            std::fs::remove_file(&resolved)
+                        };
+                        result.map_err(|error| {
+                            rquickjs::Error::new_from_js_message("fs", "rmSync", error.to_string())
+                        })?;
+                    }
+                    Ok(())
+                },
+            ),
         )?;
 
         // mkdtemp(prefix) -> path
@@ -802,35 +884,34 @@ impl PluginHost {
         );
         fs.set(
             "mkdtemp",
-            Function::new(ctx.clone(), move |prefix: String| -> String {
-                let allowed = record(
-                    &policy,
-                    &calls,
-                    &denials,
-                    Capability::Write,
-                    "fs.mkdtemp",
-                    serde_json::json!({ "prefix": prefix }),
-                );
-                if !allowed {
-                    return String::new();
-                }
-                let base = match policy.resolve_path(&prefix) {
-                    Ok(path) => path,
-                    Err(_) => return String::new(),
-                };
-                let unique = crate::crypto::random_bytes(6)
-                    .iter()
-                    .map(|b| format!("{b:02x}"))
-                    .collect::<String>();
-                let mut dir = base.into_os_string();
-                dir.push(&unique);
-                let dir = dir.to_string_lossy().to_string();
-                if std::fs::create_dir_all(&dir).is_ok() {
-                    dir
-                } else {
-                    String::new()
-                }
-            }),
+            Function::new(
+                ctx.clone(),
+                move |prefix: String| -> rquickjs::Result<String> {
+                    let base = match gate_write_path(
+                        &policy,
+                        &calls,
+                        &denials,
+                        Capability::Write,
+                        "fs.mkdtemp",
+                        &prefix,
+                    )? {
+                        Some(resolved) => resolved,
+                        None => return Ok(String::new()),
+                    };
+                    let unique = crate::crypto::random_bytes(6)
+                        .iter()
+                        .map(|b| format!("{b:02x}"))
+                        .collect::<String>();
+                    let mut dir = base.into_os_string();
+                    dir.push(&unique);
+                    let dir = dir.to_string_lossy().to_string();
+                    if std::fs::create_dir_all(&dir).is_ok() {
+                        Ok(dir)
+                    } else {
+                        Ok(String::new())
+                    }
+                },
+            ),
         )?;
 
         host.set("fs", fs)?;
@@ -1186,6 +1267,27 @@ fn record_denied(
     });
 }
 
+/// Outcome of capability-gating and jailing a filesystem hostcall path.
+enum GateOutcome {
+    /// The capability is granted and the path is inside the workspace.
+    Allowed(PathBuf),
+    /// The capability is not granted; a denial was recorded.
+    Denied,
+    /// The path escapes the workspace; a denial was recorded. Callers decide
+    /// whether this is a soft miss (reads) or a hard error (writes).
+    Escaped(String),
+}
+
+impl GateOutcome {
+    /// The resolved path when allowed, `None` for either denial kind.
+    fn allowed(self) -> Option<PathBuf> {
+        match self {
+            GateOutcome::Allowed(path) => Some(path),
+            GateOutcome::Denied | GateOutcome::Escaped(_) => None,
+        }
+    }
+}
+
 /// Capability-gate a filesystem hostcall and resolve its path inside the
 /// workspace. Records a denial if the path escapes, so the plugin load fails
 /// like any other denied capability.
@@ -1196,7 +1298,7 @@ fn gate_path(
     capability: Capability,
     method: &str,
     path: &str,
-) -> Option<PathBuf> {
+) -> GateOutcome {
     if !record(
         policy,
         calls,
@@ -1205,10 +1307,10 @@ fn gate_path(
         method,
         serde_json::json!({ "path": path }),
     ) {
-        return None;
+        return GateOutcome::Denied;
     }
     match policy.resolve_path(path) {
-        Ok(resolved) => Some(resolved),
+        Ok(resolved) => GateOutcome::Allowed(resolved),
         Err(reason) => {
             record_denied(
                 denials,
@@ -1216,8 +1318,35 @@ fn gate_path(
                 method,
                 serde_json::json!({ "path": path, "reason": reason }),
             );
-            None
+            GateOutcome::Escaped(reason)
         }
+    }
+}
+
+/// Capability-gate a mutating filesystem hostcall.
+///
+/// Writes must not silently no-op when the path escapes the workspace: that
+/// hides a security denial from the plugin and the user. Raise a JS error
+/// instead, so a write either happens or fails loudly. The denial is still
+/// recorded, so a load-time escape also fails plugin evaluation.
+fn gate_write_path(
+    policy: &PluginPolicy,
+    calls: &Arc<Mutex<Vec<HostCall>>>,
+    denials: &Arc<Mutex<Vec<HostCall>>>,
+    capability: Capability,
+    method: &'static str,
+    path: &str,
+) -> rquickjs::Result<Option<PathBuf>> {
+    match gate_path(policy, calls, denials, capability, method, path) {
+        GateOutcome::Allowed(resolved) => Ok(Some(resolved)),
+        // Capability denial is surfaced by `PluginHost::run`/`PluginInstance::load`
+        // via the recorded denial, matching the other read/exec hosts.
+        GateOutcome::Denied => Ok(None),
+        GateOutcome::Escaped(reason) => Err(rquickjs::Error::new_from_js_message(
+            "fs",
+            method,
+            format!("path `{path}` escapes the plugin workspace: {reason}"),
+        )),
     }
 }
 
