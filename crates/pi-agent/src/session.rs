@@ -72,7 +72,20 @@ pub fn new_session_path_in_unit(
     unit: Option<&str>,
 ) -> std::io::Result<PathBuf> {
     let dir = session_dir_for(agent_dir, cwd);
-    std::fs::create_dir_all(&dir)?;
+    new_session_path_in_dir(&dir, cwd, unit)
+}
+
+/// Create a new session file in an explicit directory, using pi's layout
+/// (`<timestamp>_<id>.jsonl`) with the header id matching the filename stem.
+///
+/// Callers that place session files themselves (the RPC `new_session`/`clone`)
+/// use this so pi and pi-web can address the file by id.
+pub fn new_session_path_in_dir(
+    dir: &Path,
+    cwd: &Path,
+    unit: Option<&str>,
+) -> std::io::Result<PathBuf> {
+    std::fs::create_dir_all(dir)?;
     let id = new_id();
     let timestamp = now_iso();
     let file_timestamp = timestamp.replace([':', '.'], "-");
@@ -611,6 +624,18 @@ impl SessionJournal {
         self.last_compaction.as_ref()
     }
 
+    /// The session entry id of the persisted message at `index`, if any.
+    ///
+    /// A compaction drops a prefix and keeps the tail, so the entry id at the
+    /// drop boundary is the `firstKeptEntryId` pi records for the compaction
+    /// (the next `persist` writes it). Callers reporting a compaction event use
+    /// this before the rewrite happens.
+    pub fn entry_id_for_message(&self, index: usize) -> Option<&str> {
+        self.persisted
+            .get(index)
+            .map(|entry| entry.entry_id.as_str())
+    }
+
     /// Record the current transcript. Returns the number of entries written.
     ///
     /// A pure append (the transcript still begins with exactly what is on disk)
@@ -686,6 +711,8 @@ impl SessionJournal {
         self.last_compaction = None;
         let mut message_start = 0;
         if let Some(summary) = summary {
+            // pi records a retain-none compaction's own id as `firstKeptEntryId`
+            // (nothing before it is kept).
             let first_kept_entry_id = self.persisted.get(old_i).map(|p| p.entry_id.clone());
             let entry_id = append_compaction(
                 &mut session,
@@ -693,6 +720,7 @@ impl SessionJournal {
                 first_kept_entry_id.as_deref().unwrap_or(""),
                 tokens_before,
             );
+            let first_kept_entry_id = first_kept_entry_id.or_else(|| Some(entry_id.clone()));
             self.last_compaction = Some(RecordedCompaction {
                 entry_id,
                 summary,

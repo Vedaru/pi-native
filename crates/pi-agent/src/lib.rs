@@ -24,8 +24,8 @@ pub use providers::{
 };
 pub use session::{
     agent_dir, append_compaction, append_messages, message_value, messages_from_session,
-    new_session_path, new_session_path_in, new_session_path_in_unit, new_session_path_with_unit,
-    transcript_values, SessionJournal,
+    new_session_path, new_session_path_in, new_session_path_in_dir, new_session_path_in_unit,
+    new_session_path_with_unit, transcript_values, SessionJournal,
 };
 
 /// A tool call requested by the model.
@@ -105,6 +105,10 @@ pub enum AgentEvent {
     Compacted {
         dropped: usize,
         summary: Option<String>,
+        /// Approximate tokens in the context before compaction.
+        tokens_before: usize,
+        /// Approximate tokens retained after compaction.
+        tokens_after: usize,
     },
     /// Provider token usage for one model call (for cache accounting).
     Usage(Usage),
@@ -367,6 +371,7 @@ impl Agent {
             return None;
         }
         let dropped = cut;
+        let tokens_before = self.retained_tokens;
         let (dropped_bytes, dropped_tokens) =
             self.messages[..cut]
                 .iter()
@@ -392,7 +397,12 @@ impl Agent {
         self.retained_tokens =
             self.retained_tokens.saturating_sub(dropped_tokens) + summary_message.approx_tokens();
         self.messages.insert(0, summary_message);
-        Some(AgentEvent::Compacted { dropped, summary })
+        Some(AgentEvent::Compacted {
+            dropped,
+            summary,
+            tokens_before,
+            tokens_after: self.retained_tokens,
+        })
     }
 
     fn push(&mut self, message: TranscriptMessage) {

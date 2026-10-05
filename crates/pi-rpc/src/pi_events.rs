@@ -27,6 +27,8 @@ pub struct PiEventAdapter {
     text_index: usize,
     thinking_index: usize,
     tool_calls: Vec<(String, String, Value)>,
+    /// Tool results seen since the current turn began, for `turn_end`.
+    tool_results: Vec<Value>,
     next_content_index: usize,
     last_usage: Option<Value>,
 }
@@ -50,6 +52,7 @@ impl PiEventAdapter {
             text_index: 0,
             thinking_index: 0,
             tool_calls: Vec::new(),
+            tool_results: Vec::new(),
             next_content_index: 0,
             last_usage: None,
         }
@@ -108,6 +111,7 @@ impl PiEventAdapter {
             Event::TurnStart => {
                 // Usage belongs to the turn that is starting.
                 self.last_usage = None;
+                self.tool_results.clear();
                 out.push(json!({ "type": "turn_start" }));
             }
             Event::AssistantDelta { text } => {
@@ -219,28 +223,41 @@ impl PiEventAdapter {
                 name,
                 is_error,
                 content,
-            } => out.push(json!({
-                "type": "tool_execution_end",
-                "toolCallId": tool_call_id,
-                "toolName": name,
-                "isError": is_error,
-                "result": { "content": [{ "type": "text", "text": content }] },
-            })),
+            } => {
+                // Buffer the result for this turn's `turn_end`, but keep the
+                // `tool_execution_end` envelope unchanged.
+                self.tool_results.push(json!({
+                    "toolCallId": tool_call_id,
+                    "toolName": name,
+                    "isError": is_error,
+                    "content": [{ "type": "text", "text": content }],
+                }));
+                out.push(json!({
+                    "type": "tool_execution_end",
+                    "toolCallId": tool_call_id,
+                    "toolName": name,
+                    "isError": is_error,
+                    "result": { "content": [{ "type": "text", "text": content }] },
+                }));
+            }
             Event::TurnEnd => {
+                let tool_results = std::mem::take(&mut self.tool_results);
                 if self.streaming {
                     let message = self.assistant_message();
                     out.push(json!({ "type": "message_end", "message": message }));
                     out.push(json!({
                         "type": "turn_end",
                         "message": message,
-                        "toolResults": [],
+                        "toolResults": tool_results,
                     }));
                     self.streaming = false;
                     self.text_started = false;
                 } else {
-                    out.push(
-                        json!({ "type": "turn_end", "message": Value::Null, "toolResults": [] }),
-                    );
+                    out.push(json!({
+                        "type": "turn_end",
+                        "message": Value::Null,
+                        "toolResults": tool_results,
+                    }));
                 }
             }
             Event::Done { stop_reason } => out.push(json!({
@@ -263,11 +280,28 @@ impl PiEventAdapter {
                     "cacheWrite": cache_write,
                 }));
             }
-            Event::Compacted { dropped, summary } => out.push(json!({
-                "type": "compaction_end",
-                "dropped": dropped,
-                "summary": summary,
-            })),
+            Event::Compacted {
+                summary,
+                reason,
+                tokens_before,
+                estimated_tokens_after,
+                first_kept_entry_id,
+                ..
+            } => {
+                out.push(json!({
+                    "type": "compaction_end",
+                    "reason": reason,
+                    "result": {
+                        "summary": summary,
+                        "firstKeptEntryId": first_kept_entry_id,
+                        "tokensBefore": tokens_before,
+                        "estimatedTokensAfter": estimated_tokens_after,
+                        "details": {},
+                    },
+                    "aborted": false,
+                    "willRetry": false,
+                }));
+            }
             // Pass extension UI through; a UI service answers it directly.
             Event::UiRequest {
                 id,
@@ -445,6 +479,59 @@ mod tests {
             .find(|event| event["assistantMessageEvent"]["type"] == json!("text_delta"))
             .expect("delta");
         assert_eq!(delta["assistantMessageEvent"]["delta"], json!("hello"));
+    }
+
+    #[test]
+    fn turn_end_carries_the_turns_tool_results() {
+        let native = vec![
+            Event::TurnStart,
+            Event::ToolStart {
+                tool_call_id: "call-1".into(),
+                name: "bash".into(),
+                input: json!({ "command": "ls" }),
+            },
+            Event::ToolEnd {
+                tool_call_id: "call-1".into(),
+                name: "bash".into(),
+                is_error: false,
+                content: "ok".into(),
+            },
+            Event::TurnEnd,
+        ];
+        let events = translate_all(&native);
+        let turn_end = events
+            .iter()
+            .find(|event| event["type"] == json!("turn_end"))
+            .expect("turn_end");
+        let results = turn_end["toolResults"].as_array().expect("toolResults");
+        assert_eq!(results.len(), 1, "{events:?}");
+        assert_eq!(results[0]["toolCallId"], json!("call-1"));
+        assert_eq!(results[0]["content"][0]["text"], json!("ok"));
+    }
+
+    #[test]
+    fn compaction_end_matches_pi_shape() {
+        let native = vec![Event::Compacted {
+            dropped: 3,
+            summary: Some("SUMMARY".into()),
+            reason: "threshold".into(),
+            tokens_before: 120_000,
+            estimated_tokens_after: 30_000,
+            first_kept_entry_id: Some("entry-7".into()),
+        }];
+        let events = translate_all(&native);
+        let end = events
+            .iter()
+            .find(|event| event["type"] == json!("compaction_end"))
+            .expect("compaction_end");
+        assert_eq!(end["reason"], json!("threshold"));
+        assert_eq!(end["aborted"], json!(false));
+        assert_eq!(end["willRetry"], json!(false));
+        assert_eq!(end["result"]["summary"], json!("SUMMARY"));
+        assert_eq!(end["result"]["firstKeptEntryId"], json!("entry-7"));
+        assert_eq!(end["result"]["tokensBefore"], json!(120_000));
+        assert_eq!(end["result"]["estimatedTokensAfter"], json!(30_000));
+        assert!(end["result"].get("details").is_some());
     }
 
     #[test]

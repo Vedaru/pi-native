@@ -12,7 +12,8 @@
 //! the unit's session file.
 
 use pi_agent::{
-    messages_from_session, transcript_values, Agent, AgentError, AgentEvent, SessionJournal,
+    messages_from_session, new_session_path_in_dir, transcript_values, Agent, AgentError,
+    AgentEvent, SessionJournal,
 };
 use pi_session::SessionFile;
 use serde::{Deserialize, Serialize};
@@ -187,6 +188,14 @@ pub enum Event {
     Compacted {
         dropped: usize,
         summary: Option<String>,
+        /// Why compaction ran: `manual`, `threshold`, or `overflow`.
+        reason: String,
+        /// Approximate tokens before compaction.
+        tokens_before: usize,
+        /// Approximate tokens retained after compaction.
+        estimated_tokens_after: usize,
+        /// First session entry kept after the summarized span, when known.
+        first_kept_entry_id: Option<String>,
     },
     /// Provider token usage for one model call (for cache accounting).
     Usage {
@@ -391,21 +400,32 @@ fn apply_command(
         Request::Compact { .. } => {
             let tokens_before = agent.retained_tokens();
             let (summary, dropped) = match agent.force_compact() {
-                Some(AgentEvent::Compacted { dropped, summary }) => (summary, Some(dropped)),
+                Some(AgentEvent::Compacted {
+                    dropped, summary, ..
+                }) => (summary, Some(dropped)),
                 _ => (None, None),
             };
             // Persist immediately so the on-disk file records the compaction
             // (summary + firstKeptEntryId) rather than waiting for the next
             // turn, which may never come.
-            if dropped.is_some() {
+            let first_kept = if dropped.is_some() {
                 session.persist(agent);
-            }
+                session
+                    .journal
+                    .as_ref()
+                    .and_then(|journal| journal.last_compaction())
+                    .and_then(|recorded| recorded.first_kept_entry_id.clone())
+            } else {
+                None
+            };
             Some(response(
                 id,
                 "compact",
                 serde_json::json!({
+                    "reason": "manual",
                     "summary": summary,
                     "dropped": dropped,
+                    "firstKeptEntryId": first_kept,
                     "tokensBefore": tokens_before,
                     "estimatedTokensAfter": agent.retained_tokens(),
                 }),
@@ -581,7 +601,20 @@ fn from_agent_event(event: AgentEvent) -> Event {
             content,
         },
         AgentEvent::Done { stop_reason } => Event::Done { stop_reason },
-        AgentEvent::Compacted { dropped, summary } => Event::Compacted { dropped, summary },
+        AgentEvent::Compacted {
+            dropped,
+            summary,
+            tokens_before,
+            tokens_after,
+        } => Event::Compacted {
+            dropped,
+            summary,
+            // Auto compaction runs when the token threshold is crossed.
+            reason: "threshold".to_string(),
+            tokens_before,
+            estimated_tokens_after: tokens_after,
+            first_kept_entry_id: None,
+        },
         AgentEvent::Usage(usage) => Event::Usage {
             input: usage.input,
             output: usage.output,
@@ -715,11 +748,7 @@ impl SessionState {
             .as_ref()
             .and_then(|path| path.parent().map(PathBuf::from))
             .unwrap_or_else(|| PathBuf::from(cwd));
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|duration| duration.as_nanos())
-            .unwrap_or(0);
-        let path = dir.join(format!("{nanos:x}.jsonl"));
+        let path = new_session_path_in_dir(&dir, Path::new(cwd), None)?;
         let (journal, _) = SessionJournal::open(path.clone(), cwd)?;
         self.journal = Some(journal);
         self.path = Some(path);
@@ -753,22 +782,21 @@ impl SessionState {
         self.thinking_level.clone()
     }
 
-    fn new_file_path(&self, cwd: &str) -> PathBuf {
+    /// Create a new session file with pi's `<timestamp>_<id>.jsonl` layout in
+    /// the directory of the active session (or `cwd`), so the header id matches
+    /// the filename and pi-web can address it.
+    fn new_file_path(&self, cwd: &str) -> std::io::Result<PathBuf> {
         let dir = self
             .path
             .as_ref()
             .and_then(|path| path.parent().map(PathBuf::from))
             .unwrap_or_else(|| PathBuf::from(cwd));
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|duration| duration.as_nanos())
-            .unwrap_or(0);
-        dir.join(format!("{nanos:x}.jsonl"))
+        new_session_path_in_dir(&dir, Path::new(cwd), None)
     }
 
     fn clone_session(&mut self, cwd: &str, agent: &Agent) -> std::io::Result<()> {
         let messages = agent.messages().to_vec();
-        let path = self.new_file_path(cwd);
+        let path = self.new_file_path(cwd)?;
         let (mut journal, _) = SessionJournal::open(path.clone(), cwd)?;
         journal.persist(&messages)?;
         self.path = Some(path);
@@ -821,7 +849,7 @@ impl SessionState {
             .and_then(|content| content.as_str())
             .map(str::to_string);
         let transcript = messages_from_session(&branch);
-        let new_path = self.new_file_path(cwd);
+        let new_path = self.new_file_path(cwd)?;
         let (mut journal, _) = SessionJournal::open(new_path.clone(), cwd)?;
         journal.persist(&transcript)?;
         agent.replace_messages(transcript);
@@ -994,7 +1022,31 @@ fn drive<R: std::io::BufRead, W: std::io::Write, F: FnMut(&Agent)>(
                 for queued in std::mem::take(&mut session.queued) {
                     agent.push_user(queued);
                 }
-                match agent.run_with(|event| io.write(&from_agent_event(event.clone()))) {
+                match agent.run_with(|event| {
+                    let event = match event {
+                        AgentEvent::Compacted { dropped, .. } => {
+                            let mut translated = from_agent_event(event.clone());
+                            // The agent drops a prefix and keeps the tail; the
+                            // entry id at the drop boundary is the first kept
+                            // entry, which pi reports on `compaction_end`. The
+                            // journal still holds the pre-rewrite entries here.
+                            if let Event::Compacted {
+                                first_kept_entry_id,
+                                ..
+                            } = &mut translated
+                            {
+                                *first_kept_entry_id = session
+                                    .journal
+                                    .as_ref()
+                                    .and_then(|journal| journal.entry_id_for_message(*dropped))
+                                    .map(str::to_string);
+                            }
+                            translated
+                        }
+                        _ => from_agent_event(event.clone()),
+                    };
+                    io.write(&event)
+                }) {
                     Ok(()) => {
                         session.persist(agent);
                         after_turn(agent);
