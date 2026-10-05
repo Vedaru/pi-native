@@ -30,8 +30,11 @@ attach, and an idle unit releases its in-memory agent until the next command.
 | `GET` | `/sessions/:id/events` | SSE stream (replay + live) |
 | `POST` | `/sessions/:id/commands` | Send a command (`prompt`, `steer`, `abort`, …) |
 | `POST` | `/sessions/:id/ui_response` | Answer a `ui_request` |
-| `GET` | `/units/:id/messages` | Poll a unit's mailbox |
-| `POST` | `/units/:id/messages` | Send a unit-to-unit message |
+
+Coordination (handoff, ack, ownership) lives in rig, not in pipelets: there is
+no mailbox and no `/units/*` route. See
+[the web integration](../integrations/pi-web/README.md) for where a fleet points
+pi-web (rig).
 
 By default the SSE stream carries the native event envelope; add `?format=pi`
 to receive pi's canonical events (`agent_start`, `message_update`,
@@ -57,9 +60,9 @@ then, a single unit is served directly and every route pi-web uses keeps
 working. See [the pi-web integration](../integrations/pi-web/README.md) for the
 fork details.
 
-The fleet routes (`GET /swarm`, `/units/:id/messages`, `/units/:id/ownership`)
-are unused by a single unit and are removed in a later slice (VED-421) once the
-compatibility seam above is the documented path.
+The fleet surface (`GET /swarm`, coordination handoff/ack/ownership) is owned by
+**rig**, not by a pipelets process. A single unit exposes only the `/sessions/*`
+routes pi-web uses (VED-421).
 
 The unit carries **no clock and no run ledger**: it has no trigger engine and no
 `--triggers` mode. Scheduling lives in rig, which drives a scheduled prompt over

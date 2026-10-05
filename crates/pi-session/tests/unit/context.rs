@@ -91,35 +91,3 @@ fn context_edit_replaces_content() {
     let context = build_context(&session, None);
     assert_eq!(context[0].message["content"], json!("redacted"));
 }
-
-#[test]
-fn swarm_transport_entries_never_enter_the_context() {
-    // AC10/M13 (VED-379): direct unit-to-unit messages and ownership transfers
-    // are persisted as session entries for durability, but transport must never
-    // leak into the model transcript. `entry_messages` maps only known kinds, so
-    // `swarm_message`/`swarm_ownership` are preserved on disk yet excluded.
-    let header = header("s1", "/tmp");
-    let lines = [
-        r#"{"type":"message","id":"a","parentId":null,"timestamp":"t","message":{"role":"user","content":"do the work"}}"#,
-        r#"{"type":"swarm_message","id":"m1","parentId":"a","timestamp":"t","message":{"id":"m1","from":"coder","to":"reviewer","kind":"request","body":"peer transport chatter"}}"#,
-        r#"{"type":"swarm_ownership","id":"o1","parentId":"m1","timestamp":"t","message":{"ownerBefore":"coder","ownerAfter":"reviewer"}}"#,
-        r#"{"type":"message","id":"b","parentId":"o1","timestamp":"t","message":{"role":"assistant","content":"ok"}}"#,
-    ];
-    let jsonl = format!(
-        "{}\n{}\n",
-        serde_json::to_string(&header).unwrap(),
-        lines.join("\n")
-    );
-    let session = SessionFile::parse(&jsonl).expect("parses");
-    let context = build_context(&session, None);
-    assert_eq!(context.len(), 2, "only the two real messages: {context:?}");
-    assert_eq!(context[0].message["content"], json!("do the work"));
-    assert_eq!(context[1].message["content"], json!("ok"));
-    assert!(
-        context
-            .iter()
-            .all(|m| !m.message.to_string().contains("transport chatter")
-                && !m.message.to_string().contains("ownerAfter")),
-        "swarm transport entries must not appear in context: {context:?}"
-    );
-}

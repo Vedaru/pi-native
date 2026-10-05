@@ -880,7 +880,10 @@ fn run_unit_serve(
     // Open the one unit up front so the process always serves exactly one, even
     // before a client connects.
     if let Err(error) = host.open(session_path.clone()) {
-        eprintln!("pipelets: cannot open session {}: {error}", session_path.display());
+        eprintln!(
+            "pipelets: cannot open session {}: {error}",
+            session_path.display()
+        );
         std::process::exit(2);
     }
     let listener = match std::net::TcpListener::bind(bind_addr) {

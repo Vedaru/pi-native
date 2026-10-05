@@ -40,9 +40,9 @@ serve; a seat is addressed by name, not by a pipelets `--addr`. Per-seat SSE
 replay ids and the session-cwd behaviour are preserved across that proxy.
 
 Until the rig surface exists, a single unit is served directly and every route
-pi-web uses keeps working. The fleet routes (`GET /swarm`,
-`/units/:id/messages`, `/units/:id/ownership`) are unused by a single unit and
-are removed in a later slice (VED-421) once this seam is the documented path.
+pi-web uses keeps working. Coordination (handoff, ack, ownership) is **rig's**,
+not a pipelets route: there is no mailbox and no `/units/*` route in the unit
+(VED-421).
 
 ## Authentication (threat model)
 

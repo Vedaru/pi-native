@@ -1,9 +1,16 @@
 # ADR 0004: Durable unit-to-unit messaging (mailbox + Linear escrow)
 
-- Status: Proposed
+- Status: Reverted by VED-421 (coordination lives in rig; the mailbox and
+  `/units/*` routes were removed from pipelets)
 - Date: 2026-10-05
-- Issues: VED-379 (this)
+- Issues: VED-379 (this), VED-421 (removal)
 - Deciders: pipelets maintainers
+
+> **Removal note (VED-421).** Coordination — handoff, ack, ownership — is owned
+> by **rig** (`openrig-core`, VED-418), not by a pipelets unit. The mailbox, the
+> `swarm_message`/`swarm_ownership` session entries, and the `/units/:id/messages`,
+> `/ack`, and `/ownership` routes described below were removed from the unit.
+> The decision record is kept for history.
 
 ## Context
 

@@ -34,7 +34,9 @@ Core primitives a swarm host drives:
 | --- | --- |
 | Unit host: one addressable agent, attach/detach, event fan-out, idle suspend | `pi-host` |
 | HTTP + SSE serve (one unit) | `pi-gateway` |
-| Direct unit-to-unit mailbox (ack, ownership) | `pi-host` |
+
+Coordination between units (handoff, ack, ownership) lives in rig, not in the
+unit: pipelets ships no mailbox and no `/units/*` route (VED-421).
 
 ## Out of scope (reference-port bloat)
 
@@ -75,7 +77,7 @@ conductor, DAGs, dashboards, Linear) is a separate repo, never in the unit.
 | VED-313/314/315 | provider parity and the release gate |
 | VED-318 | this scope definition |
 | VED-337–343 | web/host infra |
-| VED-379 | direct unit-to-unit mailbox |
+| VED-379 | direct unit-to-unit mailbox (removed in VED-421; rig owns coordination) |
 | VED-419 | drop the trigger engine; rig owns scheduling |
 | VED-420 | single-unit serve; keep pi-web compatible |
 | VED-421 | remove the mailbox and `/units` routes (rig owns coordination) |
