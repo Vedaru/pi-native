@@ -21,7 +21,7 @@ jobs:
         run: cargo test --workspace
       - name: Headless worker gate
         run: python3 scripts/headless_gate.py
-      - name: Swarm orchestration tests
+      - name: Swarm script unit tests
         run: |
           python3 scripts/test_swarm_conductor.py
           python3 scripts/test_swarm_orchestrator.py
