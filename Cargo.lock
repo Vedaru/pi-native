@@ -1219,6 +1219,7 @@ dependencies = [
  "pi-host",
  "serde",
  "serde_json",
+ "sha2",
  "time",
 ]
 

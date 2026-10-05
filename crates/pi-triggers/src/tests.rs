@@ -120,6 +120,7 @@ fn jsonl_runs_survive_a_restart() {
             prompt: "go".into(),
             dedupe_key: "t:1".into(),
             started_at: 10,
+            error: None,
         });
     }
     let reopened = JsonlRuns::open(&path).expect("reopen");
@@ -185,5 +186,125 @@ fn cron_runner_fires_once_per_matching_minute() {
     // Next matching minute.
     let next = time::macros::datetime!(2026-01-05 09:30:00 UTC).unix_timestamp();
     assert_eq!(runner.tick(&mut host, &mut store, next).len(), 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn sanitized_ids_get_distinct_session_files() {
+    let dir = temp_dir("session-collision");
+    let runner = Runner::new(Vec::new(), dir.join("sessions"));
+
+    // These three ids all sanitize to `daily-report`, but must not collide.
+    let dotted = runner.session_path("daily.report");
+    let slashed = runner.session_path("daily/report");
+    let spaced = runner.session_path("daily report");
+    assert_ne!(dotted, slashed);
+    assert_ne!(slashed, spaced);
+    assert_ne!(dotted, spaced);
+
+    // The id stays recognizable in the on-disk name.
+    let name = dotted.file_name().unwrap().to_string_lossy().to_string();
+    assert!(name.starts_with("daily-report-"), "{name}");
+    assert!(name.ends_with(".jsonl"), "{name}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn load_triggers_rejects_duplicate_ids() {
+    let dir = temp_dir("duplicate-ids");
+    let path = dir.join("triggers.json");
+    std::fs::write(
+        &path,
+        r#"[
+          {"id":"dup","interval_secs":60,"prompt":"first"},
+          {"id":"dup","interval_secs":120,"prompt":"second"}
+        ]"#,
+    )
+    .expect("write");
+    let error = load_triggers(&path).expect_err("duplicate ids must be rejected");
+    assert!(error.contains("duplicate"), "{error}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn failed_send_is_recorded_and_retried() {
+    let dir = temp_dir("send-failure");
+    let mut runner = Runner::new(
+        vec![Trigger::interval("t", Duration::from_secs(1), "go")],
+        dir.join("sessions"),
+    );
+    // Open the exact session the runner will use, with a host whose unit thread
+    // dies immediately (the factory panics). This models a unit that died while
+    // retaining the runner, so a later `send` fails.
+    let path = runner.session_path("t");
+    std::fs::create_dir_all(path.parent().unwrap()).expect("sessions dir");
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel::<()>();
+    let cwd = dir.to_string_lossy().to_string();
+    let mut host = Host::new(cwd, move |_unit_cwd: &str| {
+        let _ = ready_tx.send(());
+        panic!("unit died");
+    });
+    let session_id = host.open(path.clone()).expect("open");
+    ready_rx.recv().expect("factory ran");
+    // Wait until the dead unit's channel actually rejects sends.
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while host
+        .send(
+            &session_id,
+            serde_json::json!({ "type": "prompt", "text": "probe" }),
+        )
+        .is_ok()
+    {
+        assert!(std::time::Instant::now() < deadline, "unit never died");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+
+    let mut store = InMemoryRuns::default();
+
+    // The failed attempt is reported and recorded rather than silently dropped.
+    let first = runner.tick(&mut host, &mut store, 1_000);
+    assert_eq!(first.len(), 1);
+    assert!(first[0].error.is_some(), "failure must be surfaced");
+    assert_eq!(
+        store.count_since("t", 0),
+        0,
+        "failures do not count as runs"
+    );
+
+    // `last_fired` was not advanced, so the next tick retries.
+    let second = runner.tick(&mut host, &mut store, 1_001);
+    assert_eq!(second.len(), 1, "a failed trigger must be retried");
+    assert!(second[0].error.is_some());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn cron_does_not_double_fire_after_restart() {
+    let dir = temp_dir("cron-restart");
+    let mut host = test_host(&dir);
+    let runs = dir.join("runs.jsonl");
+
+    let trigger = || Trigger::cron("cron", "*/15 * * * *", "go").expect("trigger");
+    let at = time::macros::datetime!(2026-01-05 09:15:00 UTC).unix_timestamp();
+
+    let mut store = JsonlRuns::open(&runs).expect("open runs");
+    let mut runner = Runner::new(vec![trigger()], dir.join("sessions"));
+    assert_eq!(runner.tick(&mut host, &mut store, at).len(), 1);
+
+    // Simulate a restart: fresh Runner and a fresh store over the same records,
+    // still inside the same matching minute.
+    let mut store = JsonlRuns::open(&runs).expect("reopen runs");
+    let mut runner = Runner::new(vec![trigger()], dir.join("sessions"));
+    assert_eq!(
+        runner.tick(&mut host, &mut store, at + 10).len(),
+        0,
+        "a restart must not re-fire the same cron minute"
+    );
+
+    // The following matching minute is free to fire again.
+    let following = time::macros::datetime!(2026-01-05 09:30:00 UTC).unix_timestamp();
+    let mut store = JsonlRuns::open(&runs).expect("reopen runs");
+    let mut runner = Runner::new(vec![trigger()], dir.join("sessions"));
+    assert_eq!(runner.tick(&mut host, &mut store, following).len(), 1);
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -16,6 +16,7 @@
 
 use pi_host::Host;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -71,7 +72,7 @@ impl Trigger {
     }
 }
 
-/// A recorded episode (one trigger firing).
+/// A recorded episode (one trigger firing attempt).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Episode {
     pub trigger_id: String,
@@ -81,6 +82,13 @@ pub struct Episode {
     pub dedupe_key: String,
     /// Unix seconds.
     pub started_at: i64,
+    /// Set when the firing attempt failed (for example the unit could not be
+    /// opened or the prompt could not be delivered). Failed attempts are still
+    /// recorded so the failure is observable, but they are ignored by
+    /// [`RunStore::seen`] and [`RunStore::count_since`] so the trigger retries
+    /// on the next tick instead of silently burning its window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// Durable run records. The in-memory store is for tests and short-lived runs;
@@ -103,15 +111,21 @@ impl RunStore for InMemoryRuns {
     }
 
     fn seen(&self, trigger_id: &str, dedupe_key: &str) -> bool {
-        self.episodes
-            .iter()
-            .any(|episode| episode.trigger_id == trigger_id && episode.dedupe_key == dedupe_key)
+        self.episodes.iter().any(|episode| {
+            episode.error.is_none()
+                && episode.trigger_id == trigger_id
+                && episode.dedupe_key == dedupe_key
+        })
     }
 
     fn count_since(&self, trigger_id: &str, since: i64) -> usize {
         self.episodes
             .iter()
-            .filter(|episode| episode.trigger_id == trigger_id && episode.started_at >= since)
+            .filter(|episode| {
+                episode.error.is_none()
+                    && episode.trigger_id == trigger_id
+                    && episode.started_at >= since
+            })
             .count()
     }
 }
@@ -165,15 +179,21 @@ impl RunStore for JsonlRuns {
     }
 
     fn seen(&self, trigger_id: &str, dedupe_key: &str) -> bool {
-        self.episodes
-            .iter()
-            .any(|episode| episode.trigger_id == trigger_id && episode.dedupe_key == dedupe_key)
+        self.episodes.iter().any(|episode| {
+            episode.error.is_none()
+                && episode.trigger_id == trigger_id
+                && episode.dedupe_key == dedupe_key
+        })
     }
 
     fn count_since(&self, trigger_id: &str, since: i64) -> usize {
         self.episodes
             .iter()
-            .filter(|episode| episode.trigger_id == trigger_id && episode.started_at >= since)
+            .filter(|episode| {
+                episode.error.is_none()
+                    && episode.trigger_id == trigger_id
+                    && episode.started_at >= since
+            })
             .count()
     }
 }
@@ -215,7 +235,7 @@ impl Runner {
             .triggers
             .iter()
             .enumerate()
-            .filter(|(_, trigger)| self.is_due(trigger, now))
+            .filter(|(_, trigger)| self.is_due(trigger, store, now))
             .map(|(index, _)| index)
             .collect();
         std::fs::create_dir_all(&self.sessions_root).ok();
@@ -244,32 +264,70 @@ impl Runner {
             match host.open(path.clone()) {
                 Ok(session_id) => {
                     let command = serde_json::json!({ "type": "prompt", "text": trigger.prompt });
-                    if host.send(&session_id, command).is_ok() {
-                        let episode = Episode {
-                            trigger_id: trigger.id.clone(),
-                            session_id,
-                            session_path: path,
-                            prompt: trigger.prompt.clone(),
-                            dedupe_key,
-                            started_at: now,
-                        };
-                        store.record(episode.clone());
-                        episodes.push(episode);
+                    match host.send(&session_id, command) {
+                        Ok(()) => {
+                            let episode = Episode {
+                                trigger_id: trigger.id.clone(),
+                                session_id,
+                                session_path: path,
+                                prompt: trigger.prompt.clone(),
+                                dedupe_key,
+                                started_at: now,
+                                error: None,
+                            };
+                            store.record(episode.clone());
+                            episodes.push(episode);
+                            self.last_fired.insert(trigger.id.clone(), now);
+                        }
+                        Err(error) => {
+                            // Do not advance `last_fired`: the window is still
+                            // owed and the next tick retries. Record the
+                            // failure so it is durable and observable.
+                            let message = error.to_string();
+                            eprintln!(
+                                "pi-triggers: cannot send to session for {}: {message}",
+                                trigger.id
+                            );
+                            let episode = Episode {
+                                trigger_id: trigger.id.clone(),
+                                session_id,
+                                session_path: path,
+                                prompt: trigger.prompt.clone(),
+                                dedupe_key,
+                                started_at: now,
+                                error: Some(message),
+                            };
+                            store.record(episode.clone());
+                            episodes.push(episode);
+                        }
                     }
                 }
                 Err(error) => {
+                    // Same contract as a failed send: surface the failure and
+                    // retry, rather than silently skipping the window.
+                    let message = error.to_string();
                     eprintln!(
-                        "pi-triggers: cannot open session for {}: {error}",
+                        "pi-triggers: cannot open session for {}: {message}",
                         trigger.id
                     );
+                    let episode = Episode {
+                        trigger_id: trigger.id.clone(),
+                        session_id: String::new(),
+                        session_path: path,
+                        prompt: trigger.prompt.clone(),
+                        dedupe_key,
+                        started_at: now,
+                        error: Some(message),
+                    };
+                    store.record(episode.clone());
+                    episodes.push(episode);
                 }
             }
-            self.last_fired.insert(trigger.id.clone(), now);
         }
         episodes
     }
 
-    fn is_due(&self, trigger: &Trigger, now: i64) -> bool {
+    fn is_due<S: RunStore + ?Sized>(&self, trigger: &Trigger, store: &S, now: i64) -> bool {
         let last = self.last_fired.get(&trigger.id).copied();
         match &trigger.schedule {
             Schedule::Interval { every } => {
@@ -282,15 +340,22 @@ impl Runner {
                 if !cron.matches(&time) {
                     return false;
                 }
-                // At most once per matching minute.
-                last.is_none_or(|last| last / 60 != now / 60)
+                // At most once per matching minute, within this runner...
+                if last.is_some_and(|last| last / 60 == now / 60) {
+                    return false;
+                }
+                // ...and across restarts. `last_fired` is not persisted, so the
+                // durable run records must decide whether the current minute
+                // already fired; otherwise a restart re-fires the same minute.
+                let minute_start = now - now.rem_euclid(60);
+                store.count_since(&trigger.id, minute_start) == 0
             }
         }
     }
 
     fn session_path(&self, trigger_id: &str) -> PathBuf {
         self.sessions_root
-            .join(format!("{}.jsonl", sanitize(trigger_id)))
+            .join(format!("{}.jsonl", session_file_stem(trigger_id)))
     }
 }
 
@@ -304,6 +369,28 @@ fn sanitize(id: &str) -> String {
             }
         })
         .collect()
+}
+
+/// A filesystem-safe, injective session file stem for `trigger_id`.
+///
+/// The readable prefix keeps the file identifiable by eye, but [`sanitize`] is
+/// lossy: `daily.report`, `daily/report`, and `daily report` all collapse to
+/// `daily-report`. Appending a hash of the full id makes the mapping injective,
+/// so distinct triggers never share a session file.
+fn session_file_stem(trigger_id: &str) -> String {
+    let readable = sanitize(trigger_id);
+    let readable = readable.trim_matches('-');
+    let mut prefix: String = readable.chars().take(48).collect();
+    if prefix.is_empty() {
+        prefix.push_str("trigger");
+    }
+    let digest = Sha256::digest(trigger_id.as_bytes());
+    let mut hash = String::with_capacity(16);
+    for byte in &digest[..8] {
+        use std::fmt::Write as _;
+        let _ = write!(hash, "{byte:02x}");
+    }
+    format!("{prefix}-{hash}")
 }
 
 /// A parsed 5-field cron expression.
@@ -403,7 +490,16 @@ pub fn load_triggers(path: &Path) -> Result<Vec<Trigger>, String> {
         .map_err(|error| format!("read {}: {error}", path.display()))?;
     let specs: Vec<TriggerSpec> = serde_json::from_str(&text)
         .map_err(|error| format!("parse {}: {error}", path.display()))?;
-    specs.into_iter().map(TriggerSpec::into_trigger).collect()
+    let mut triggers = Vec::with_capacity(specs.len());
+    let mut seen = std::collections::HashSet::new();
+    for spec in specs {
+        let trigger = spec.into_trigger()?;
+        if !seen.insert(trigger.id.clone()) {
+            return Err(format!("duplicate trigger id `{}`", trigger.id));
+        }
+        triggers.push(trigger);
+    }
+    Ok(triggers)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
