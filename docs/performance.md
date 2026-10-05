@@ -100,6 +100,28 @@ full-size source bitmap is never materialised, then resized with
 through the `read` tool (peak = `VmHWM`, "after" = RSS 3 s later; idle baseline
 ~3 MB):
 
+### Real-world inputs
+
+The synthetic 7000px fixtures bracket the worst case. What agents actually get
+are screenshots and phone photos. Release build, through the `read` tool:
+
+| input | pipelets peak | pipelets time | pi peak | pi time |
+| --- | --- | --- | --- | --- |
+| 1920x1080 screenshot PNG (1.5 MB) | **7 MB** | **0.9 ms** | 124 MB | 76 ms |
+| 2560x1440 screenshot PNG (2.6 MB) | 33 MB | 66 ms | 205 MB | 750 ms |
+| 3840x2160 screenshot PNG (5.9 MB) | 53 MB | 84 ms | 284 MB | 952 ms |
+| 3024x4032 phone photo JPEG (3.8 MB) | 46 MB | 115 ms | 361 MB | 1371 ms |
+| 6000x4000 photo JPEG (7.4 MB) | 47 MB | 127 ms | 523 MB | 1735 ms |
+
+The common case — a screenshot at or under 2000px — is a **passthrough**: we read
+the header, see it is within limits, and return the original bytes without
+decoding (7 MB, under 1 ms). pi decodes it to check, peaking at 124 MB. Larger
+screenshots and photos cost a 33-53 MB transient that returns to ~5 MB, and the
+retained payload matches pi to a few KB (2.0 MB / 447 / 369 / 1.25 MB / 1.07 MB),
+so the request is the same size even though the bytes differ.
+
+### Synthetic worst case (7000x7000)
+
 | source -> target | peak RSS | RSS after | engine time |
 | --- | --- | --- | --- |
 | 2100x2100 PNG -> 2000x2000 | **41 MB** | 4.8 MB | 24 ms |
@@ -154,20 +176,11 @@ session JSONL is read by pi/pi-web, so the on-disk format cannot become a path.
 
 ### Versus pi
 
-pi runs the same resize through photon (WASM) under Node. Warm medians of 3,
-peak RSS from `/proc/self/status`; Node's own baseline is 55.7 MB, ours ~3 MB:
-
-| fixture | pi peak | pi time | pipelets peak | pipelets time |
-| --- | --- | --- | --- | --- |
-| 2100x2100 PNG | 220 MB | 1066 ms | **41 MB** | **24 ms** |
-| 7000x7000 PNG | 900 MB | 2925 ms | **61 MB** | **332 ms** |
-| 7000x7000 JPEG | 922 MB | 3179 ms | **80 MB** | **250 ms** |
-
-Net of each runtime's baseline that is ~4x / ~14x / ~10x less memory and 9-45x
-faster. Output MIME and dimensions are identical on every fixture, so the note
-and request *structure* match; the exact bytes differ because photon and
-`fast_image_resize` encode differently, which is why image bytes are not part of
-the provider-parity gate.
+The two tables above are the pi comparison: pi runs the same resize through
+photon (WASM) under Node, warm medians of 3, peak RSS from `/proc/self/status`.
+Node's own baseline is 55.7 MB, ours ~3 MB. Net of baseline, pipelets is
+4-22x lighter and 8-45x faster depending on the input — least dramatic for
+small screenshots (which we barely touch) and most for large photos.
 
 ### Retained cost in a session
 
