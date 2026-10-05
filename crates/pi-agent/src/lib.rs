@@ -188,6 +188,11 @@ pub trait ModelProvider: Send + Sync {
         let _ = on_delta;
         self.complete(request)
     }
+
+    /// Apply the session's thinking level to subsequent requests. Providers
+    /// that do not reason ignore it; the default is a no-op so opting in is a
+    /// choice, not an obligation.
+    fn set_thinking_level(&self, _level: &str) {}
 }
 
 /// Default tokens reserved for the prompt tail and the model's response, matching
@@ -239,7 +244,6 @@ pub struct Agent {
     system: String,
     messages: Vec<TranscriptMessage>,
     tool_context: ToolContext,
-    max_iterations: usize,
     context_window: Option<usize>,
     context_bytes: Option<usize>,
     retained_bytes: usize,
@@ -264,7 +268,6 @@ impl Agent {
             system: system.into(),
             messages: Vec::new(),
             tool_context,
-            max_iterations: 16,
             context_window: None,
             context_bytes: None,
             retained_bytes: 0,
@@ -286,9 +289,11 @@ impl Agent {
         &self.commands
     }
 
-    pub fn with_max_iterations(mut self, max: usize) -> Self {
-        self.max_iterations = max.max(1);
-        self
+    /// Apply a thinking level to the provider for every request that follows.
+    /// The RPC `set_thinking_level` / `cycle_thinking_level` commands call this
+    /// so the level reaches the wire instead of being stored and ignored.
+    pub fn set_thinking_level(&mut self, level: &str) {
+        self.provider.set_thinking_level(level);
     }
 
     /// Bound retained context to the most recent `max_messages` entries.
@@ -484,11 +489,15 @@ impl Agent {
     }
 
     /// Run the model/tool loop, streaming each event to `on_event` as it occurs.
+    ///
+    /// The loop is unbounded, matching pi: it ends only when the model answers
+    /// without tool calls (or aborts), so a long tool-driven task is never cut
+    /// off mid-run by a turn count.
     pub fn run_with<F: FnMut(&AgentEvent)>(&mut self, mut on_event: F) -> Result<(), AgentError> {
         let tools: Vec<ToolSpec> = self.tools.iter().map(|tool| tool.spec()).collect();
         on_event(&AgentEvent::AgentStart);
 
-        for _ in 0..self.max_iterations {
+        loop {
             on_event(&AgentEvent::TurnStart);
             let request = CompletionRequest {
                 system: &self.system,
@@ -570,12 +579,6 @@ impl Agent {
             }
             on_event(&AgentEvent::TurnEnd);
         }
-
-        on_event(&AgentEvent::Done {
-            stop_reason: Some("max_iterations".to_string()),
-        });
-        on_event(&AgentEvent::AgentSettled);
-        Ok(())
     }
 
     fn run_tool(&self, call: &ToolCall) -> ToolResult {

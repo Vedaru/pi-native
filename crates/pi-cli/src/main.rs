@@ -477,7 +477,6 @@ fn run_stress_session(turns: usize, tool: &str, byte_limit_mb: usize, context_to
         "You are pi, a coding agent. Be concise.",
         ToolContext::new(&dir),
     )
-    .with_max_iterations(turns + 2)
     .with_compaction(context_tokens, DEFAULT_RESERVE_TOKENS);
     let mut agent = if byte_limit_mb > 0 {
         agent.with_context_byte_limit(byte_limit_mb * 1024 * 1024)

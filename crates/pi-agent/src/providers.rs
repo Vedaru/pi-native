@@ -5,6 +5,8 @@
 //! adding a provider is data (a builder), not a new adapter. All wire logic
 //! lives in `pi-providers`/`pi-net`; nothing here re-implements it.
 
+use std::sync::{Arc, Mutex};
+
 use crate::{AgentError, AssistantTurn, CompletionRequest, ModelProvider, ToolCall};
 use pi_net::{
     stream_sse, stream_sse_with, OpenAiCompletionsProtocol, OpenAiResponsesProtocol, SseProtocol,
@@ -52,6 +54,9 @@ pub struct HttpProvider<P: SseProtocol> {
     base_url: String,
     api_key: String,
     build: ParamsBuilder<P>,
+    /// Reasoning effort applied to every request. `set_thinking_level` writes
+    /// it; the params builder reads it, so a session's level reaches the wire.
+    thinking_effort: Arc<Mutex<Option<String>>>,
 }
 
 impl<P: SseProtocol> HttpProvider<P> {
@@ -64,7 +69,23 @@ impl<P: SseProtocol> HttpProvider<P> {
             base_url: base_url.into(),
             api_key: api_key.into(),
             build: Box::new(build),
+            thinking_effort: Arc::new(Mutex::new(None)),
         }
+    }
+}
+
+/// Map pi's thinking levels onto a provider reasoning effort.
+///
+/// `off` disables reasoning (no effort, so `resolve_thinking` emits
+/// `disabled`); `minimal`/`low` collapse to `low` and `xhigh`/`max` to `high`,
+/// the values OpenAI-compatible APIs accept. Any other level passes through.
+fn level_effort(level: &str) -> Option<String> {
+    match level {
+        "off" => None,
+        "minimal" | "low" => Some("low".to_string()),
+        "medium" => Some("medium".to_string()),
+        "high" | "xhigh" | "max" => Some("high".to_string()),
+        other => Some(other.to_string()),
     }
 }
 
@@ -85,6 +106,12 @@ impl<P: SseProtocol + 'static> ModelProvider for HttpProvider<P> {
         let result = stream_sse_with::<P>(&self.base_url, &self.api_key, &params, on_delta)
             .map_err(|error| AgentError::Provider(error.to_string()))?;
         Ok(turn_from_stream(result))
+    }
+
+    fn set_thinking_level(&self, level: &str) {
+        if let Ok(mut effort) = self.thinking_effort.lock() {
+            *effort = level_effort(level);
+        }
     }
 }
 
@@ -130,7 +157,15 @@ pub fn openai_completions_provider(
 ) -> HttpProvider<OpenAiCompletionsProtocol> {
     let model = model.into();
     let requires_reasoning = matches!(thinking_format, ThinkingFormat::Deepseek);
-    HttpProvider::new(base_url, api_key, move |request| {
+    let effort = Arc::new(Mutex::new(reasoning_effort));
+    let effort_for_build = Arc::clone(&effort);
+    let mut provider = HttpProvider::new(base_url, api_key, move |request| {
+        // Read the current level each request, so a mid-session change applies
+        // from the next turn without rebuilding the provider.
+        let reasoning_effort = effort_for_build
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
         build_openai_completions_params(
             model.clone(),
             request.system,
@@ -151,10 +186,12 @@ pub fn openai_completions_provider(
                 thinking_format,
                 max_tokens,
                 off_supported: true,
-                reasoning_effort: reasoning_effort.clone(),
+                reasoning_effort,
             },
         )
-    })
+    });
+    provider.thinking_effort = effort;
+    provider
 }
 
 #[cfg(test)]

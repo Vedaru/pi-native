@@ -138,24 +138,6 @@ fn unknown_tool_is_reported_and_the_loop_continues() {
     assert!(events.contains(&AgentEvent::AssistantText("recovered".into())));
 }
 
-#[test]
-fn iteration_bound_stops_a_runaway_loop() {
-    let provider = FakeProvider::new(vec![
-        tool_call_turn(),
-        tool_call_turn(),
-        tool_call_turn(),
-        tool_call_turn(),
-    ]);
-    let mut agent = agent(provider).with_max_iterations(3);
-    agent.push_user("go");
-
-    let events = agent.run().expect("runs");
-    assert!(events.contains(&AgentEvent::Done {
-        stop_reason: Some("max_iterations".into())
-    }));
-    assert_eq!(events.last(), Some(&AgentEvent::AgentSettled));
-}
-
 fn bash_turn() -> AssistantTurn {
     AssistantTurn {
         tool_calls: vec![ToolCall {
@@ -229,7 +211,6 @@ fn context_window_bounds_retained_messages() {
         "s",
         ToolContext::new(std::env::temp_dir()),
     )
-    .with_max_iterations(30)
     .with_context_window(4);
     agent.push_user("go");
 
@@ -269,7 +250,6 @@ fn context_byte_limit_bounds_retained_output() {
         "s",
         ToolContext::new(std::env::temp_dir()),
     )
-    .with_max_iterations(60)
     .with_context_window(4096)
     .with_context_byte_limit(16 * 1024);
     agent.push_user("go");
@@ -316,7 +296,6 @@ fn compaction_summarizes_older_messages() {
         "s",
         ToolContext::new(std::env::temp_dir()),
     )
-    .with_max_iterations(40)
     .with_compaction(2_000, 500)
     .with_summarizer(std::sync::Arc::new(StubSummarizer));
     agent.push_user("go");
@@ -369,7 +348,6 @@ fn compaction_does_not_churn_when_reserve_is_large() {
         "s",
         ToolContext::new(std::env::temp_dir()),
     )
-    .with_max_iterations(70)
     .with_compaction(2_000, 1_500)
     .with_summarizer(std::sync::Arc::new(StubSummarizer));
     agent.push_user("go");

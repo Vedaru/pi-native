@@ -351,6 +351,7 @@ fn apply_command(
         )),
         Request::SetThinkingLevel { level } => {
             session.thinking_level = level.clone();
+            agent.set_thinking_level(&level);
             Some(response(
                 id,
                 "set_thinking_level",
@@ -359,6 +360,7 @@ fn apply_command(
         }
         Request::CycleThinkingLevel => {
             let level = session.cycle_thinking();
+            agent.set_thinking_level(&level);
             Some(response(
                 id,
                 "cycle_thinking_level",
