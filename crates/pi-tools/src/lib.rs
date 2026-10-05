@@ -6,12 +6,12 @@
 //! and `find` follow.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use pi_providers::ToolSpec;
 use serde_json::{json, Value};
 
 pub mod io;
+pub mod shell;
 pub mod truncate;
 
 pub use truncate::{truncate_head, truncate_tail, DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES};
@@ -68,23 +68,149 @@ fn format_size(bytes: usize) -> String {
 }
 
 /// The environment a tool runs in.
+///
+/// Paths are jailed to a set of allowed roots. By default the working
+/// directory is both the read and the write root, so a tool cannot reach
+/// `/etc/passwd` or a user's home by asking for an absolute path. Symlinks are
+/// resolved before the prefix check, so a link inside the workspace cannot be
+/// used to escape it. Callers that genuinely need to escape the workspace can
+/// widen the roots or set [`ToolContext::allow_outside`].
 #[derive(Debug, Clone)]
 pub struct ToolContext {
     pub cwd: PathBuf,
+    read_roots: Vec<PathBuf>,
+    write_roots: Vec<PathBuf>,
+    allow_outside: bool,
 }
+
+/// A path that failed the workspace jail.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JailError {
+    pub path: String,
+    pub reason: String,
+}
+
+impl std::fmt::Display for JailError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "path `{}` {}", self.path, self.reason)
+    }
+}
+
+impl std::error::Error for JailError {}
 
 impl ToolContext {
     pub fn new(cwd: impl Into<PathBuf>) -> Self {
-        Self { cwd: cwd.into() }
+        let cwd = cwd.into();
+        Self {
+            read_roots: vec![cwd.clone()],
+            write_roots: vec![cwd.clone()],
+            cwd,
+            allow_outside: false,
+        }
     }
 
-    /// Resolve a tool-supplied path against the working directory.
+    /// Additional directories tools may read from (e.g. a shared skills dir).
+    pub fn with_read_roots(mut self, roots: impl IntoIterator<Item = PathBuf>) -> Self {
+        self.read_roots.extend(roots);
+        self
+    }
+
+    /// Additional directories tools may write to.
+    pub fn with_write_roots(mut self, roots: impl IntoIterator<Item = PathBuf>) -> Self {
+        self.write_roots.extend(roots);
+        self
+    }
+
+    /// Permit absolute paths and `..` escapes (opt-in; not the default).
+    pub fn allow_outside(mut self, allow: bool) -> Self {
+        self.allow_outside = allow;
+        self
+    }
+
+    /// Resolve a path for a read-only tool, enforcing the read jail.
+    pub fn resolve_read(&self, path: &str) -> Result<PathBuf, JailError> {
+        self.resolve_in(path, &self.read_roots, "read")
+    }
+
+    /// Resolve a path for a mutating tool, enforcing the write jail.
+    pub fn resolve_write(&self, path: &str) -> Result<PathBuf, JailError> {
+        self.resolve_in(path, &self.write_roots, "write")
+    }
+
+    /// Resolve a tool-supplied path against the working directory without a
+    /// jail check. Only for callers that have already validated the path.
     pub fn resolve(&self, path: &str) -> PathBuf {
         let candidate = Path::new(path);
         if candidate.is_absolute() {
             candidate.to_path_buf()
         } else {
             self.cwd.join(candidate)
+        }
+    }
+
+    fn resolve_in(&self, path: &str, roots: &[PathBuf], kind: &str) -> Result<PathBuf, JailError> {
+        // Collapse `.`/`..` lexically first so a non-existent prefix cannot hide
+        // a `..` from the prefix check (e.g. `missing/../../etc/passwd`).
+        let candidate = lexical_normalize(&self.resolve(path));
+        if self.allow_outside {
+            return Ok(canonicalize_lenient(&candidate));
+        }
+        let real = canonicalize_lenient(&candidate);
+        for root in roots {
+            if real.starts_with(canonicalize_lenient(root)) {
+                return Ok(real);
+            }
+        }
+        Err(JailError {
+            path: path.to_string(),
+            reason: format!("escapes the workspace {kind} roots"),
+        })
+    }
+}
+
+/// Collapse `.` and `..` components without touching the filesystem. `..` at
+/// the root is clamped there, matching Node's `path.resolve`.
+fn lexical_normalize(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => out.push(prefix.as_os_str()),
+            Component::RootDir => out.push(std::path::MAIN_SEPARATOR.to_string()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::Normal(part) => out.push(part),
+        }
+    }
+    out
+}
+
+/// Canonicalize a path, resolving symlinks in the longest existing prefix and
+/// preserving the non-existent suffix (for writes to new files).
+fn canonicalize_lenient(path: &Path) -> PathBuf {
+    let mut suffix: Vec<std::ffi::OsString> = Vec::new();
+    let mut current = path.to_path_buf();
+    loop {
+        if let Ok(mut real) = current.canonicalize() {
+            for segment in suffix.iter().rev() {
+                real.push(segment);
+            }
+            return real;
+        }
+        match current.file_name() {
+            Some(name) => {
+                suffix.push(name.to_os_string());
+                if !current.pop() {
+                    return path.to_path_buf();
+                }
+            }
+            None => {
+                if !current.pop() {
+                    return path.to_path_buf();
+                }
+            }
         }
     }
 }
@@ -174,7 +300,10 @@ impl Tool for ReadTool {
         let Some(path) = input.get("path").and_then(Value::as_str) else {
             return ToolResult::error("read: missing required field `path`");
         };
-        let resolved = ctx.resolve(path);
+        let resolved = match ctx.resolve_read(path) {
+            Ok(path) => path,
+            Err(error) => return ToolResult::error(format!("read: {error}")),
+        };
         // Stream line by line; never load the whole file.
         let file = match std::fs::File::open(&resolved) {
             Ok(file) => file,
@@ -275,58 +404,32 @@ impl Tool for BashTool {
         let Some(command) = input.get("command").and_then(Value::as_str) else {
             return ToolResult::error("bash: missing required field `command`");
         };
-        let timeout = input.get("timeout").and_then(Value::as_u64);
-        let spawned = Command::new("sh")
-            .arg("-c")
-            .arg(command)
-            .current_dir(&ctx.cwd)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn();
-        let mut child = match spawned {
-            Ok(child) => child,
-            Err(error) => return ToolResult::error(format!("bash: {error}")),
-        };
-        if let Some(seconds) = timeout {
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(seconds);
-            loop {
-                match child.try_wait() {
-                    Ok(Some(_)) => break,
-                    Ok(None) => {
-                        if std::time::Instant::now() >= deadline {
-                            let _ = child.kill();
-                            break;
-                        }
-                        std::thread::sleep(std::time::Duration::from_millis(20));
-                    }
-                    Err(error) => return ToolResult::error(format!("bash: {error}")),
-                }
-            }
+        let timeout = input
+            .get("timeout")
+            .and_then(Value::as_u64)
+            .map(std::time::Duration::from_secs);
+        let result = shell::run_shell(command, &ctx.cwd, timeout);
+        let mut content = result.output;
+        if result.timed_out {
+            content = format!(
+                "[Command timed out after {}s and was killed.]\n{content}",
+                timeout.unwrap_or(shell::DEFAULT_TIMEOUT).as_secs()
+            );
+        } else if result.truncated {
+            let suffix = match &result.spool_path {
+                Some(path) => format!(" Full output: {}", path.display()),
+                None => String::new(),
+            };
+            content = format!(
+                "[Output truncated to the last {} lines.]{suffix}\n{content}",
+                content.lines().count()
+            );
         }
-        let output = match child.wait_with_output() {
-            Ok(output) => output,
-            Err(error) => return ToolResult::error(format!("bash: {error}")),
-        };
-        let mut combined = String::from_utf8_lossy(&output.stdout).into_owned();
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        if !stderr.is_empty() {
-            combined.push_str(&stderr);
-        }
-        let truncated = truncate_tail(&combined, DEFAULT_MAX_LINES, DEFAULT_MAX_BYTES);
-        let content = if truncated.truncated {
-            format!(
-                "[Output truncated to the last {} lines.]\n{}",
-                truncated.content.lines().count(),
-                truncated.content
-            )
-        } else {
-            truncated.content
-        };
-        if output.status.success() {
+        if result.exit_code == 0 && !result.timed_out {
             ToolResult::ok(content)
         } else {
             ToolResult::error(if content.is_empty() {
-                format!("bash: exited with {}", output.status)
+                format!("bash: exited with {}", result.exit_code)
             } else {
                 content
             })
@@ -358,7 +461,10 @@ impl Tool for LsTool {
 
     fn run(&self, input: &Value, ctx: &ToolContext) -> ToolResult {
         let resolved = match input.get("path").and_then(Value::as_str) {
-            Some(path) => ctx.resolve(path),
+            Some(path) => match ctx.resolve_read(path) {
+                Ok(path) => path,
+                Err(error) => return ToolResult::error(format!("ls: {error}")),
+            },
             None => ctx.cwd.clone(),
         };
         let limit = input
@@ -429,7 +535,10 @@ impl Tool for WriteTool {
         let Some(content) = input.get("content").and_then(Value::as_str) else {
             return ToolResult::error("write: missing required field `content`");
         };
-        let resolved = ctx.resolve(path);
+        let resolved = match ctx.resolve_write(path) {
+            Ok(path) => path,
+            Err(error) => return ToolResult::error(format!("write: {error}")),
+        };
         if let Some(parent) = resolved.parent() {
             if let Err(error) = std::fs::create_dir_all(parent) {
                 return ToolResult::error(format!("write: {path}: {error}"));
@@ -514,7 +623,10 @@ impl Tool for EditTool {
             return ToolResult::error("edit: `edits` must contain at least one replacement");
         }
 
-        let resolved = ctx.resolve(path);
+        let resolved = match ctx.resolve_write(path) {
+            Ok(path) => path,
+            Err(error) => return ToolResult::error(format!("edit: {error}")),
+        };
         let contents = match std::fs::read_to_string(&resolved) {
             Ok(contents) => contents,
             Err(error) => return ToolResult::error(format!("edit: {path}: {error}")),
@@ -628,11 +740,13 @@ impl Tool for GrepTool {
             Err(error) => return ToolResult::error(format!("grep: invalid pattern: {error}")),
         };
 
-        let root = input
-            .get("path")
-            .and_then(Value::as_str)
-            .map(|path| ctx.resolve(path))
-            .unwrap_or_else(|| ctx.cwd.clone());
+        let root = match input.get("path").and_then(Value::as_str) {
+            Some(path) => match ctx.resolve_read(path) {
+                Ok(path) => path,
+                Err(error) => return ToolResult::error(format!("grep: {error}")),
+            },
+            None => ctx.cwd.clone(),
+        };
         let is_dir = root.is_dir();
 
         let mut output: Vec<String> = Vec::new();
@@ -760,11 +874,13 @@ impl Tool for FindTool {
             Ok(matcher) => matcher,
             Err(error) => return ToolResult::error(format!("find: invalid pattern: {error}")),
         };
-        let root = input
-            .get("path")
-            .and_then(Value::as_str)
-            .map(|path| ctx.resolve(path))
-            .unwrap_or_else(|| ctx.cwd.clone());
+        let root = match input.get("path").and_then(Value::as_str) {
+            Some(path) => match ctx.resolve_read(path) {
+                Ok(path) => path,
+                Err(error) => return ToolResult::error(format!("find: {error}")),
+            },
+            None => ctx.cwd.clone(),
+        };
         let limit = input
             .get("limit")
             .and_then(Value::as_u64)

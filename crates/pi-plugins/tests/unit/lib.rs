@@ -268,3 +268,106 @@ fn instance_registers_and_calls_a_tool() {
         serde_json::json!("hello world")
     );
 }
+
+#[test]
+fn large_integers_reach_js_without_truncation() {
+    // 2^53 + 1 would round through an f64 and overflow an i32; the host must
+    // hand QuickJS an exact value.
+    let source = r#"
+        export default function (pi) {
+            pi.registerTool({
+                name: "echo",
+                description: "Echo",
+                parameters: { type: "object" },
+                execute: (input) => ({ content: [{ type: "text", text: String(input.big) }] }),
+            });
+        }
+    "#;
+    let instance =
+        PluginInstance::load(PluginPolicy::permissive(), "plugin://big.ts", source).expect("load");
+    let result = instance
+        .call_tool("echo", &serde_json::json!({ "big": 9007199254740993i64 }))
+        .expect("call");
+    assert_eq!(
+        result["content"][0]["text"],
+        serde_json::json!("9007199254740993")
+    );
+}
+
+#[test]
+fn path_resolve_uses_the_injected_cwd() {
+    let host = PluginHost::new(PluginPolicy::permissive());
+    let calls = host
+        .run(r#"import path from "node:path"; pi.log(path.resolve("a", "b"));"#)
+        .expect("runs");
+    let cwd = std::env::current_dir()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    assert_eq!(calls[0].args, serde_json::json!(format!("{cwd}/a/b")));
+}
+
+#[test]
+fn process_env_is_populated() {
+    std::env::set_var("PI_NATIVE_TEST_ENV", "hello");
+    let host = PluginHost::new(PluginPolicy::permissive());
+    let calls = host
+        .run(r#"import process from "node:process"; pi.log(process.env.PI_NATIVE_TEST_ENV);"#)
+        .expect("runs");
+    assert_eq!(calls[0].args, serde_json::json!("hello"));
+}
+
+#[test]
+fn node_http_and_https_modules_load() {
+    let host = PluginHost::new(PluginPolicy::permissive());
+    let calls = host
+        .run(
+            r#"import http from "node:http"; import https from "node:https"; pi.log(typeof http.request + "/" + typeof https.get);"#,
+        )
+        .expect("runs");
+    assert_eq!(calls[0].args, serde_json::json!("function/function"));
+}
+
+#[test]
+fn extension_policy_denies_ambient_capabilities_by_default() {
+    let root = std::env::temp_dir();
+    let host = PluginHost::new(PluginPolicy::for_extension(&root));
+    let result = host.run(r#"import { execSync } from "node:child_process"; execSync("echo hi");"#);
+    match result {
+        Err(PluginError::Denied { capability, .. }) => assert_eq!(capability, Capability::Exec),
+        other => panic!("expected exec denial, got {other:?}"),
+    }
+}
+
+#[test]
+fn extension_policy_jails_granted_reads_to_the_workspace() {
+    let root = std::env::temp_dir().join(format!("pi-plugin-root-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("root");
+    let inside = root.join("in.txt");
+    std::fs::write(&inside, "inside").expect("write inside");
+    let outside =
+        std::env::temp_dir().join(format!("pi-plugin-outside-{}.txt", std::process::id()));
+    std::fs::write(&outside, "outside").expect("write outside");
+
+    let host = PluginHost::new(PluginPolicy::for_extension(&root).allow(Capability::Read));
+    let allowed = host
+        .run(&format!(
+            r#"import fs from "node:fs"; pi.log(fs.readFileSync({:?}, "utf8"));"#,
+            inside.to_string_lossy()
+        ))
+        .expect("inside reads");
+    assert_eq!(allowed.last().unwrap().args, serde_json::json!("inside"));
+
+    let escaped = host.run(&format!(
+        r#"import fs from "node:fs"; fs.readFileSync({:?}, "utf8");"#,
+        outside.to_string_lossy()
+    ));
+    match escaped {
+        Err(PluginError::Denied { capability, .. }) => assert_eq!(capability, Capability::Read),
+        other => panic!("expected jail denial, got {other:?}"),
+    }
+
+    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_file(&outside);
+}

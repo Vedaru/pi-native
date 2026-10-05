@@ -1071,10 +1071,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "pi-gateway"
+version = "0.0.1"
+dependencies = [
+ "pi-agent",
+ "pi-host",
+ "pi-rpc",
+ "pi-triggers",
+ "serde_json",
+ "time",
+]
+
+[[package]]
 name = "pi-highlight"
 version = "0.0.1"
 dependencies = [
  "syntect",
+]
+
+[[package]]
+name = "pi-host"
+version = "0.0.1"
+dependencies = [
+ "pi-agent",
+ "pi-rpc",
+ "pi-session",
+ "serde_json",
 ]
 
 [[package]]
@@ -1093,10 +1115,13 @@ dependencies = [
  "clap",
  "pi-agent",
  "pi-cache",
+ "pi-gateway",
+ "pi-host",
  "pi-plugins",
  "pi-rpc",
  "pi-session",
  "pi-tools",
+ "pi-triggers",
  "serde_json",
 ]
 
@@ -1164,6 +1189,7 @@ version = "0.0.1"
 dependencies = [
  "globset",
  "ignore",
+ "libc",
  "pi-providers",
  "regex",
  "serde_json",
@@ -1180,6 +1206,17 @@ dependencies = [
  "swc_ecma_transforms_base",
  "swc_ecma_transforms_typescript",
  "swc_ecma_visit",
+]
+
+[[package]]
+name = "pi-triggers"
+version = "0.0.1"
+dependencies = [
+ "pi-agent",
+ "pi-host",
+ "serde",
+ "serde_json",
+ "time",
 ]
 
 [[package]]

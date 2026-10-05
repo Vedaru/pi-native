@@ -12,3 +12,6 @@ pi-providers = { path = "../pi-providers" }
 ignore = "0.4"
 regex = "1"
 globset = "0.4"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

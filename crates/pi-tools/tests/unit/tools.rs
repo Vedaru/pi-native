@@ -252,3 +252,116 @@ fn find_and_ls_honor_limit() {
     let listed = LsTool.run(&serde_json::json!({ "limit": 2 }), &ctx);
     assert_eq!(listed.content.lines().count(), 2);
 }
+
+#[test]
+fn read_denies_a_path_outside_the_workspace() {
+    let ctx = temp_ctx();
+    let outside = std::env::temp_dir().join(format!("pi-tools-outside-{}.txt", std::process::id()));
+    std::fs::write(&outside, "secret").expect("write");
+    let result = ReadTool.run(
+        &serde_json::json!({ "path": outside.to_string_lossy() }),
+        &ctx,
+    );
+    assert!(result.is_error, "{result:?}");
+    assert!(result.content.contains("escapes"), "{result:?}");
+    let _ = std::fs::remove_file(&outside);
+}
+
+#[test]
+fn read_denies_parent_traversal() {
+    let ctx = temp_ctx();
+    let result = ReadTool.run(&serde_json::json!({ "path": "../escape.txt" }), &ctx);
+    assert!(result.is_error, "{result:?}");
+}
+
+#[test]
+fn write_denies_a_path_outside_the_workspace() {
+    let ctx = temp_ctx();
+    let target = std::env::temp_dir().join(format!("pi-tools-escape-{}.txt", std::process::id()));
+    let result = WriteTool.run(
+        &serde_json::json!({ "path": target.to_string_lossy(), "content": "x" }),
+        &ctx,
+    );
+    assert!(result.is_error, "{result:?}");
+    assert!(!target.exists(), "jail let a write escape the workspace");
+}
+
+#[cfg(unix)]
+#[test]
+fn symlink_cannot_escape_the_workspace() {
+    let ctx = temp_ctx();
+    let outside = std::env::temp_dir().join(format!("pi-tools-symlink-{}.txt", std::process::id()));
+    std::fs::write(&outside, "secret").expect("write");
+    let link = ctx.cwd.join("link.txt");
+    std::os::unix::fs::symlink(&outside, &link).expect("symlink");
+    let result = ReadTool.run(&serde_json::json!({ "path": "link.txt" }), &ctx);
+    assert!(result.is_error, "{result:?}");
+    let _ = std::fs::remove_file(&outside);
+}
+
+#[test]
+fn absolute_path_inside_the_workspace_is_allowed() {
+    let ctx = temp_ctx();
+    let nested = ctx.cwd.join("sub");
+    std::fs::create_dir_all(&nested).expect("mkdir");
+    std::fs::write(nested.join("a.txt"), "ok").expect("write");
+    let result = ReadTool.run(
+        &serde_json::json!({ "path": nested.join("a.txt").to_string_lossy() }),
+        &ctx,
+    );
+    assert!(!result.is_error, "{result:?}");
+    assert_eq!(result.content, "ok");
+}
+
+#[test]
+fn write_denies_parent_traversal_through_a_missing_directory() {
+    let ctx = temp_ctx();
+    let result = WriteTool.run(
+        &serde_json::json!({
+            "path": "missing/../../pi-tools-escape-traversal.txt",
+            "content": "x"
+        }),
+        &ctx,
+    );
+    assert!(result.is_error, "{result:?}");
+    assert!(
+        !ctx.cwd.join("missing").exists(),
+        "traversal created directories"
+    );
+}
+
+#[test]
+fn bash_output_is_bounded_and_spooled() {
+    let ctx = temp_ctx();
+    // ~1 MB of output, far past the 50 KB in-memory cap.
+    let result = BashTool.run(
+        &serde_json::json!({ "command": "head -c 1000000 /dev/zero | tr '\\0' 'x'" }),
+        &ctx,
+    );
+    assert!(!result.is_error, "{result:?}");
+    assert!(
+        result.content.len() < 300 * 1024,
+        "bash buffered {} bytes",
+        result.content.len()
+    );
+    assert!(result.content.contains("Full output:"), "{result:?}");
+    if let Some(path) = result
+        .content
+        .split("Full output: ")
+        .nth(1)
+        .and_then(|rest| rest.lines().next())
+    {
+        let _ = std::fs::remove_file(path.trim());
+    }
+}
+
+#[test]
+fn bash_timeout_kills_the_command() {
+    let ctx = temp_ctx();
+    let result = BashTool.run(
+        &serde_json::json!({ "command": "sleep 30", "timeout": 1 }),
+        &ctx,
+    );
+    assert!(result.is_error, "{result:?}");
+    assert!(result.content.contains("timed out"), "{result:?}");
+}

@@ -17,6 +17,7 @@ pub mod globals;
 pub mod modules;
 
 use rquickjs::{CatchResultExt, Context, Ctx, Function, Module, Object, Runtime};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 /// Capabilities a plugin may request, mirroring pi's policy tokens.
@@ -60,6 +61,8 @@ pub struct HostCall {
 #[derive(Debug, Clone, Default)]
 pub struct PluginPolicy {
     allowed: std::collections::HashSet<Capability>,
+    /// When set, `read`/`write`/`exec` paths are confined to this directory.
+    workspace_root: Option<PathBuf>,
 }
 
 impl PluginPolicy {
@@ -70,6 +73,21 @@ impl PluginPolicy {
             allowed: [Read, Write, Exec, Http, Session, Ui, Events, Log]
                 .into_iter()
                 .collect(),
+            workspace_root: None,
+        }
+    }
+
+    /// Policy for an explicitly loaded `--extension`.
+    ///
+    /// Registration, session, UI, and event hostcalls are allowed. Ambient
+    /// `read`/`write`/`exec`/`http` are denied until granted with
+    /// [`PluginPolicy::allow`], and once granted their paths are jailed to
+    /// `workspace_root`.
+    pub fn for_extension(workspace_root: impl Into<PathBuf>) -> Self {
+        use Capability::*;
+        Self {
+            allowed: [Log, Session, Ui, Events].into_iter().collect(),
+            workspace_root: Some(workspace_root.into()),
         }
     }
 
@@ -80,6 +98,81 @@ impl PluginPolicy {
 
     pub fn is_allowed(&self, capability: Capability) -> bool {
         self.allowed.contains(&capability)
+    }
+
+    pub fn workspace_root(&self) -> Option<&Path> {
+        self.workspace_root.as_deref()
+    }
+
+    /// Resolve a plugin-supplied path against the workspace root, rejecting
+    /// symlink escapes. Without a configured root (trusted/in-tree hosts) the
+    /// path is passed through unchanged.
+    pub fn resolve_path(&self, path: &str) -> Result<PathBuf, String> {
+        let Some(root) = &self.workspace_root else {
+            return Ok(PathBuf::from(path));
+        };
+        let candidate = if Path::new(path).is_absolute() {
+            PathBuf::from(path)
+        } else {
+            root.join(path)
+        };
+        // Collapse `.`/`..` before canonicalizing so a missing prefix cannot
+        // hide a `..` from the prefix check.
+        let candidate = lexical_normalize(&candidate);
+        let real = canonicalize_lenient(&candidate);
+        let root_real = canonicalize_lenient(root);
+        if real.starts_with(&root_real) {
+            Ok(real)
+        } else {
+            Err(format!("path `{path}` escapes the plugin workspace"))
+        }
+    }
+}
+
+/// Collapse `.` and `..` without touching the filesystem (Node `path.resolve`
+/// semantics; `..` at the root is clamped).
+fn lexical_normalize(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => out.push(prefix.as_os_str()),
+            Component::RootDir => out.push(std::path::MAIN_SEPARATOR.to_string()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::Normal(part) => out.push(part),
+        }
+    }
+    out
+}
+
+/// Canonicalize a path, resolving symlinks in the longest existing prefix and
+/// preserving the non-existent suffix (for writes to new files).
+fn canonicalize_lenient(path: &Path) -> PathBuf {
+    let mut suffix: Vec<std::ffi::OsString> = Vec::new();
+    let mut current = path.to_path_buf();
+    loop {
+        if let Ok(mut real) = current.canonicalize() {
+            for segment in suffix.iter().rev() {
+                real.push(segment);
+            }
+            return real;
+        }
+        match current.file_name() {
+            Some(name) => {
+                suffix.push(name.to_os_string());
+                if !current.pop() {
+                    return path.to_path_buf();
+                }
+            }
+            None => {
+                if !current.pop() {
+                    return path.to_path_buf();
+                }
+            }
+        }
     }
 }
 
@@ -470,18 +563,16 @@ impl PluginHost {
             Function::new(
                 ctx.clone(),
                 move |path: String, _encoding: Option<String>| -> String {
-                    let allowed = record(
+                    match gate_path(
                         &policy,
                         &calls,
                         &denials,
                         Capability::Read,
                         "fs.readFileSync",
-                        serde_json::json!({ "path": path }),
-                    );
-                    if allowed {
-                        std::fs::read_to_string(&path).unwrap_or_default()
-                    } else {
-                        String::new()
+                        &path,
+                    ) {
+                        Some(resolved) => std::fs::read_to_string(&resolved).unwrap_or_default(),
+                        None => String::new(),
                     }
                 },
             ),
@@ -496,15 +587,15 @@ impl PluginHost {
         fs.set(
             "writeFileSync",
             Function::new(ctx.clone(), move |path: String, data: String| {
-                if record(
+                if let Some(resolved) = gate_path(
                     &policy,
                     &calls,
                     &denials,
                     Capability::Write,
                     "fs.writeFileSync",
-                    serde_json::json!({ "path": path }),
+                    &path,
                 ) {
-                    let _ = std::fs::write(&path, data);
+                    let _ = std::fs::write(&resolved, data);
                 }
             }),
         )?;
@@ -518,15 +609,16 @@ impl PluginHost {
         fs.set(
             "existsSync",
             Function::new(ctx.clone(), move |path: String| -> bool {
-                let allowed = record(
+                gate_path(
                     &policy,
                     &calls,
                     &denials,
                     Capability::Read,
                     "fs.existsSync",
-                    serde_json::json!({ "path": path }),
-                );
-                allowed && std::path::Path::new(&path).exists()
+                    &path,
+                )
+                .map(|resolved| resolved.exists())
+                .unwrap_or(false)
             }),
         )?;
 
@@ -539,18 +631,17 @@ impl PluginHost {
         fs.set(
             "readdirSync",
             Function::new(ctx.clone(), move |path: String| -> Vec<String> {
-                let allowed = record(
+                let Some(resolved) = gate_path(
                     &policy,
                     &calls,
                     &denials,
                     Capability::Read,
                     "fs.readdirSync",
-                    serde_json::json!({ "path": path }),
-                );
-                if !allowed {
+                    &path,
+                ) else {
                     return Vec::new();
-                }
-                std::fs::read_dir(&path)
+                };
+                std::fs::read_dir(&resolved)
                     .map(|entries| {
                         entries
                             .flatten()
@@ -570,18 +661,18 @@ impl PluginHost {
         fs.set(
             "mkdirSync",
             Function::new(ctx.clone(), move |path: String, recursive: Option<bool>| {
-                if record(
+                if let Some(resolved) = gate_path(
                     &policy,
                     &calls,
                     &denials,
                     Capability::Write,
                     "fs.mkdirSync",
-                    serde_json::json!({ "path": path }),
+                    &path,
                 ) {
                     let _ = if recursive.unwrap_or(false) {
-                        std::fs::create_dir_all(&path)
+                        std::fs::create_dir_all(&resolved)
                     } else {
-                        std::fs::create_dir(&path)
+                        std::fs::create_dir(&resolved)
                     };
                 }
             }),
@@ -596,15 +687,15 @@ impl PluginHost {
         fs.set(
             "unlinkSync",
             Function::new(ctx.clone(), move |path: String| {
-                if record(
+                if let Some(resolved) = gate_path(
                     &policy,
                     &calls,
                     &denials,
                     Capability::Write,
                     "fs.unlinkSync",
-                    serde_json::json!({ "path": path }),
+                    &path,
                 ) {
-                    let _ = std::fs::remove_file(&path);
+                    let _ = std::fs::remove_file(&resolved);
                 }
             }),
         )?;
@@ -618,19 +709,19 @@ impl PluginHost {
         fs.set(
             "appendFileSync",
             Function::new(ctx.clone(), move |path: String, data: String| {
-                if record(
+                if let Some(resolved) = gate_path(
                     &policy,
                     &calls,
                     &denials,
                     Capability::Write,
                     "fs.appendFileSync",
-                    serde_json::json!({ "path": path }),
+                    &path,
                 ) {
                     use std::io::Write as _;
                     if let Ok(mut file) = std::fs::OpenOptions::new()
                         .create(true)
                         .append(true)
-                        .open(&path)
+                        .open(&resolved)
                     {
                         let _ = file.write_all(data.as_bytes());
                     }
@@ -655,7 +746,17 @@ impl PluginHost {
                     "fs.copyFileSync",
                     serde_json::json!({ "src": src, "dest": dest }),
                 ) {
-                    let _ = std::fs::copy(&src, &dest);
+                    match (policy.resolve_path(&src), policy.resolve_path(&dest)) {
+                        (Ok(src), Ok(dest)) => {
+                            let _ = std::fs::copy(&src, &dest);
+                        }
+                        _ => record_denied(
+                            &denials,
+                            Capability::Write,
+                            "fs.copyFileSync",
+                            serde_json::json!({ "src": src, "dest": dest, "reason": "outside workspace" }),
+                        ),
+                    }
                 }
             }),
         )?;
@@ -669,18 +770,18 @@ impl PluginHost {
         fs.set(
             "rmSync",
             Function::new(ctx.clone(), move |path: String, recursive: Option<bool>| {
-                if record(
+                if let Some(resolved) = gate_path(
                     &policy,
                     &calls,
                     &denials,
                     Capability::Write,
                     "fs.rmSync",
-                    serde_json::json!({ "path": path }),
+                    &path,
                 ) {
                     let _ = if recursive.unwrap_or(false) {
-                        std::fs::remove_dir_all(&path)
+                        std::fs::remove_dir_all(&resolved)
                     } else {
-                        std::fs::remove_file(&path)
+                        std::fs::remove_file(&resolved)
                     };
                 }
             }),
@@ -706,11 +807,17 @@ impl PluginHost {
                 if !allowed {
                     return String::new();
                 }
+                let base = match policy.resolve_path(&prefix) {
+                    Ok(path) => path,
+                    Err(_) => return String::new(),
+                };
                 let unique = crate::crypto::random_bytes(6)
                     .iter()
                     .map(|b| format!("{b:02x}"))
                     .collect::<String>();
-                let dir = format!("{prefix}{unique}");
+                let mut dir = base.into_os_string();
+                dir.push(&unique);
+                let dir = dir.to_string_lossy().to_string();
                 if std::fs::create_dir_all(&dir).is_ok() {
                     dir
                 } else {
@@ -785,7 +892,7 @@ impl PluginHost {
                     serde_json::json!({ "command": command }),
                 );
                 if allowed {
-                    run_shell(&command)
+                    run_shell(&command, policy.workspace_root())
                 } else {
                     String::new()
                 }
@@ -811,7 +918,7 @@ impl PluginHost {
                         serde_json::json!({ "command": command, "args": args }),
                     );
                     if allowed {
-                        run_command(&command, &args)
+                        run_command(&command, &args, policy.workspace_root())
                     } else {
                         serde_json::json!({ "status": null, "stdout": "", "stderr": "denied" })
                             .to_string()
@@ -871,20 +978,26 @@ impl PluginHost {
 }
 
 /// Run a shell command, returning stdout (lossy).
-fn run_shell(command: &str) -> String {
-    match std::process::Command::new("sh")
-        .arg("-c")
-        .arg(command)
-        .output()
-    {
+fn run_shell(command: &str, cwd: Option<&Path>) -> String {
+    let mut builder = std::process::Command::new("sh");
+    builder.arg("-c").arg(command);
+    if let Some(cwd) = cwd {
+        builder.current_dir(cwd);
+    }
+    match builder.output() {
         Ok(output) => String::from_utf8_lossy(&output.stdout).to_string(),
         Err(_) => String::new(),
     }
 }
 
 /// Run a command directly, returning JSON `{status, stdout, stderr}`.
-fn run_command(command: &str, args: &[String]) -> String {
-    match std::process::Command::new(command).args(args).output() {
+fn run_command(command: &str, args: &[String], cwd: Option<&Path>) -> String {
+    let mut builder = std::process::Command::new(command);
+    builder.args(args);
+    if let Some(cwd) = cwd {
+        builder.current_dir(cwd);
+    }
+    match builder.output() {
         Ok(output) => serde_json::json!({
             "status": output.status.code(),
             "stdout": String::from_utf8_lossy(&output.stdout),
@@ -973,6 +1086,14 @@ fn install_env(ctx: &Ctx<'_>) -> Result<(), PluginError> {
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_default(),
     )?;
+    // `process.env` reads this. Node exposes the whole environment, and pi
+    // extensions expect it; the capability policy governs file/process access,
+    // not env reads.
+    let vars = Object::new(ctx.clone())?;
+    for (key, value) in std::env::vars() {
+        vars.set(key.as_str(), value)?;
+    }
+    env.set("env", vars)?;
     ctx.globals().set("__pi_env", env)?;
     Ok(())
 }
@@ -1042,6 +1163,54 @@ fn record(
     } else {
         denials.lock().expect("denials lock").push(call);
         false
+    }
+}
+
+fn record_denied(
+    denials: &Arc<Mutex<Vec<HostCall>>>,
+    capability: Capability,
+    method: &str,
+    args: serde_json::Value,
+) {
+    denials.lock().expect("denials lock").push(HostCall {
+        capability,
+        method: method.to_string(),
+        args,
+    });
+}
+
+/// Capability-gate a filesystem hostcall and resolve its path inside the
+/// workspace. Records a denial if the path escapes, so the plugin load fails
+/// like any other denied capability.
+fn gate_path(
+    policy: &PluginPolicy,
+    calls: &Arc<Mutex<Vec<HostCall>>>,
+    denials: &Arc<Mutex<Vec<HostCall>>>,
+    capability: Capability,
+    method: &str,
+    path: &str,
+) -> Option<PathBuf> {
+    if !record(
+        policy,
+        calls,
+        denials,
+        capability,
+        method,
+        serde_json::json!({ "path": path }),
+    ) {
+        return None;
+    }
+    match policy.resolve_path(path) {
+        Ok(resolved) => Some(resolved),
+        Err(reason) => {
+            record_denied(
+                denials,
+                capability,
+                method,
+                serde_json::json!({ "path": path, "reason": reason }),
+            );
+            None
+        }
     }
 }
 
@@ -1125,9 +1294,15 @@ fn json_to_js<'js>(ctx: &Ctx<'js>, value: &serde_json::Value) -> rquickjs::Value
         serde_json::Value::Bool(flag) => rquickjs::Value::new_bool(ctx.clone(), *flag),
         serde_json::Value::Number(number) => {
             if let Some(int) = number.as_i64() {
-                rquickjs::Value::new_int(ctx.clone(), int as i32)
+                if int >= i32::MIN as i64 && int <= i32::MAX as i64 {
+                    rquickjs::Value::new_int(ctx.clone(), int as i32)
+                } else if let Ok(big) = rquickjs::Value::new_big_int(ctx.clone(), int) {
+                    big
+                } else {
+                    rquickjs::Value::new_number(ctx.clone(), int as f64)
+                }
             } else {
-                rquickjs::Value::new_float(ctx.clone(), number.as_f64().unwrap_or(0.0))
+                rquickjs::Value::new_number(ctx.clone(), number.as_f64().unwrap_or(0.0))
             }
         }
         serde_json::Value::String(text) => rquickjs::String::from_str(ctx.clone(), text)

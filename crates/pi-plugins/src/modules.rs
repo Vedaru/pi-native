@@ -142,6 +142,8 @@ pub fn virtual_module_source(canonical: &str) -> Option<String> {
         "node:module" => Some(NODE_MODULE_MODULE.to_string()),
         "node:util" => Some(UTIL_MODULE.to_string()),
         "node:zlib" => Some(ZLIB_MODULE.to_string()),
+        "node:http" => Some(HTTP_MODULE.to_string()),
+        "node:https" => Some(HTTPS_MODULE.to_string()),
         "node:readline" | "node:readline/promises" => Some(READLINE_MODULE.to_string()),
         _ => None,
     }
@@ -220,13 +222,16 @@ function extname(p) {
 }
 function isAbsolute(p) { return p.startsWith("/"); }
 function resolve(...args) {
+  const env = globalThis.__pi_env || {};
   let resolved = "";
-  for (let i = args.length - 1; i >= 0 && !resolved.startsWith("/"); i--) {
+  let absolute = false;
+  for (let i = args.length - 1; i >= 0; i--) {
     const arg = args[i];
-    if (!arg) continue;
+    if (typeof arg !== "string" || arg === "") continue;
     resolved = arg + (resolved ? "/" + resolved : "");
+    if (arg.startsWith("/")) { absolute = true; break; }
   }
-  if (!resolved.startsWith("/")) resolved = "/__cwd__/" + resolved;
+  if (!absolute) resolved = (env.cwd || "/") + "/" + resolved;
   return normalizePath(resolved);
 }
 function relative(from, to) {
@@ -508,6 +513,32 @@ export function deflateSync(data) { return Buffer.from(host.deflateSync(toBytes(
 export function inflateSync(data) { return Buffer.from(host.inflateSync(toBytes(data))); }
 export const constants = {};
 export default { gzipSync, gunzipSync, deflateSync, inflateSync, constants };
+"#;
+
+// The resolver canonicalizes `node:http`/`node:https`, so they must have a
+// module body; otherwise an import fails at load. The native host has no HTTP
+// capability yet, so the calls throw with a clear message instead of a
+// confusing "could not read" loader error.
+const HTTP_UNSUPPORTED: &str = r#"
+function unsupported() { throw new Error("node:http is not supported by the native plugin host"); }
+export function request(..._args) { return unsupported(); }
+export function get(..._args) { return unsupported(); }
+export function createServer(..._args) { return unsupported(); }
+export class Agent { constructor() { unsupported(); } }
+export const STATUS_CODES = {};
+export default { request, get, createServer, Agent, STATUS_CODES };
+"#;
+
+const HTTP_MODULE: &str = HTTP_UNSUPPORTED;
+
+const HTTPS_MODULE: &str = r#"
+function unsupported() { throw new Error("node:https is not supported by the native plugin host"); }
+export function request(..._args) { return unsupported(); }
+export function get(..._args) { return unsupported(); }
+export function createServer(..._args) { return unsupported(); }
+export class Agent { constructor() { unsupported(); } }
+export const globalAgent = {};
+export default { request, get, createServer, Agent, globalAgent };
 "#;
 
 #[cfg(test)]
