@@ -17,7 +17,7 @@ use serde_json::Value;
 use std::collections::{HashMap, VecDeque};
 use std::io::{BufReader, Read, Write};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -49,11 +49,18 @@ impl std::fmt::Display for HostError {
 
 impl std::error::Error for HostError {}
 
+/// A published event paired with its monotonic sequence id.
+type Sequenced = (u64, Value);
+
 /// State shared between a unit's writer thread and its subscribers.
 #[derive(Default)]
 struct Shared {
-    subscribers: Mutex<Vec<SyncSender<Value>>>,
-    replay: Mutex<VecDeque<Value>>,
+    subscribers: Mutex<Vec<SyncSender<Sequenced>>>,
+    replay: Mutex<VecDeque<Sequenced>>,
+    /// Monotonic sequence id assigned to each published event (starting at 1).
+    /// Used by the gateway to emit SSE `id:` lines and resume with
+    /// `Last-Event-ID` (ADR 0003).
+    seq: AtomicU64,
     /// Most recent event type and its unix-seconds timestamp, for the swarm view.
     last_event: Mutex<Option<String>>,
     last_event_at: Mutex<i64>,
@@ -80,6 +87,9 @@ impl Shared {
 
     fn publish(&self, event: Value) {
         self.touch();
+        // Assign the sequence id before taking the replay lock so ids are
+        // monotonic in publication order.
+        let seq = self.seq.fetch_add(1, Ordering::SeqCst) + 1;
         if let Some(kind) = event.get("type").and_then(Value::as_str) {
             if let Ok(mut last) = self.last_event.lock() {
                 *last = Some(kind.to_string());
@@ -100,7 +110,7 @@ impl Shared {
         if replay.len() == REPLAY_LIMIT {
             replay.pop_front();
         }
-        replay.push_back(event.clone());
+        replay.push_back((seq, event.clone()));
         // Hold the replay lock while registering/sending so a concurrent
         // subscribe() cannot both snapshot this event and receive it live.
         let mut subscribers = self
@@ -109,10 +119,13 @@ impl Shared {
             .unwrap_or_else(|error| error.into_inner());
         // A full queue means the subscriber is not keeping up: drop it rather
         // than buffering without bound. It can re-subscribe and replay.
-        subscribers.retain(|sender| sender.try_send(event.clone()).is_ok());
+        subscribers.retain(|sender| sender.try_send((seq, event.clone())).is_ok());
     }
 
-    fn subscribe(&self) -> (Vec<Value>, Receiver<Value>) {
+    /// Snapshot the replay buffer and attach a live subscriber. Returns the
+    /// buffered `(seq, event)` pairs (oldest first) and the next sequence id
+    /// that will be assigned.
+    fn subscribe(&self) -> (Vec<Sequenced>, u64, Receiver<Sequenced>) {
         let replay = self
             .replay
             .lock()
@@ -123,7 +136,10 @@ impl Shared {
             .unwrap_or_else(|error| error.into_inner());
         let (tx, rx) = mpsc::sync_channel(SUBSCRIBER_QUEUE);
         subscribers.push(tx);
-        (replay.iter().cloned().collect(), rx)
+        // Derive `next_seq` from the buffered events under the replay lock, so a
+        // concurrently-assigned-but-not-yet-pushed id cannot skew it.
+        let next_seq = replay.back().map(|(seq, _)| seq + 1).unwrap_or(1);
+        (replay.iter().cloned().collect(), next_seq, rx)
     }
 
     fn last_event(&self) -> Option<String> {
@@ -247,7 +263,11 @@ impl Write for ChannelWriter {
 pub struct Subscription {
     /// Events published before this subscription attached, oldest first.
     pub replay: Vec<Value>,
-    rx: Receiver<Value>,
+    /// Sequence ids aligned with [`Subscription::replay`].
+    pub replay_ids: Vec<u64>,
+    /// The sequence id that the next live event will carry.
+    pub next_seq: u64,
+    rx: Receiver<(u64, Value)>,
 }
 
 /// Outcome of [`Subscription::recv_timeout`].
@@ -266,6 +286,12 @@ impl Subscription {
     /// A timeout and a disconnected unit are distinguished so callers (the SSE
     /// loop in particular) can close instead of heartbeating a dead unit.
     pub fn recv_timeout(&self, timeout: Duration) -> Result<Value, RecvError> {
+        self.recv_sequenced_timeout(timeout).map(|(_, event)| event)
+    }
+
+    /// Like [`Subscription::recv_timeout`], but also returns the event's
+    /// sequence id so an SSE stream can emit `id:` for `Last-Event-ID` resume.
+    pub fn recv_sequenced_timeout(&self, timeout: Duration) -> Result<(u64, Value), RecvError> {
         match self.rx.recv_timeout(timeout) {
             Ok(value) => Ok(value),
             Err(mpsc::RecvTimeoutError::Timeout) => Err(RecvError::Timeout),
@@ -275,7 +301,19 @@ impl Subscription {
 
     /// Receive without blocking. `None` means no event is ready *right now*.
     pub fn try_recv(&self) -> Option<Value> {
+        self.try_recv_sequenced().map(|(_, event)| event)
+    }
+
+    /// Like [`Subscription::try_recv`], but also returns the sequence id.
+    pub fn try_recv_sequenced(&self) -> Option<(u64, Value)> {
         self.rx.try_recv().ok()
+    }
+
+    /// The sequence id of the oldest buffered event, or [`Subscription::next_seq`]
+    /// when the buffer is empty. A client asking to resume from an id below this
+    /// has missed events that are no longer replayable.
+    pub fn oldest_replay_seq(&self) -> u64 {
+        self.replay_ids.first().copied().unwrap_or(self.next_seq)
     }
 }
 
@@ -371,8 +409,14 @@ impl Unit {
     }
 
     fn subscribe(&self) -> Subscription {
-        let (replay, rx) = self.shared.subscribe();
-        Subscription { replay, rx }
+        let (replay, next_seq, rx) = self.shared.subscribe();
+        let (replay_ids, replay): (Vec<u64>, Vec<Value>) = replay.into_iter().unzip();
+        Subscription {
+            replay,
+            replay_ids,
+            next_seq,
+            rx,
+        }
     }
 }
 

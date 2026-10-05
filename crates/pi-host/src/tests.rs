@@ -203,3 +203,62 @@ fn units_run_in_their_session_cwd() {
     assert!(cwds.contains(&"/tmp/project-b".to_string()), "{cwds:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn published_events_get_increasing_sequence_ids() {
+    let dir = temp_dir("seq");
+    let mut host = one_turn_host(&dir, "hello");
+    let id = host.open(dir.join("s.jsonl")).expect("open");
+    let subscription = host.subscribe(&id).expect("subscribe");
+    host.send(&id, json!({ "type": "prompt", "text": "go" }))
+        .expect("send");
+
+    let mut seen: Vec<u64> = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline {
+        match subscription.recv_sequenced_timeout(Duration::from_millis(50)) {
+            Ok((seq, event)) => {
+                seen.push(seq);
+                if event["type"] == json!("done") {
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    assert!(seen.len() >= 2, "expected several events: {seen:?}");
+    assert!(
+        seen.windows(2).all(|pair| pair[0] < pair[1]),
+        "sequence ids must strictly increase: {seen:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn replay_ids_align_with_replay_and_track_the_oldest() {
+    let dir = temp_dir("replay-ids");
+    let mut host = one_turn_host(&dir, "hello");
+    let id = host.open(dir.join("s.jsonl")).expect("open");
+    let early = host.subscribe(&id).expect("subscribe");
+    host.send(&id, json!({ "type": "prompt", "text": "go" }))
+        .expect("send");
+    assert!(wait_for(&early, "done", Duration::from_secs(2)).is_some());
+
+    let late = host.subscribe(&id).expect("subscribe");
+    assert_eq!(late.replay.len(), late.replay_ids.len());
+    assert!(
+        late.replay_ids.windows(2).all(|pair| pair[0] < pair[1]),
+        "replay ids must increase: {:?}",
+        late.replay_ids
+    );
+    assert_eq!(
+        late.oldest_replay_seq(),
+        late.replay_ids[0],
+        "oldest_replay_seq must be the first buffered id"
+    );
+    assert!(
+        late.next_seq > *late.replay_ids.last().unwrap(),
+        "next_seq must be beyond the buffer"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

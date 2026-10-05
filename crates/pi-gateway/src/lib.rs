@@ -135,6 +135,8 @@ struct Request {
     method: String,
     path: String,
     query: String,
+    /// The `Last-Event-ID` header, parsed as a sequence id, for SSE resume.
+    last_event_id: Option<u64>,
     body: Vec<u8>,
 }
 
@@ -184,10 +186,13 @@ fn read_request(stream: &mut TcpStream) -> std::io::Result<ReadOutcome> {
         None => (target, String::new()),
     };
     let mut content_length = 0usize;
+    let mut last_event_id = None;
     for line in lines {
         if let Some((key, value)) = line.split_once(':') {
             if key.eq_ignore_ascii_case("content-length") {
                 content_length = value.trim().parse().unwrap_or(0);
+            } else if key.eq_ignore_ascii_case("last-event-id") {
+                last_event_id = value.trim().parse().ok();
             }
         }
     }
@@ -207,6 +212,7 @@ fn read_request(stream: &mut TcpStream) -> std::io::Result<ReadOutcome> {
         method,
         path,
         query,
+        last_event_id,
         body,
     }))
 }
@@ -273,7 +279,13 @@ fn handle_connection(mut stream: TcpStream, gateway: Arc<Gateway>) -> std::io::R
         ("GET", ["sessions", id, "commands"]) => session_commands(&mut stream, &gateway, id),
         ("POST", ["sessions", id, "title"]) => session_title(&mut stream, &gateway, id),
         ("GET", ["sessions", id, "events"]) => {
-            stream_events(stream, &gateway, id, request.query.contains("format=pi"))?;
+            stream_events(
+                stream,
+                &gateway,
+                id,
+                request.query.contains("format=pi"),
+                request.last_event_id,
+            )?;
         }
         ("POST", ["sessions", id, "commands"]) => send_command(&mut stream, &gateway, id, &request),
         ("POST", ["sessions", id, "ui_response"]) => {
@@ -478,6 +490,7 @@ fn stream_events(
     gateway: &Gateway,
     id: &str,
     pi_format: bool,
+    last_event_id: Option<u64>,
 ) -> std::io::Result<()> {
     let Some(subscription) = subscribe_or_error(&mut stream, gateway, id) else {
         return Ok(());
@@ -487,20 +500,54 @@ fn stream_events(
     stream.flush()?;
 
     let mut adapter = PiEventAdapter::new();
+    let oldest = subscription.oldest_replay_seq();
+    // When the client asked to resume from an id older than anything still
+    // buffered, the events in between are gone. Tell it to resync rather than
+    // silently dropping them, then continue with what remains.
+    if let Some(last) = last_event_id {
+        if last + 1 < oldest {
+            let gap = json!({
+                "type": "resync",
+                "reason": "replay_buffer_rolled_over",
+                "lastEventId": last,
+                "oldestReplayId": oldest,
+                "nextEventId": subscription.next_seq,
+            });
+            let frame = format!(
+                "event: resync\nid: {}\ndata: {}\n\n",
+                oldest.saturating_sub(1),
+                serde_json::to_string(&gap).unwrap_or_default()
+            );
+            if stream.write_all(frame.as_bytes()).is_err() {
+                return Ok(());
+            }
+            // Ask the unit for a fresh snapshot so the client can rebuild state.
+            let _ = gateway.host().send(id, json!({ "type": "get_state" }));
+        }
+    }
     // Snapshot first, then live events; the host registers the subscriber and
-    // snapshots the replay atomically, so there is no gap or duplicate.
-    for event in subscription.replay.clone() {
+    // snapshots the replay atomically, so there is no gap or duplicate. Skip
+    // anything the client already saw (seq <= Last-Event-ID).
+    let resume_from = last_event_id.unwrap_or(0);
+    for (event, seq) in subscription
+        .replay
+        .clone()
+        .into_iter()
+        .zip(subscription.replay_ids.iter().copied())
+    {
+        if seq <= resume_from {
+            continue;
+        }
         let payloads = if pi_format {
             translate(&mut adapter, &event)
         } else {
             vec![event]
         };
         for payload in payloads {
-            let line = format!(
-                "data: {}\n\n",
-                serde_json::to_string(&payload).unwrap_or_default()
-            );
-            if stream.write_all(line.as_bytes()).is_err() {
+            if stream
+                .write_all(sse_frame(seq, &payload).as_bytes())
+                .is_err()
+            {
                 return Ok(());
             }
         }
@@ -509,19 +556,18 @@ fn stream_events(
         return Ok(());
     }
     loop {
-        match subscription.recv_timeout(SSE_HEARTBEAT) {
-            Ok(event) => {
+        match subscription.recv_sequenced_timeout(SSE_HEARTBEAT) {
+            Ok((seq, event)) => {
                 let payloads = if pi_format {
                     translate(&mut adapter, &event)
                 } else {
                     vec![event]
                 };
                 for payload in payloads {
-                    let line = format!(
-                        "data: {}\n\n",
-                        serde_json::to_string(&payload).unwrap_or_default()
-                    );
-                    if stream.write_all(line.as_bytes()).is_err() {
+                    if stream
+                        .write_all(sse_frame(seq, &payload).as_bytes())
+                        .is_err()
+                    {
                         return Ok(());
                     }
                 }
@@ -540,6 +586,15 @@ fn stream_events(
             Err(RecvError::Disconnected) => return Ok(()),
         }
     }
+}
+
+/// One SSE frame with its `id:` line, so a client's `Last-Event-ID` retry can
+/// resume from the right place.
+fn sse_frame(seq: u64, payload: &Value) -> String {
+    format!(
+        "id: {seq}\ndata: {}\n\n",
+        serde_json::to_string(payload).unwrap_or_default()
+    )
 }
 
 /// Fold a native event into pi's shapes; pass unknown values through unchanged.

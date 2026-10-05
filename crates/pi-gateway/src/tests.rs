@@ -335,3 +335,160 @@ fn generates_a_session_title() {
     assert_eq!(data["title"], json!("My Session Title"));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Parse `id: <n>` lines from an SSE transcript, in order.
+fn sse_ids(transcript: &str) -> Vec<u64> {
+    transcript
+        .lines()
+        .filter_map(|line| line.strip_prefix("id: "))
+        .filter_map(|value| value.trim().parse().ok())
+        .collect()
+}
+
+/// Open an SSE connection carrying a `Last-Event-ID` header.
+fn open_sse_with_last_event_id(addr: SocketAddr, path: &str, last: u64) -> TcpStream {
+    let mut stream = TcpStream::connect(addr).expect("connect");
+    let head = format!(
+        "GET {path} HTTP/1.1\r\nHost: localhost\r\nAccept: text/event-stream\r\nLast-Event-ID: {last}\r\n\r\n"
+    );
+    stream.write_all(head.as_bytes()).expect("write");
+    stream.flush().expect("flush");
+    let mut seen = Vec::new();
+    let mut byte = [0u8; 1];
+    while !seen.ends_with(b"\r\n\r\n") {
+        let read = stream.read(&mut byte).expect("read header");
+        if read == 0 {
+            break;
+        }
+        seen.push(byte[0]);
+    }
+    stream
+}
+
+#[test]
+fn sse_frames_carry_increasing_ids() {
+    let dir = temp_dir("sse-ids");
+    let server = start_gateway(&dir, "hello");
+    let id = create_session(&server, &dir);
+
+    let mut sse = open_sse(server.addr, &format!("/sessions/{id}/events"));
+    let (status, _) = request(
+        server.addr,
+        "POST",
+        &format!("/sessions/{id}/commands"),
+        Some(json!({ "type": "prompt", "text": "go" })),
+    );
+    assert_eq!(status, 202);
+
+    let text = wait_for_sse(&mut sse, "\"done\"", Duration::from_secs(3));
+    assert!(text.contains("id: "), "every frame needs an id: {text}");
+    let ids = sse_ids(&text);
+    assert!(ids.len() >= 2, "expected several ids: {ids:?}");
+    assert!(
+        ids.windows(2).all(|pair| pair[0] < pair[1]),
+        "ids must increase: {ids:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn last_event_id_replays_only_newer_events() {
+    let dir = temp_dir("sse-resume");
+    let server = start_gateway(&dir, "hello");
+    let id = create_session(&server, &dir);
+
+    // First connection: run a turn and record the ids we saw.
+    let mut first = open_sse(server.addr, &format!("/sessions/{id}/events"));
+    let (status, _) = request(
+        server.addr,
+        "POST",
+        &format!("/sessions/{id}/commands"),
+        Some(json!({ "type": "prompt", "text": "go" })),
+    );
+    assert_eq!(status, 202);
+    let text = wait_for_sse(&mut first, "\"done\"", Duration::from_secs(3));
+    let ids = sse_ids(&text);
+    let last_seen = *ids.last().expect("at least one id");
+    drop(first);
+
+    // Reconnect from the last id we saw: the buffered replay must be skipped.
+    let mut resumed =
+        open_sse_with_last_event_id(server.addr, &format!("/sessions/{id}/events"), last_seen);
+    // The first thing on the resumed stream must be strictly newer than last_seen.
+    let resumed_text = wait_for_sse(&mut resumed, ": keepalive", Duration::from_millis(500));
+    let resumed_ids = sse_ids(&resumed_text);
+    assert!(
+        resumed_ids.iter().all(|id| *id > last_seen),
+        "resume replayed old events: last_seen={last_seen}, got={resumed_ids:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Read SSE bytes for `timeout`, returning everything received (draining the
+/// whole replay buffer rather than stopping at the first match).
+fn drain_sse(stream: &mut TcpStream, timeout: Duration) -> String {
+    stream.set_read_timeout(Some(timeout)).expect("set timeout");
+    let mut accumulated = String::new();
+    let mut buffer = [0u8; 8192];
+    loop {
+        match stream.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(n) => accumulated.push_str(&String::from_utf8_lossy(&buffer[..n])),
+            Err(_) => break,
+        }
+    }
+    accumulated
+}
+
+#[test]
+fn rolled_over_replay_emits_a_resync_signal() {
+    let dir = temp_dir("sse-gap");
+    let server = start_gateway(&dir, "hello");
+    let id = create_session(&server, &dir);
+
+    // Pump cheap `get_state` commands until the replay buffer has rolled over,
+    // i.e. the unit has published more than `REPLAY_LIMIT` events. Each emits a
+    // `state` event and returns 202 as soon as it is queued.
+    let pump = pi_host::REPLAY_LIMIT + 64;
+    for _ in 0..pump {
+        let (status, _) = request(
+            server.addr,
+            "POST",
+            &format!("/sessions/{id}/commands"),
+            Some(json!({ "type": "get_state" })),
+        );
+        assert_eq!(status, 202);
+    }
+
+    // Wait until the buffer has actually rolled: the full replay must include an
+    // id past the original limit. Drain from id 0 until we see it.
+    let rolled = |server: &GatewayServer, id: &str| -> bool {
+        let mut probe = open_sse(server.addr, &format!("/sessions/{id}/events"));
+        let text = drain_sse(&mut probe, Duration::from_millis(500));
+        sse_ids(&text)
+            .last()
+            .is_some_and(|last| *last > pi_host::REPLAY_LIMIT as u64)
+    };
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !rolled(&server, &id) && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    assert!(
+        rolled(&server, &id),
+        "replay buffer never rolled over; cannot test the gap"
+    );
+
+    // Reconnect from id 0: the events in between are gone, so the stream must
+    // emit an explicit resync frame rather than silently dropping them.
+    let mut gap = open_sse_with_last_event_id(server.addr, &format!("/sessions/{id}/events"), 0);
+    let gap_text = wait_for_sse(&mut gap, "event: resync", Duration::from_secs(1));
+    assert!(
+        gap_text.contains("event: resync"),
+        "expected an explicit resync frame, got: {gap_text}"
+    );
+    assert!(
+        gap_text.contains("replay_buffer_rolled_over"),
+        "resync frame should explain the gap: {gap_text}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
