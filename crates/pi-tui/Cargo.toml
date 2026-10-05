@@ -1,0 +1,10 @@
+[package]
+name = "pi-tui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Native TUI renderer core: cell buffer, differential ANSI writer, editor text, and ctx.ui dialogs"
+
+[dependencies]
+unicode-width = "0.2"
