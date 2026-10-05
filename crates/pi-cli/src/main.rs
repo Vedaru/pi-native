@@ -1,9 +1,9 @@
-//! `pipelets` — a low-memory, low-CPU bare-core agent runtime for swarms,
-//! wire-compatible with pi.
+//! `pipelets` — a swarm-friendly, low-memory, low-CPU agent bare core,
+//! byte-compatible with pi at the provider API.
 //!
-//! Early scaffold. Today it exposes the prompt-cache policy decisions so the
-//! provider-parity gate can be exercised from the command line; the agent host
-//! lands in later milestones.
+//! A unit is headless: it runs one prompt (`--print`), serves the RPC protocol
+//! over stdio (`--serve`), or drives the HTTP + SSE gateway (`--gateway`). The
+//! same provider, loop, and tools run in every mode.
 
 use clap::{Parser, Subcommand, ValueEnum};
 use pi_agent::prompt::{build_system_prompt, load_project_context_files, SystemPromptOptions};
