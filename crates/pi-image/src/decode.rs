@@ -114,9 +114,10 @@ fn decode_jpeg(input: &[u8], target_w: u32, target_h: u32) -> Option<Decoded> {
             let mut rgb = Vec::with_capacity(pixels.len() / 4 * 3);
             for px in pixels.chunks_exact(4) {
                 let (c, m, y, k) = (px[0] as u32, px[1] as u32, px[2] as u32, px[3] as u32);
-                rgb.push((c * k / 255) as u8);
-                rgb.push((m * k / 255) as u8);
-                rgb.push((y * k / 255) as u8);
+                // Standard CMYK -> RGB: R = (255-C)(255-K)/255.
+                rgb.push(((255 - c) * (255 - k) / 255) as u8);
+                rgb.push(((255 - m) * (255 - k) / 255) as u8);
+                rgb.push(((255 - y) * (255 - k) / 255) as u8);
             }
             DynamicImage::ImageRgb8(RgbImage::from_raw(sw as u32, sh as u32, rgb)?)
         }

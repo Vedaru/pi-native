@@ -19,6 +19,11 @@ pub mod decode;
 /// Default max encoded (base64) size: 4.5 MB, below Anthropic's 5 MB limit.
 pub const DEFAULT_MAX_BYTES: usize = (4.5 * 1024.0 * 1024.0) as usize;
 
+/// Hard cap on source pixels. A unit reads files the agent may have fetched, so
+/// a tiny file claiming a colossal canvas is refused before decode (100 MP:
+/// 10000x10000). Well above any real photo; it only stops bombs.
+pub const MAX_PIXELS: u64 = 100_000_000;
+
 /// Caps how many image decodes may run at once in one process.
 ///
 /// A single decode+resize peaks at tens of MB; the gateway hosts many units in
@@ -180,9 +185,18 @@ fn first_fitting(
             });
         }
     }
-    let rgb = img.to_rgb8();
+    // Reuse the RGB view when the image already is RGB8; only convert otherwise.
+    // (`to_rgb8()` on an RGB8 image is a full-frame copy — 12 MB at 2000x2000.)
+    let converted;
+    let rgb: &image::RgbImage = match img {
+        DynamicImage::ImageRgb8(rgb) => rgb,
+        other => {
+            converted = other.to_rgb8();
+            &converted
+        }
+    };
     for quality in quality_steps(configured_quality) {
-        if let Some(bytes) = encode_jpeg(&rgb, quality) {
+        if let Some(bytes) = encode_jpeg(rgb, quality) {
             if base64_len(bytes.len()) < max_bytes {
                 return Some(Candidate {
                     bytes,
@@ -296,14 +310,20 @@ fn resample(img: &DynamicImage, tw: u32, th: u32) -> DynamicImage {
 fn fit(width: u32, height: u32, limits: &ImageLimits) -> (u32, u32) {
     let mut target_width = width;
     let mut target_height = height;
+    // pi rounds the scaled axis (`Math.round`), not floors it.
+    let round_div = |value: u64, by: u64| ((value + by / 2) / by).max(1) as u32;
     if target_width > limits.max_width {
-        target_height =
-            ((target_height as u64 * limits.max_width as u64) / target_width as u64).max(1) as u32;
+        target_height = round_div(
+            target_height as u64 * limits.max_width as u64,
+            target_width as u64,
+        );
         target_width = limits.max_width;
     }
     if target_height > limits.max_height {
-        target_width =
-            ((target_width as u64 * limits.max_height as u64) / target_height as u64).max(1) as u32;
+        target_width = round_div(
+            target_width as u64 * limits.max_height as u64,
+            target_height as u64,
+        );
         target_height = limits.max_height;
     }
     (target_width.max(1), target_height.max(1))
@@ -321,8 +341,22 @@ pub fn resize_image(input: &[u8], limits: &ImageLimits) -> Option<ResizedImage> 
 }
 
 fn resize_image_inner(input: &[u8], limits: &ImageLimits) -> Option<ResizedImage> {
-    // Header first: dimensions without decoding pixels.
-    let (original_width, original_height) = decode::dimensions(input)?;
+    // Header first: raw dimensions without decoding pixels.
+    let (raw_width, raw_height) = decode::dimensions(input)?;
+    // Reject decompression bombs before touching pixels. Our decode is
+    // streaming/scaled, so this is a safety net, not the memory bound.
+    if raw_width as u64 * raw_height as u64 > MAX_PIXELS {
+        return None;
+    }
+    // EXIF orientation is metadata; pi reports the *oriented* dimensions and
+    // resizes after rotating. A 90/270 rotation swaps width and height.
+    let orientation = read_orientation(input);
+    let rotated = matches!(orientation, Some(5..=8));
+    let (original_width, original_height) = if rotated {
+        (raw_height, raw_width)
+    } else {
+        (raw_width, raw_height)
+    };
 
     // Already within every limit: return the original bytes unchanged.
     if original_width <= limits.max_width
@@ -341,12 +375,16 @@ fn resize_image_inner(input: &[u8], limits: &ImageLimits) -> Option<ResizedImage
     }
 
     let (mut target_width, mut target_height) = fit(original_width, original_height, limits);
-    // Decode at the smallest reduction that still covers the target, so the
-    // full-size source bitmap is never materialised (shrink while decoding).
-    let decoded = decode::decode(input, target_width, target_height)?;
-    // EXIF orientation is metadata; apply it so the pixels match what the user
-    // sees before any dimension math.
-    let decoded = match read_orientation(input) {
+    // Decode at the smallest reduction that still covers the target, in the
+    // pixels' own (un-rotated) orientation, so the full-size source bitmap is
+    // never materialised (shrink while decoding).
+    let (decode_w, decode_h) = if rotated {
+        (target_height, target_width)
+    } else {
+        (target_width, target_height)
+    };
+    let decoded = decode::decode(input, decode_w, decode_h)?;
+    let decoded = match orientation {
         Some(orientation) => apply_orientation(decoded.image, orientation),
         None => decoded.image,
     };
