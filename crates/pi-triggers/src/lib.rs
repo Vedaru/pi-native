@@ -118,13 +118,6 @@ pub struct Budget {
     pub max_seconds: u64,
 }
 
-impl Budget {
-    /// Whether any limit is set.
-    pub fn is_bounded(&self) -> bool {
-        self.max_tokens > 0 || self.max_cost_micros > 0 || self.max_seconds > 0
-    }
-}
-
 /// Token pricing used to turn usage into a cost. Rates are micro-units per
 /// million tokens, so an integer cost is exact enough for budget checks.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

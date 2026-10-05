@@ -94,18 +94,10 @@ per-unit sum suggests. An idle unit is ~4.4 MB, so a 32-agent swarm fits in
 
 ## Images (`read` attachments)
 
-An image read is **decoded at a reduction that covers the target**, so the
-full-size source bitmap is never materialised, then resized with
-`fast_image_resize` and encoded under the inline limit. Release build, read
-through the `read` tool (peak = `VmHWM`, "after" = RSS 3 s later; idle baseline
-~3 MB):
-
-### Real-world inputs
-
 An agent reads what an image *says*, not its full fidelity, so every image is
 downscaled to a small, consistent target: **1024 px on the long edge, 1 MiB
-encoded** (`PIPELETS_IMAGE_MAX_DIM` / `PIPELETS_IMAGE_MAX_BYTES`). Release build,
-through the `read` tool:
+encoded** (`PIPELETS_IMAGE_MAX_DIM` / `PIPELETS_IMAGE_MAX_BYTES`). Release
+build, through the `read` tool (peak = `VmHWM`, idle baseline ~3 MB):
 
 | input | output | payload | pipelets peak | pipelets time | pi peak / time |
 | --- | --- | --- | --- | --- | --- |
@@ -115,72 +107,33 @@ through the `read` tool:
 | 3024x4032 phone photo JPEG (3.8 MB) | 768x1024 JPEG | 273 KB | **19 MB** | 51 ms | 361 MB / 1371 ms |
 | 6000x4000 photo JPEG (7.4 MB) | 1024x683 JPEG | 261 KB | **19 MB** | 77 ms | 523 MB / 1735 ms |
 
-Peak is now ~17-19 MB regardless of input, and the payload is <=1 MiB. pi keeps
-the full 2000x2000 (1-2 MB payloads) and peaks at 124-523 MB. This is a
-deliberate divergence from pi on the request bytes — the image target is a
-policy choice, not a parity requirement, because the agent needs the content.
+Peak is ~17-19 MB regardless of input and the payload is <=1 MiB. pi keeps the
+full 2000x2000 (1-2 MB payloads) and peaks at 124-523 MB. This is a deliberate
+divergence from pi on the request bytes: the target is a policy choice, not a
+parity requirement (parity covers request structure), because the agent needs
+the content. `PIPELETS_IMAGE_MAX_DIM=2000` restores pi's exact target.
 
-### Synthetic worst case (7000x7000)
+A 7000px source bottoms out at the same flat peak (peak, then RSS 3 s later):
 
-| source -> target | peak RSS | RSS after | engine time |
-| --- | --- | --- | --- |
-| 2100x2100 PNG -> 2000x2000 | **41 MB** | 4.8 MB | 24 ms |
-| 7000x7000 PNG -> 2000x2000 | **61 MB** | 9.3 MB | 332 ms |
-| 7000x7000 JPEG -> 2000x2000 | **80 MB** | 9.5 MB | 250 ms |
+| source | output | payload | peak | after |
+| --- | --- | --- | --- | --- |
+| 2100x2100 PNG | 1024x1024 PNG | 23 KB | 14 MB | 5.1 MB |
+| 7000x7000 PNG | 1024x1024 PNG | 1.0 MB | 22 MB | 5.8 MB |
+| 7000x7000 JPEG | 1024x1024 JPEG | 1.0 MB | 40 MB | 6.3 MB |
 
-"After" is baseline plus the retained base64 (4 MB for the 7000px images), so
-the transient is returned, not held; `malloc_trim` closes the rest (5.1 MB). The
-read is header-first: dimensions come from the header before any pixels.
+How it decodes (header first, so the dimensions are known before any pixels):
 
-How it decodes:
-
-- **JPEG** decodes with `libjpeg-turbo-rs` (pure Rust). It supports all 16
-scaled-IDCT factors (2/1 .. 1/8), so we pick the smallest whose output still
-covers the target: a 7000px JPEG decodes at 3/8 (2625) rather than 1/2 (3500).
-It also converts CMYK/YCCK to RGB itself.
+- **JPEG** uses `libjpeg-turbo-rs`'s scaled IDCT (all 16 libjpeg-turbo factors):
+pick the smallest whose output still covers the target, so a large JPEG is
+never decoded at full size. It also converts CMYK/YCCK to RGB itself.
 - **PNG** is decoded scanline by scanline and box-downsampled on the fly (a
-per-row accumulator, not a whole-image one), so a 7000px PNG never allocates
+per-row accumulator, not a whole-image one), so a large PNG never allocates
 more than the reduced bitmap.
 - **Orientation** is applied *before* the target math, so an EXIF-rotated photo
-resizes to pi's oriented dimensions (2200x3000 -> 1467x2000), and the scaled
-axis rounding matches pi's `Math.round`.
-- GIF/WebP fall back to `image`'s full decode.
-- Awkward inputs all decode: progressive JPEG, interlaced PNG, 16-bit PNG, CMYK
-JPEG (standard `(255-C)(255-K)/255`), EXIF-rotated JPEG.
-
-### Target size: pi's catalog is the authority
-
-pi picks the image target from `model.inputLimits.images.resize`. For
-`deepseek-flash` that is `maxWidth 2000, maxHeight 2000, maxBytes 4718592,
-jpegQuality 80` — exactly our defaults — and **no model in pi's catalog resizes
-below 2000**, so we do not shrink the target to save memory: it would change the
-request bytes and break parity for no proven benefit.
-
-### Streaming the payload to the provider
-
-The API accepts an inline base64 data URL, a public URL, or (DeepSeek) a Files
-API `file_id`. None of them help the memory spike, because after resize the
-payload is 1-4 MB against a 40-90 MB transient. Options, in order of value:
-
-1. **Files API** (`file_id`) would shrink the transcript and every request, but
-   it is DeepSeek-specific, the upload lifetime and its interaction with prefix
-   caching are unverified, and it changes the request bytes (opt-in, out of the
-   parity gate).
-2. **Streaming the request body** (chunked base64, computable
-`Content-Length`) avoids holding the encoded string, but that string is small
-next to the decode.
-3. **Public URLs** need a reachable host, so they do not fit local homelab files.
-
-The transcript itself must keep base64 image blocks to stay pi-compatible: our
-session JSONL is read by pi/pi-web, so the on-disk format cannot become a path.
-
-### Versus pi
-
-The two tables above are the pi comparison: pi runs the same resize through
-photon (WASM) under Node, warm medians of 3, peak RSS from `/proc/self/status`.
-Node's own baseline is 55.7 MB, ours ~3 MB. Net of baseline, pipelets is
-4-22x lighter and 8-45x faster depending on the input — least dramatic for
-small screenshots (which we barely touch) and most for large photos.
+resizes to the oriented dimensions, and the scaled-axis rounding matches pi's
+`Math.round`.
+- GIF/WebP fall back to `image`'s full decode. Progressive JPEG, interlaced
+PNG, 16-bit PNG, CMYK JPEG, and EXIF-rotated JPEG all decode.
 
 ### Retained cost in a session
 

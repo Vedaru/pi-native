@@ -1,22 +1,20 @@
-# Image pipeline (`pi-image`)
+# Images (`pi-image`)
 
-Native decode/orient/resize/encode. Images are decoded at a reduction that
-covers the target (JPEG via `libjpeg-turbo-rs` scaled IDCT, PNG via scanline
-streaming), so the full-size bitmap is never materialised; the reduced bitmap is
-then resized with `fast_image_resize` (SIMD, row-streamed). Peak memory is
-independent of the source size. It matches pi's
-strategy: keep the original if within limits, otherwise fit to `maxWidth` /
-`maxHeight`, then return the first encoding under `maxBytes` in pi's order (PNG,
-then JPEG at the configured quality and 85/70/55/40), shrinking by 25% per
-retry.
+Native image decode, resize, and encode for `read` attachments. The agent reads
+what an image *says*, so every image is scaled to a small, consistent target:
+**1024 px on the long edge, 1 MiB encoded** (`PIPELETS_IMAGE_MAX_DIM` /
+`PIPELETS_IMAGE_MAX_BYTES`).
 
-Comparison on a 6000x4000 PNG (native, via
-`cargo run --release -p pi-image --example resize`):
+- **Header first**: dimensions come from the header before any pixels are read.
+- **JPEG** decodes with `libjpeg-turbo-rs`'s scaled IDCT (all 16 libjpeg-turbo
+  factors), so a large JPEG is never decoded at full size.
+- **PNG** decodes scanline by scanline and is box-downsampled on the fly.
+- **Orientation** (EXIF) is applied before the target math, matching pi's
+  `Math.round`.
+- The reduced bitmap is resized with `fast_image_resize` (SIMD, row-streamed),
+  then encoded PNG-first and JPEG second at the configured quality and
+  85/70/55/40, shrinking by 25% per retry — pi's order.
 
-| | pi (photon WASM) | pi-image (native) |
-| --- | --- | --- |
-| dimensions | 2000x1333 | 2000x1333 |
-| format | image/jpeg | image/jpeg |
-| base64 size | 2,405,452 B | 2,405,532 B |
-| time | 1,485 ms | 336 ms |
-| peak RSS | 493 MB | 207 MB |
+`PIPELETS_IMAGE_MAX_DIM=2000` restores pi's exact target. Peak memory is
+14–40 MB for any input and returns to ~5 MB; [performance.md](performance.md)
+has the measured figures and the comparison against pi's photon/WASM pipeline.

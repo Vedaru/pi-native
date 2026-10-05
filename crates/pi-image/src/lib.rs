@@ -224,19 +224,6 @@ fn first_fitting(
     None
 }
 
-/// Encode a solid-colour RGB PNG of the given size.
-///
-/// Used by the `--stress` image workload and image tests to build a fixture of
-/// a known size without shipping a binary file.
-pub fn solid_png(width: u32, height: u32) -> Vec<u8> {
-    let image = DynamicImage::new_rgb8(width, height);
-    let mut out = Vec::new();
-    image
-        .write_to(&mut Cursor::new(&mut out), ImageFormat::Png)
-        .expect("encode png");
-    out
-}
-
 /// Encode a screenshot-like RGB PNG: a smooth gradient plus light noise, so the
 /// encoded size is in the range a real screenshot produces (a solid image
 /// compresses to almost nothing and would understate the per-session cost).
