@@ -124,7 +124,6 @@ example extensions load through the host (84/87).
 | [gateway.md](docs/gateway.md) | HTTP/SSE routes, triggers, budgets |
 | [providers.md](docs/providers.md) | provider flags, prompt cache, wire parity |
 | [session-store.md](docs/session-store.md) | JSONL format, context building, compaction |
-| [images.md](docs/images.md) | native image pipeline |
 | [rpc-protocol.md](docs/rpc-protocol.md) | JSON-lines unit protocol |
 | [plugin-conformance.md](docs/plugin-conformance.md) | extension compatibility |
 | [scope.md](docs/scope.md) | in/out of scope and hard constraints |

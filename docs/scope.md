@@ -25,9 +25,6 @@ scope.
 | Providers and streaming | OpenAI Responses/Completions — `pi-providers`, `pi-net` |
 | Extensions, skills, prompt templates, themes, packages | the plugin wrapper (`pi-plugins`) |
 | MCP and codemode | as pi ships them |
-| Image resize/convert | `pi-image` |
-| Syntax highlighting | `pi-highlight` |
-| JSON revision diffing | `pi-delta` |
 | Prompt-cache primitives | `pi-cache` |
 
 Core primitives a swarm host drives:
@@ -70,9 +67,9 @@ conductor, DAGs, dashboards, Linear) is a separate repo, never in the unit.
 | VED-305 | providers and streaming |
 | VED-306 | sessions and context |
 | VED-307 | TUI — dropped; a swarm unit is headless |
-| VED-308 | images |
-| VED-309 | syntax highlighting |
-| VED-310 | delta / replicated state |
+| VED-308 | images — dropped (no image consumer in a headless unit) |
+| VED-309 | syntax highlighting — dropped (display-only) |
+| VED-310 | delta / replicated state — dropped (unused) |
 | VED-311 | packaging (single binary, embedded assets) |
 | VED-312 | interim lazy imports in pi (not part of the native runtime) |
 | VED-313/314/315 | provider parity and the release gate |

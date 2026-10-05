@@ -18,7 +18,6 @@ pi-rpc = { path = "../pi-rpc" }
 pi-host = { path = "../pi-host" }
 pi-gateway = { path = "../pi-gateway" }
 pi-triggers = { path = "../pi-triggers" }
-pi-session = { path = "../pi-session" }
 pi-plugins = { path = "../pi-plugins" }
 serde_json = { workspace = true }
 clap = { workspace = true }
