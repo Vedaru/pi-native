@@ -9,8 +9,8 @@
 //! * dropping the command channel ends the unit thread and releases its agent,
 //!   so an idle unit costs nothing and wakes by replaying its session file.
 //!
-//! This is deliberately transport-free. The HTTP/SSE gateway (VED-341) and the
-//! trigger engine (VED-343) build on this.
+//! This is deliberately transport-free. The HTTP/SSE gateway (VED-341) builds
+//! on this; scheduling lives in rig, outside the unit.
 
 use pi_agent::Agent;
 use serde_json::Value;
@@ -515,7 +515,7 @@ impl Write for ChannelWriter {
 
 /// A clone of a unit's command channel, for out-of-band abort signals.
 ///
-/// Holding the host lock while a trigger waits for its run would deadlock a run
+/// Holding the host lock while waiting for a run to finish would deadlock a run
 /// that calls back into the gateway; this handle aborts without that lock.
 #[derive(Clone)]
 pub struct AbortHandle(mpsc::Sender<Vec<u8>>);
@@ -986,9 +986,9 @@ impl Host {
 
     /// A handle that can signal a running unit to abort without the host lock.
     ///
-    /// The trigger tick waits for a run to finish; holding the host lock across
-    /// that wait blocks every gateway route and can deadlock a run (like the
-    /// conductor's tick) that calls back into the gateway.
+    /// Holding the host lock across a wait for a run to finish blocks every
+    /// gateway route and can deadlock a run (like the conductor's tick) that
+    /// calls back into the gateway.
     pub fn abort_handle(&mut self, session_id: &str) -> Option<AbortHandle> {
         self.units
             .get(session_id)
