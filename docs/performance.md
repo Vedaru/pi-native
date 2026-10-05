@@ -122,10 +122,35 @@ more than the reduced bitmap.
 - **Orientation** is applied *before* the target math, so an EXIF-rotated photo
 resizes to pi's oriented dimensions (2200x3000 -> 1467x2000), and the scaled
 axis rounding matches pi's `Math.round`.
-- GIF/WebP fall back to `image`'s full decode. A header-first pixel cap (100 MP)
-refuses decompression bombs (a 69-byte PNG claiming 20000x20000).
+- GIF/WebP fall back to `image`'s full decode.
 - Awkward inputs all decode: progressive JPEG, interlaced PNG, 16-bit PNG, CMYK
 JPEG (standard `(255-C)(255-K)/255`), EXIF-rotated JPEG.
+
+### Target size: pi's catalog is the authority
+
+pi picks the image target from `model.inputLimits.images.resize`. For
+`deepseek-flash` that is `maxWidth 2000, maxHeight 2000, maxBytes 4718592,
+jpegQuality 80` — exactly our defaults — and **no model in pi's catalog resizes
+below 2000**, so we do not shrink the target to save memory: it would change the
+request bytes and break parity for no proven benefit.
+
+### Streaming the payload to the provider
+
+The API accepts an inline base64 data URL, a public URL, or (DeepSeek) a Files
+API `file_id`. None of them help the memory spike, because after resize the
+payload is 1-4 MB against a 40-90 MB transient. Options, in order of value:
+
+1. **Files API** (`file_id`) would shrink the transcript and every request, but
+   it is DeepSeek-specific, the upload lifetime and its interaction with prefix
+   caching are unverified, and it changes the request bytes (opt-in, out of the
+   parity gate).
+2. **Streaming the request body** (chunked base64, computable
+`Content-Length`) avoids holding the encoded string, but that string is small
+next to the decode.
+3. **Public URLs** need a reachable host, so they do not fit local homelab files.
+
+The transcript itself must keep base64 image blocks to stay pi-compatible: our
+session JSONL is read by pi/pi-web, so the on-disk format cannot become a path.
 
 ### Versus pi
 

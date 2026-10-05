@@ -19,11 +19,6 @@ pub mod decode;
 /// Default max encoded (base64) size: 4.5 MB, below Anthropic's 5 MB limit.
 pub const DEFAULT_MAX_BYTES: usize = (4.5 * 1024.0 * 1024.0) as usize;
 
-/// Hard cap on source pixels. A unit reads files the agent may have fetched, so
-/// a tiny file claiming a colossal canvas is refused before decode (100 MP:
-/// 10000x10000). Well above any real photo; it only stops bombs.
-pub const MAX_PIXELS: u64 = 100_000_000;
-
 /// Caps how many image decodes may run at once in one process.
 ///
 /// A single decode+resize peaks at tens of MB; the gateway hosts many units in
@@ -343,11 +338,6 @@ pub fn resize_image(input: &[u8], limits: &ImageLimits) -> Option<ResizedImage> 
 fn resize_image_inner(input: &[u8], limits: &ImageLimits) -> Option<ResizedImage> {
     // Header first: raw dimensions without decoding pixels.
     let (raw_width, raw_height) = decode::dimensions(input)?;
-    // Reject decompression bombs before touching pixels. Our decode is
-    // streaming/scaled, so this is a safety net, not the memory bound.
-    if raw_width as u64 * raw_height as u64 > MAX_PIXELS {
-        return None;
-    }
     // EXIF orientation is metadata; pi reports the *oriented* dimensions and
     // resizes after rotating. A 90/270 rotation swaps width and height.
     let orientation = read_orientation(input);
