@@ -72,18 +72,21 @@ pub fn new_session_path_in_unit(
     unit: Option<&str>,
 ) -> std::io::Result<PathBuf> {
     let dir = session_dir_for(agent_dir, cwd);
-    new_session_path_in_dir(&dir, cwd, unit)
+    new_session_path_in_dir(&dir, cwd, unit, None)
 }
 
 /// Create a new session file in an explicit directory, using pi's layout
 /// (`<timestamp>_<id>.jsonl`) with the header id matching the filename stem.
 ///
 /// Callers that place session files themselves (the RPC `new_session`/`clone`)
-/// use this so pi and pi-web can address the file by id.
+/// use this so pi and pi-web can address the file by id. `parent_session`
+/// records the parent session path in the header (pi's `parentSession`, set by
+/// `new_session`/`clone`/`fork`).
 pub fn new_session_path_in_dir(
     dir: &Path,
     cwd: &Path,
     unit: Option<&str>,
+    parent_session: Option<&str>,
 ) -> std::io::Result<PathBuf> {
     std::fs::create_dir_all(dir)?;
     let id = new_id();
@@ -91,6 +94,7 @@ pub fn new_session_path_in_dir(
     let file_timestamp = timestamp.replace([':', '.'], "-");
     let path = dir.join(format!("{file_timestamp}_{id}.jsonl"));
     let mut header = session_header(&id, &timestamp, &cwd.to_string_lossy());
+    header.parent_session = parent_session.map(str::to_string);
     if let Some(unit) = unit {
         header
             .extra
@@ -584,6 +588,15 @@ impl SessionJournal {
     /// The working directory recorded in the file header.
     pub fn cwd(&self) -> &str {
         &self.session.header.cwd
+    }
+
+    /// The parsed session entries currently held in memory.
+    ///
+    /// The journal owns the file, so these are authoritative and callers avoid
+    /// re-reading and re-serializing the whole file (the RPC `get_entries`,
+    /// `get_tree`, and `get_session_stats` paths).
+    pub fn entries(&self) -> &[SessionEntry] {
+        &self.session.entries
     }
 
     /// Open an existing session (returning its transcript to seed) or create a

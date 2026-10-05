@@ -689,14 +689,14 @@ impl SessionState {
     }
 
     fn entries(&self, since: Option<&str>) -> Vec<serde_json::Value> {
-        let Some(path) = &self.path else {
-            return Vec::new();
+        // Read the journal's in-memory entries rather than re-reading and
+        // re-serializing the whole session file on every call. The journal owns
+        // the file, so its entries are authoritative.
+        let entries: &[pi_session::SessionEntry] = match &self.journal {
+            Some(journal) => journal.entries(),
+            None => return Vec::new(),
         };
-        let Ok(session) = SessionFile::read(path) else {
-            return Vec::new();
-        };
-        let values: Vec<serde_json::Value> = session
-            .entries
+        let values: Vec<serde_json::Value> = entries
             .iter()
             .map(|entry| serde_json::to_value(entry).unwrap_or(serde_json::Value::Null))
             .collect();
@@ -738,7 +738,7 @@ impl SessionState {
         &mut self,
         cwd: &str,
         agent: &mut Agent,
-        _parent_session: Option<String>,
+        parent_session: Option<String>,
     ) -> std::io::Result<()> {
         agent.replace_messages(Vec::new());
         self.name = None;
@@ -748,7 +748,10 @@ impl SessionState {
             .as_ref()
             .and_then(|path| path.parent().map(PathBuf::from))
             .unwrap_or_else(|| PathBuf::from(cwd));
-        let path = new_session_path_in_dir(&dir, Path::new(cwd), None)?;
+        // `NewSession { parentSession }` records the parent session path in the
+        // new file header (pi's `parentSession`), so a branched session links
+        // back to its origin.
+        let path = new_session_path_in_dir(&dir, Path::new(cwd), None, parent_session.as_deref())?;
         let (journal, _) = SessionJournal::open(path.clone(), cwd)?;
         self.journal = Some(journal);
         self.path = Some(path);
@@ -791,7 +794,7 @@ impl SessionState {
             .as_ref()
             .and_then(|path| path.parent().map(PathBuf::from))
             .unwrap_or_else(|| PathBuf::from(cwd));
-        new_session_path_in_dir(&dir, Path::new(cwd), None)
+        new_session_path_in_dir(&dir, Path::new(cwd), None, None)
     }
 
     fn clone_session(&mut self, cwd: &str, agent: &Agent) -> std::io::Result<()> {

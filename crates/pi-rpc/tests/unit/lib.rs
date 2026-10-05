@@ -1,6 +1,6 @@
 use super::*;
 use pi_agent::{AssistantTurn, FauxProvider, ToolContext};
-use serde_json::json;
+use serde_json::{json, Value};
 
 fn agent_with(turns: Vec<AssistantTurn>) -> Agent {
     Agent::new(
@@ -328,6 +328,99 @@ fn new_session_file_matches_the_pi_layout() {
     let session = SessionFile::read(&created[0]).expect("read new session");
     assert_eq!(session.header.id, id);
     assert_eq!(session.header.kind, "session");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn new_session_records_the_parent_session() {
+    let dir = std::env::temp_dir().join(format!("pi-rpc-parent-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("dir");
+    let path = dir.join("s.jsonl");
+    let lines = concat!(
+        "{\"type\":\"session\",\"id\":\"h\",\"timestamp\":\"2024-01-01T00:00:00Z\",\"cwd\":\"/tmp\",\"version\":3}\n",
+        "{\"type\":\"message\",\"id\":\"m1\",\"parentId\":null,\"timestamp\":\"2024-01-01T00:00:01Z\",\"message\":{\"role\":\"user\",\"content\":\"hello\"}}\n",
+    );
+    std::fs::write(&path, lines).expect("write session");
+
+    let mut agent = agent_with(vec![AssistantTurn::default()]);
+    let input = format!(
+        "{{\"type\":\"new_session\",\"parentSession\":{:?}}}\n",
+        path.to_string_lossy()
+    );
+    let buf = SessionBuf(std::rc::Rc::new(std::cell::RefCell::new(Vec::new())));
+    serve_session(
+        &mut agent,
+        Some(path.clone()),
+        &dir.to_string_lossy(),
+        std::io::Cursor::new(input.into_bytes()),
+        buf.clone(),
+        |_| {},
+    )
+    .expect("serves");
+
+    let created: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
+        .expect("read dir")
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|candidate| candidate.extension().is_some_and(|ext| ext == "jsonl"))
+        .filter(|candidate| candidate != &path)
+        .collect();
+    assert_eq!(created.len(), 1, "{created:?}");
+    let session = SessionFile::read(&created[0]).expect("read new session");
+    // The header links back to the parent session path (pi's `parentSession`).
+    assert_eq!(
+        session.header.parent_session.as_deref(),
+        Some(path.to_string_lossy().as_ref())
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn entries_and_stats_read_the_live_journal() {
+    let dir = std::env::temp_dir().join(format!("pi-rpc-entries-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("dir");
+    let path = dir.join("s.jsonl");
+    let lines = concat!(
+        "{\"type\":\"session\",\"id\":\"h\",\"timestamp\":\"2024-01-01T00:00:00Z\",\"cwd\":\"/tmp\",\"version\":3}\n",
+        "{\"type\":\"message\",\"id\":\"m1\",\"parentId\":null,\"timestamp\":\"2024-01-01T00:00:01Z\",\"message\":{\"role\":\"user\",\"content\":\"hello\"}}\n",
+    );
+    std::fs::write(&path, lines).expect("write session");
+
+    let mut agent = agent_with(vec![AssistantTurn {
+        text: "hi".into(),
+        stop_reason: Some("end_turn".into()),
+        ..Default::default()
+    }]);
+    // The prompt appends to the transcript; the journal must reflect it in
+    // get_entries/get_session_stats without a file re-read.
+    let input = concat!(
+        "{\"type\":\"prompt\",\"text\":\"go\"}\n",
+        "{\"type\":\"get_session_stats\"}\n",
+        "{\"type\":\"get_entries\"}\n",
+    );
+    let buf = SessionBuf(std::rc::Rc::new(std::cell::RefCell::new(Vec::new())));
+    serve_session(
+        &mut agent,
+        Some(path.clone()),
+        &dir.to_string_lossy(),
+        std::io::Cursor::new(input.as_bytes().to_vec()),
+        buf.clone(),
+        |_| {},
+    )
+    .expect("serves");
+    let text = String::from_utf8(buf.0.borrow().clone()).unwrap();
+    assert!(text.contains("\"command\":\"get_session_stats\""), "{text}");
+    // The user prompt added a second message entry beyond the seeded one.
+    let entries_line = text
+        .lines()
+        .find(|line| line.contains("\"command\":\"get_entries\""))
+        .expect("get_entries response");
+    let entries: Value = serde_json::from_str(entries_line).expect("json");
+    let list = entries["data"]["entries"].as_array().expect("entries");
+    assert!(list.len() >= 2, "{entries}");
 
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -231,13 +231,15 @@ impl PiEventAdapter {
                     "toolName": name,
                     "isError": is_error,
                     "content": [{ "type": "text", "text": content }],
+                    "details": {},
                 }));
                 out.push(json!({
                     "type": "tool_execution_end",
                     "toolCallId": tool_call_id,
                     "toolName": name,
                     "isError": is_error,
-                    "result": { "content": [{ "type": "text", "text": content }] },
+                    // pi's result carries `details` even when empty.
+                    "result": { "content": [{ "type": "text", "text": content }], "details": {} },
                 }));
             }
             Event::TurnEnd => {
@@ -570,5 +572,13 @@ mod tests {
             json!("toolCall")
         );
         assert_eq!(message_end["message"]["content"][1]["id"], json!("call-1"));
+        // pi's tool result carries content blocks plus an (empty) `details`.
+        let end = events
+            .iter()
+            .find(|event| event["type"] == json!("tool_execution_end"))
+            .expect("tool end");
+        assert_eq!(end["result"]["content"][0]["type"], json!("text"));
+        assert_eq!(end["result"]["content"][0]["text"], json!("ok"));
+        assert!(end["result"].get("details").is_some(), "{end}");
     }
 }
