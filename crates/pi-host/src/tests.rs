@@ -262,3 +262,20 @@ fn replay_ids_align_with_replay_and_track_the_oldest() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn open_refuses_new_units_at_the_cap() {
+    let dir = temp_dir("cap");
+    let mut host = one_turn_host(&dir, "hello").with_max_units(1);
+    let first = host.open(dir.join("a.jsonl")).expect("open a");
+
+    match host.open(dir.join("b.jsonl")) {
+        Err(HostError::AtCapacity(1)) => {}
+        other => panic!("expected AtCapacity, got {other:?}"),
+    }
+
+    // A unit already inside the cap can still be reopened.
+    let again = host.open(dir.join("a.jsonl")).expect("reopen a");
+    assert_eq!(again, first);
+    let _ = std::fs::remove_dir_all(&dir);
+}

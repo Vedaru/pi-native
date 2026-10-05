@@ -67,6 +67,10 @@ struct Cli {
     /// Suspend a gateway unit after this many idle seconds; 0 disables (default 900).
     #[arg(long, default_value_t = 900)]
     idle_timeout: u64,
+    /// Refuse new units beyond this many (default 24). A runaway orchestrator is
+    /// capped here instead of exhausting the machine.
+    #[arg(long, default_value_t = 24)]
+    max_units: usize,
     /// Non-interactive: run one prompt through the agent and print the result.
     #[arg(short = 'p', long = "print")]
     print: Option<String>,
@@ -224,6 +228,7 @@ fn main() {
             cli.trigger_runs.as_deref(),
             cli.trigger_interval,
             cli.idle_timeout,
+            cli.max_units,
         );
         return;
     }
@@ -789,6 +794,7 @@ fn run_gateway(
     trigger_runs: Option<&std::path::Path>,
     trigger_interval: u64,
     idle_timeout: u64,
+    max_units: usize,
 ) {
     let cwd = std::env::current_dir().unwrap_or_default();
     let extensions = extensions.to_vec();
@@ -806,7 +812,8 @@ fn run_gateway(
             path,
         )
     };
-    let host = pi_host::Host::new(cwd.to_string_lossy().to_string(), factory);
+    let host =
+        pi_host::Host::new(cwd.to_string_lossy().to_string(), factory).with_max_units(max_units);
     let listener = match std::net::TcpListener::bind(addr) {
         Ok(listener) => listener,
         Err(error) => {

@@ -34,6 +34,7 @@ pub enum HostError {
     Io(String),
     Json(String),
     Stopped,
+    AtCapacity(usize),
 }
 
 impl std::fmt::Display for HostError {
@@ -43,6 +44,9 @@ impl std::fmt::Display for HostError {
             HostError::Io(message) => write!(f, "io: {message}"),
             HostError::Json(message) => write!(f, "json: {message}"),
             HostError::Stopped => write!(f, "unit is suspended"),
+            HostError::AtCapacity(max) => {
+                write!(f, "unit limit reached ({max}); remove a unit first")
+            }
         }
     }
 }
@@ -91,14 +95,19 @@ impl Shared {
         // monotonic in publication order.
         let seq = self.seq.fetch_add(1, Ordering::SeqCst) + 1;
         if let Some(kind) = event.get("type").and_then(Value::as_str) {
-            if let Ok(mut last) = self.last_event.lock() {
-                *last = Some(kind.to_string());
-            }
-            if let Ok(mut at) = self.last_event_at.lock() {
-                *at = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|duration| duration.as_secs() as i64)
-                    .unwrap_or(0);
+            // `state` and `response` are replies to a request, not agent
+            // activity. Recording them would make an idle unit read as
+            // "event: state" after any `get_state` poll.
+            if kind != "state" && kind != "response" {
+                if let Ok(mut last) = self.last_event.lock() {
+                    *last = Some(kind.to_string());
+                }
+                if let Ok(mut at) = self.last_event_at.lock() {
+                    *at = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|duration| duration.as_secs() as i64)
+                        .unwrap_or(0);
+                }
             }
         }
         // Hold both locks so a subscribe either sees the event in its replay or
@@ -398,9 +407,16 @@ impl Unit {
     fn suspend(&mut self) {
         // Dropping the sender gives the reader EOF, so the unit thread exits and
         // its agent is released. The session file is the durable state.
+        //
+        // The join runs on a detached thread on purpose: joining inline would
+        // block the caller - and, because the caller holds the host lock, the
+        // entire gateway - for as long as the unit's current command takes (a
+        // full `cargo build` can be minutes long).
         self.commands = None;
         if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
+            std::thread::spawn(move || {
+                let _ = thread.join();
+            });
         }
     }
 
@@ -441,7 +457,13 @@ pub struct Host {
     cwd: String,
     factory: Factory,
     units: HashMap<String, Unit>,
+    /// Hard ceiling on live units. A runaway orchestrator that spawns a worker
+    /// per card is capped here rather than allowed to exhaust the machine.
+    max_units: usize,
 }
+
+/// Default unit ceiling for a host that is not told otherwise.
+pub const DEFAULT_MAX_UNITS: usize = 24;
 
 impl Host {
     pub fn new(
@@ -452,7 +474,18 @@ impl Host {
             cwd: cwd.into(),
             factory: Arc::new(factory),
             units: HashMap::new(),
+            max_units: DEFAULT_MAX_UNITS,
         }
+    }
+
+    /// Set the maximum number of live units [`Host::open`] will create.
+    pub fn with_max_units(mut self, max: usize) -> Self {
+        self.max_units = max.max(1);
+        self
+    }
+
+    pub fn max_units(&self) -> usize {
+        self.max_units
     }
 
     /// Open (creating if necessary) the session at `session_path` and start its
@@ -472,6 +505,9 @@ impl Host {
         };
         drop(journal);
         if !self.units.contains_key(&id) {
+            if self.units.len() >= self.max_units {
+                return Err(HostError::AtCapacity(self.max_units));
+            }
             let unit = Unit::spawn(
                 session_path,
                 cwd,

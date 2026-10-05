@@ -243,6 +243,7 @@ fn write_json(stream: &mut TcpStream, status: u16, value: &Value) {
 fn status_for(error: &HostError) -> u16 {
     match error {
         HostError::UnknownSession(_) => 404,
+        HostError::AtCapacity(_) => 429,
         _ => 500,
     }
 }
