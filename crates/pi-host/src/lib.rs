@@ -740,6 +740,13 @@ impl Host {
         self.units.keys().cloned().collect()
     }
 
+    /// The session file behind a live unit, if it is open.
+    pub fn session_path(&self, session_id: &str) -> Option<PathBuf> {
+        self.units
+            .get(session_id)
+            .map(|unit| unit.session_path.clone())
+    }
+
     /// A status snapshot of every unit this host knows about.
     pub fn swarm(&self) -> Vec<UnitInfo> {
         let mut units: Vec<UnitInfo> = self

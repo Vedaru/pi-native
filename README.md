@@ -188,6 +188,30 @@ and its changes are parked in a `git stash` (or restored, on request); the
 receipt records the breach and disposition. `max_runs_per_window` and dedupe
 windows continue to bound *when* a trigger fires.
 
+### Swarm conductor (`scripts/swarm_conductor.py`)
+
+The conductor keeps the Linear board moving: it maps each open card to a role
+unit, dispatches one card at a time, and never lets two `cargo test` / `git
+commit` runs race. Write-intent cards route to editing roles; audit/verify cards
+route to a read-only role (VED-360).
+
+Every **code card runs in its own git worktree** (VED-370): the conductor runs
+`scripts/swarm_worktree.py` to create `$SWARM_WORKTREE_ROOT/<ID>` on branch
+`swarm/<ID>`, opens a unit with `cwd` set to that directory (`POST /sessions`
+with `cwd`), and dispatches the worker there. The worker therefore always sees
+`cwd == workspace path` and commits only on `swarm/<ID>`; it never writes to the
+main tree and never pushes. The same worktree/session is reused for that card's
+review/test, and removed with `git worktree remove --force` + `git branch -D`
+only once the card is Done/Canceled. Read-only cards that never edit a tree do
+not get a branch.
+
+```bash
+SWARM_REPO=/path/to/pi-native \
+SWARM_WORKTREE_ROOT=/path/to/pi-native-ws \
+python3 scripts/swarm_conductor.py
+python3 scripts/test_swarm_conductor.py   # routing + worktree isolation
+```
+
 ## Prompt-cache primitives (`pi-cache`)
 
 The provider-parity gate (VED-315) requires exact cache behavior. `pi-cache`

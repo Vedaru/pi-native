@@ -377,6 +377,7 @@ fn in_flight_is_true_during_a_silent_turn_and_false_after() {
         "settled unit must be idle"
     );
     assert!(!host.swarm()[0].in_flight);
+}
 
 // ---- VED-376: honest worker liveness and restart -------------------------
 

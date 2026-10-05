@@ -90,6 +90,24 @@ pub fn post_json_retry(
 
 /// Total tries: one attempt plus two retries.
 pub const MAX_ATTEMPTS: u32 = 3;
+
+/// Time to establish the connection. A black-holed host fails fast.
+pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Time to receive the response headers (first byte) before giving up.
+pub const RESPONSE_TIMEOUT: Duration = Duration::from_secs(60);
+/// Hard cap for one streaming call, so a stalled stream can never pin a unit.
+pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// The HTTP agent every provider call uses. Without a deadline a server that
+/// accepts the connection and then stalls would block the unit forever.
+fn agent() -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .timeout_connect(Some(CONNECT_TIMEOUT))
+        .timeout_recv_response(Some(RESPONSE_TIMEOUT))
+        .timeout_global(Some(REQUEST_TIMEOUT))
+        .build()
+        .new_agent()
+}
 /// First backoff, doubled per attempt and then jittered.
 pub const BACKOFF_BASE: Duration = Duration::from_millis(250);
 /// Ceiling on a single backoff sleep.
@@ -127,7 +145,9 @@ fn post_json_once(
     headers: &[(&str, String)],
     body_json: &str,
 ) -> Result<HttpResponse, NetError> {
-    let mut request = ureq::post(url).header("content-type", "application/json");
+    let mut request = agent()
+        .post(url)
+        .header("content-type", "application/json");
     for (name, value) in headers {
         request = request.header(*name, value.as_str());
     }
