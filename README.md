@@ -29,7 +29,7 @@ Measured 2026-10-05 (release build, x86_64; see [performance](docs/performance.m
 | --- | --- | --- |
 | shipped runtime | one **9.5 MB** binary | Node + `node_modules` |
 | idle RSS (`--rpc`) | **4.4 MB** | 111.3 MB |
-| idle RSS (`--gateway`) | **5.0 MB** | — |
+| idle RSS (single-unit serve) | **5.0 MB** | — |
 | idle CPU | **~0.001 s / 3 s** | — |
 
 ## Non-negotiable constraint
@@ -44,8 +44,8 @@ prompt-cache hit rate versus pi is a regression that blocks merge and release
 ```
 crates/pi-cli/         the `pipelets` binary
 crates/pi-agent/       agent loop: turns, tool calls, events
-crates/pi-host/        unit host: addressable agents, fan-out, idle suspend
-crates/pi-gateway/     HTTP + SSE gateway
+crates/pi-host/        unit host: one addressable agent, fan-out, idle suspend
+crates/pi-gateway/     single-unit HTTP + SSE serve
 crates/pi-session/     pi JSONL session store
 crates/pi-providers/   request builders with pi's cache placement
 crates/pi-tools/       core tools (read, bash, edit, write, …)
@@ -88,17 +88,23 @@ Sessions persist in pi's layout so pi and pi-web can list and resume them
 directory by default; `--yolo` is the explicit opt-out, and tools run without
 approval, matching pi.
 
-## Gateway
+## Unit serve
 
-`--gateway` serves the unit host over HTTP + SSE so a web UI or remote client can
-attach to long-lived agents. Scheduling is owned by rig, not the unit. Routes,
-the SSE `?format=pi` stream, and the host-lock contract are in
-[the gateway guide](docs/gateway.md).
+`--serve --addr` serves **one** unit over HTTP + SSE so a web UI or remote
+client can attach to a long-lived agent. Rig owns the fleet and launches one
+`pipelets` process per seat (VED-417), so each process hosts exactly one
+session. Scheduling is owned by rig, not the unit. Routes, the SSE `?format=pi`
+stream, the host-lock contract, and the pi-web compatibility seam are in
+[the serve guide](docs/gateway.md).
 
 ```bash
-pipelets --gateway --gateway-addr 127.0.0.1:30142 \
+pipelets --serve --session /path/to/session.jsonl --cwd "$PWD" \
+  --addr 127.0.0.1:30142 \
   --provider openai-completions --base-url … --model … --api-key …
 ```
+
+`--gateway --gateway-addr 127.0.0.1:30142` is the legacy spelling of the same
+single-unit serve.
 
 ## Extensions
 

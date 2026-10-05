@@ -9,15 +9,40 @@ documents the details; this file records the approach.
 ## Run it
 
 ```bash
-# 1. In the project the agent should work in:
-pipelets --gateway --gateway-addr 127.0.0.1:30142 \
+# 1. In the project the agent should work in, serve one unit:
+pipelets --serve --session /path/to/session.jsonl --cwd "$PWD" \
+  --addr 127.0.0.1:30142 \
   --provider openai-completions --base-url … --model … --api-key …
 
 # 2. In the pi-web fork:
 PIPELETS_GATEWAY=http://127.0.0.1:30142 npm run dev
 ```
 
+`--gateway --gateway-addr 127.0.0.1:30142` is the legacy spelling of the same
+single-unit serve and keeps working.
+
 When `PIPELETS_GATEWAY` is unset the fork behaves exactly as upstream.
+
+## The route-compatibility seam (VED-420)
+
+Rig owns the fleet and launches one `pipelets` process per seat (VED-417), so a
+`pipelets` serve hosts **exactly one unit**. pi-web consumes a session over
+`/sessions`, `/sessions/:id/events` (SSE), `/sessions/:id/commands`, and
+`ui_response`; those routes stay in place for the unit, so **pi-web runs against
+a single pipelets unit unchanged**.
+
+Where a fleet points pi-web:
+
+- **One unit** — point `PIPELETS_GATEWAY` directly at that unit's `--addr`.
+- **A fleet** — point pi-web at **rig**, not at any pipelets process. rig owns
+the multi-unit HTTP/SSE surface and proxies each seat to its own single-unit
+serve; a seat is addressed by name, not by a pipelets `--addr`. Per-seat SSE
+replay ids and the session-cwd behaviour are preserved across that proxy.
+
+Until the rig surface exists, a single unit is served directly and every route
+pi-web uses keeps working. The fleet routes (`GET /swarm`,
+`/units/:id/messages`, `/units/:id/ownership`) are unused by a single unit and
+are removed in a later slice (VED-421) once this seam is the documented path.
 
 ## Authentication (threat model)
 
@@ -26,7 +51,8 @@ run `bash`/`edit`/`write` with the gateway process's privileges, read full
 transcripts, and approve `ui_request` prompts. Treat the port as remote code
 execution and never expose it untrusted.
 
-- **Loopback only by default.** `--gateway-addr` defaults to `127.0.0.1:30142`.
+- **Loopback only by default.** `--addr` defaults to `127.0.0.1:30142`
+  (`--gateway-addr` is the legacy spelling).
   Binding a non-loopback address without a token is refused at startup
   (fail closed).
 - **Token auth.** Set `--gateway-token <token>` or
@@ -41,9 +67,10 @@ execution and never expose it untrusted.
 When using a token, export it to both processes:
 
 ```bash
-# 1. gateway
+# 1. the one unit
 PIPELETS_GATEWAY_TOKEN=$(openssl rand -hex 24) \
-  pipelets --gateway --gateway-addr 0.0.0.0:30142 \
+  pipelets --serve --session /path/to/session.jsonl --cwd "$PWD" \
+  --addr 0.0.0.0:30142 \
   --provider openai-completions --base-url … --model … --api-key …
 
 # 2. pi-web fork (same token)
@@ -52,7 +79,7 @@ PIPELETS_GATEWAY_TOKEN=<same token> \
   npm run dev
 ```
 
-pi-web must attach the token to every request; without it the gateway returns
+pi-web must attach the token to every request; without it the serve returns
 `401` on the session list, streams, and commands.
 
 ## Approach
@@ -79,8 +106,8 @@ without any fork change.
 
 ## Known limitations
 
-- One working directory per gateway (the host builds its agent with a single
-  cwd); run one gateway per project.
+- One working directory per serve (the unit's agent is built with a single
+  cwd); run one serve per project, as rig does per seat.
 - `set_tools` is fixed at unit creation (`recreated: false`).
 - SDK-only panels (sub-agents, MCP, skills, plugins, project trust,
   exact system prompt, node-pty terminal) are not backed on the native path.

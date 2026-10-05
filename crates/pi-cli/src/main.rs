@@ -2,8 +2,9 @@
 //! byte-compatible with pi at the provider API.
 //!
 //! A unit is headless: it runs one prompt (`--print`), serves the RPC protocol
-//! over stdio (`--serve`), or drives the HTTP + SSE gateway (`--gateway`). The
-//! same provider, loop, and tools run in every mode.
+//! over stdio (`--serve`), or serves **one** unit over HTTP + SSE
+//! (`--serve --addr` / `--gateway`). The same provider, loop, and tools run in
+//! every mode. Rig owns the fleet and launches one process per seat (VED-417).
 
 use clap::{Parser, Subcommand, ValueEnum};
 use pi_agent::prompt::{build_system_prompt, load_project_context_files, SystemPromptOptions};
@@ -18,6 +19,7 @@ use pi_cache::{
 };
 use pi_plugins::{PluginInstance, PluginPolicy};
 use pi_tools::{all_tools, default_tools, Tool, ToolContext, ToolResult};
+use std::io::Read;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -42,26 +44,30 @@ struct Cli {
     /// Start in RPC mode and idle on stdin (used by the memory benchmark).
     #[arg(long)]
     rpc: bool,
-    /// Serve the RPC protocol over stdio with a real provider.
+    /// Serve one unit. With `--addr`, binds the HTTP + SSE surface rig and
+    /// pi-web speak; without it, serves the RPC protocol over stdio.
     #[arg(long)]
     serve: bool,
-    /// Serve the HTTP + SSE gateway for unit agents (web UI / remote clients).
+    /// Deprecated alias for `--serve --addr`; serves the single unit over
+    /// HTTP + SSE. Kept so existing pi-web deployments keep working.
     #[arg(long)]
     gateway: bool,
-    /// Bind address for `--gateway`.
+    /// Bind address for the HTTP + SSE serve (`--serve --addr`, `--gateway`).
+    #[arg(long)]
+    addr: Option<String>,
+    /// Bind address for `--gateway` (legacy spelling).
     #[arg(long, default_value = "127.0.0.1:30142")]
     gateway_addr: String,
-    /// Bearer token required on every gateway request (or PIPELETS_GATEWAY_TOKEN).
-    /// Required when `--gateway-addr` is not a loopback address.
+    /// Bearer token required on every serve request (or PIPELETS_GATEWAY_TOKEN).
+    /// Required when the bind address is not loopback.
     #[arg(long)]
     gateway_token: Option<String>,
-    /// Suspend a gateway unit after this many idle seconds; 0 disables (default 900).
+    /// Working directory the served unit runs in (default: the current dir).
+    #[arg(long)]
+    cwd: Option<PathBuf>,
+    /// Suspend a served unit after this many idle seconds; 0 disables (default 900).
     #[arg(long, default_value_t = 900)]
     idle_timeout: u64,
-    /// Refuse new units beyond this many (default 24). A runaway orchestrator is
-    /// capped here instead of exhausting the machine.
-    #[arg(long, default_value_t = 24)]
-    max_units: usize,
     /// Non-interactive: run one prompt through the agent and print the result.
     #[arg(short = 'p', long = "print")]
     print: Option<String>,
@@ -185,6 +191,23 @@ fn main() {
         return;
     }
     if cli.serve {
+        // `--serve --addr` is the single-unit HTTP + SSE serve rig drives
+        // (VED-417); `--serve` alone stays the stdio RPC protocol.
+        if let Some(addr) = cli.addr.as_deref() {
+            run_unit_serve(
+                cli.provider_config(),
+                cli.context_window,
+                &cli.extensions,
+                &cli.extension_allow,
+                addr,
+                cli.gateway_token.clone(),
+                cli.idle_timeout,
+                cli.session.clone(),
+                cli.cwd.clone(),
+                cli.no_session,
+            );
+            return;
+        }
         run_serve(
             &cli.provider_config(),
             cli.yolo,
@@ -197,15 +220,19 @@ fn main() {
         return;
     }
     if cli.gateway {
-        run_gateway(
+        // Legacy spelling for `--serve --addr`; still single-unit (VED-420).
+        let addr = cli.addr.clone().unwrap_or_else(|| cli.gateway_addr.clone());
+        run_unit_serve(
             cli.provider_config(),
             cli.context_window,
             &cli.extensions,
             &cli.extension_allow,
-            &cli.gateway_addr,
+            &addr,
             cli.gateway_token.clone(),
             cli.idle_timeout,
-            cli.max_units,
+            cli.session.clone(),
+            cli.cwd.clone(),
+            cli.no_session,
         );
         return;
     }
@@ -783,10 +810,19 @@ fn run_serve(
     let _ = result;
 }
 
-/// Serve the HTTP + SSE gateway. Each session is an independent unit and any
-/// number of clients can attach to it.
+/// Serve **one** unit over HTTP + SSE.
+///
+/// Rig owns the fleet and launches one `pipelets` process per seat (VED-417),
+/// so this serve hosts exactly one session: the one named by `--session` (or a
+/// fresh one created in `--cwd`). A later `POST /sessions` replaces the unit
+/// rather than growing a fleet ([`pi_gateway::Gateway::single_unit`]).
+///
+/// The routes pi-web needs for its session stay the same: `/sessions`,
+/// `/sessions/:id/events` (SSE), `/sessions/:id/commands`, and `ui_response`.
+/// A fleet points pi-web at rig, not at this process; see
+/// `docs/gateway.md` and `integrations/pi-web/README.md`.
 #[allow(clippy::too_many_arguments)]
-fn run_gateway(
+fn run_unit_serve(
     config: ProviderConfig,
     context_window: usize,
     extensions: &[PathBuf],
@@ -794,7 +830,9 @@ fn run_gateway(
     addr: &str,
     token: Option<String>,
     idle_timeout: u64,
-    max_units: usize,
+    session: Option<PathBuf>,
+    cwd: Option<PathBuf>,
+    no_session: bool,
 ) {
     // Fail closed: never serve an unauthenticated control plane off-loopback.
     let bind_addr = match pi_gateway::check_bind_security(addr, token.is_some()) {
@@ -804,7 +842,23 @@ fn run_gateway(
             std::process::exit(1);
         }
     };
-    let cwd = std::env::current_dir().unwrap_or_default();
+    let cwd = match cwd {
+        Some(cwd) => cwd,
+        None => std::env::current_dir().unwrap_or_default(),
+    };
+    // The one unit this process serves: `--session`, or a fresh session in
+    // `--cwd`. `--no-session` still creates an in-memory-only unit, but the
+    // HTTP surface needs a session id, so a file is created in the agent dir
+    // unless an explicit path is given.
+    let session_path = if no_session {
+        session.clone()
+    } else {
+        resolve_session(session.as_deref(), false, &cwd)
+    };
+    let Some(session_path) = session_path else {
+        eprintln!("pipelets: --serve needs a session path (--session) or a writable agent dir");
+        std::process::exit(2);
+    };
     // `--gateway-token` wins; otherwise fall back to the environment.
     let token = token.or_else(|| std::env::var("PIPELETS_GATEWAY_TOKEN").ok());
     let extensions = extensions.to_vec();
@@ -822,8 +876,13 @@ fn run_gateway(
             path,
         )
     };
-    let host =
-        pi_host::Host::new(cwd.to_string_lossy().to_string(), factory).with_max_units(max_units);
+    let mut host = pi_host::Host::new(cwd.to_string_lossy().to_string(), factory);
+    // Open the one unit up front so the process always serves exactly one, even
+    // before a client connects.
+    if let Err(error) = host.open(session_path.clone()) {
+        eprintln!("pipelets: cannot open session {}: {error}", session_path.display());
+        std::process::exit(2);
+    }
     let listener = match std::net::TcpListener::bind(bind_addr) {
         Ok(listener) => listener,
         Err(error) => {
@@ -831,7 +890,7 @@ fn run_gateway(
             std::process::exit(1);
         }
     };
-    let gateway = pi_gateway::Gateway::new(host);
+    let gateway = pi_gateway::Gateway::new(host).single_unit();
     // Allow the header host the operator actually bound, plus loopback.
     let mut allowed_hosts = vec!["localhost".to_string()];
     let bound_host = bind_addr.ip().to_string();
@@ -845,7 +904,18 @@ fn run_gateway(
             std::time::Duration::from_secs(idle_timeout),
         );
     }
-    eprintln!("pipelets gateway listening on http://{bind_addr}");
+    // Rig stops a unit by closing its stdin (VED-417): EOF ends the serve like
+    // the stdio RPC mode, rather than leaving it to the kill path.
+    std::thread::spawn(|| {
+        let mut byte = [0u8; 1];
+        loop {
+            match std::io::stdin().read(&mut byte) {
+                Ok(0) | Err(_) => std::process::exit(0),
+                Ok(_) => {}
+            }
+        }
+    });
+    eprintln!("pipelets unit serve listening on http://{bind_addr}");
     pi_gateway::serve(listener, gateway);
 }
 

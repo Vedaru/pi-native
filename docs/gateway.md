@@ -1,24 +1,30 @@
-# Unit gateway
+# Unit serve
 
-`--gateway` serves the unit host over HTTP + SSE so a web UI or remote client can
-attach to long-lived agents. Sessions are addressed by id, not by a file
-descriptor; any number of clients can attach, and an idle unit releases its
-in-memory agent until the next command.
+`pipelets --serve --addr <host:port>` serves **one** unit over HTTP + SSE so a web
+UI or remote client can attach to it. Rig owns the fleet and launches one
+`pipelets` process per seat (VED-417), so each process hosts exactly one session:
+a later `POST /sessions` replaces the open unit rather than growing a fleet. The
+legacy `--gateway`/`--gateway-addr` spelling is an alias for the same single-unit
+serve.
 
 ```bash
-pipelets --gateway --gateway-addr 127.0.0.1:30142 \
+pipelets --serve --session /path/to/session.jsonl --cwd /path/to/project \
+  --addr 127.0.0.1:30142 \
   --provider openai-completions --base-url … --model … --api-key …
 ```
+
+Sessions are addressed by id, not by a file descriptor; any number of clients can
+attach, and an idle unit releases its in-memory agent until the next command.
 
 ## Routes
 
 | Method | Path | Meaning |
 | --- | --- | --- |
-| `GET` | `/sessions` | List session ids |
-| `GET` | `/swarm` | Status snapshot of every unit (multi-agent dashboard) |
-| `POST` | `/sessions` | Open/create a session (`{"sessionPath"?: …, "cwd"?: …}`) |
+| `GET` | `/sessions` | List the unit's session id (exactly one) |
+| `GET` | `/swarm` | Status snapshot of the unit |
+| `POST` | `/sessions` | Open the session (`{"sessionPath"?: …, "cwd"?: …}`); replaces the current unit |
 | `GET` | `/sessions/:id` | Resolved state |
-| `DELETE` | `/sessions/:id` | Remove a unit |
+| `DELETE` | `/sessions/:id` | Remove the unit |
 | `GET` | `/sessions/:id/commands` | Extension slash commands |
 | `POST` | `/sessions/:id/title` | Generate a session title from the transcript |
 | `GET` | `/sessions/:id/events` | SSE stream (replay + live) |
@@ -35,6 +41,26 @@ Units run tools without asking, matching pi. Binding a non-loopback address
 without `--gateway-token` is refused at startup; see
 [the web integration](../integrations/pi-web/README.md) for the threat model.
 
+## pi-web compatibility seam
+
+pi-web embeds pi's SDK in-process and talks to a session over `/sessions`,
+`/sessions/:id/events` (SSE), `/sessions/:id/commands`, and `ui_response`. Those
+routes stay in place for this process's single unit, so **pi-web runs against a
+single `pipelets` unit unchanged** (point `PIPELETS_GATEWAY` at the one unit's
+`--addr`).
+
+A **fleet**, though, is addressed at **rig**, not at a pipelets process: rig owns
+the multi-unit HTTP/SSE surface and proxies each seat to its own single-unit
+serve. Point pi-web at rig's surface (one base URL for the fleet) once it is
+available; per-seat addressing is by seat, not by a pipelets `--addr`. Until
+then, a single unit is served directly and every route pi-web uses keeps
+working. See [the pi-web integration](../integrations/pi-web/README.md) for the
+fork details.
+
+The fleet routes (`GET /swarm`, `/units/:id/messages`, `/units/:id/ownership`)
+are unused by a single unit and are removed in a later slice (VED-421) once the
+compatibility seam above is the documented path.
+
 The unit carries **no clock and no run ledger**: it has no trigger engine and no
 `--triggers` mode. Scheduling lives in rig, which drives a scheduled prompt over
-the gateway like any other client.
+the serve like any other client.

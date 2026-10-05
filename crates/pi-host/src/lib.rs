@@ -43,7 +43,6 @@ pub enum HostError {
     Io(String),
     Json(String),
     Stopped,
-    AtCapacity(usize),
     /// The recipient's mailbox is at [`MAILBOX_LIMIT`]; the message was NOT
     /// accepted (never a silent drop). Ack or drain the recipient to free room.
     MailboxFull {
@@ -67,9 +66,6 @@ impl std::fmt::Display for HostError {
             HostError::Io(message) => write!(f, "io: {message}"),
             HostError::Json(message) => write!(f, "json: {message}"),
             HostError::Stopped => write!(f, "unit is suspended"),
-            HostError::AtCapacity(max) => {
-                write!(f, "unit limit reached ({max}); remove a unit first")
-            }
             HostError::MailboxFull { to, depth } => {
                 write!(f, "mailbox for {to} is full ({depth} un-acked messages)")
             }
@@ -699,7 +695,7 @@ impl Unit {
     ///   drop the stale sender, then wake;
     /// - a live worker -> no-op.
     ///
-    /// It never calls [`Host::open`], so recovery cannot hit `AtCapacity`
+    /// It never calls [`Host::open`], so recovery cannot create a new unit
     /// (VED-376). The caller sends the recovery prompt afterwards.
     fn restart(&mut self) {
         if self.commands.is_some() && self.is_alive() {
@@ -797,18 +793,18 @@ pub struct UnitInfo {
     pub subscribers: usize,
 }
 
-/// Owns a set of units keyed by session id.
+/// Owns the live units this host knows about, keyed by session id.
+///
+/// Rig owns the fleet (VED-417): it launches one `pipelets` process per seat,
+/// so the shipped `--serve`/`--gateway` hosts a single unit. The map and the
+/// mailbox it backs (VED-379) stay in the library for the single-unit serve and
+/// their tests; the mailbox and `/units` routes are removed separately
+/// (VED-421). The fleet cap that used to live here moved to rig.
 pub struct Host {
     cwd: String,
     factory: Factory,
     units: HashMap<String, Unit>,
-    /// Hard ceiling on live units. A runaway orchestrator that spawns a worker
-    /// per card is capped here rather than allowed to exhaust the machine.
-    max_units: usize,
 }
-
-/// Default unit ceiling for a host that is not told otherwise.
-pub const DEFAULT_MAX_UNITS: usize = 24;
 
 impl Host {
     pub fn new(
@@ -819,18 +815,7 @@ impl Host {
             cwd: cwd.into(),
             factory: Arc::new(factory),
             units: HashMap::new(),
-            max_units: DEFAULT_MAX_UNITS,
         }
-    }
-
-    /// Set the maximum number of live units [`Host::open`] will create.
-    pub fn with_max_units(mut self, max: usize) -> Self {
-        self.max_units = max.max(1);
-        self
-    }
-
-    pub fn max_units(&self) -> usize {
-        self.max_units
     }
 
     /// Open (creating if necessary) the session at `session_path` and start its
@@ -850,9 +835,6 @@ impl Host {
         };
         drop(journal);
         if !self.units.contains_key(&id) {
-            if self.units.len() >= self.max_units {
-                return Err(HostError::AtCapacity(self.max_units));
-            }
             let unit = Unit::spawn(
                 session_path,
                 cwd,
@@ -913,6 +895,28 @@ impl Host {
             .unwrap_or(false)
     }
 
+    /// Forget every unit except `session_id`, releasing the others' agents and
+    /// in-memory state. This is how a **single-unit serve** keeps its promise:
+    /// the serve opens the one session it was told to serve, then drops anything
+    /// a client opened alongside it. The session files on disk are untouched, so
+    /// the evicted sessions can be reopened.
+    ///
+    /// Returns the evicted session ids.
+    pub fn retain_only(&mut self, session_id: &str) -> Vec<String> {
+        let evicted: Vec<String> = self
+            .units
+            .keys()
+            .filter(|id| id.as_str() != session_id)
+            .cloned()
+            .collect();
+        for id in &evicted {
+            if let Some(mut unit) = self.units.remove(id) {
+                unit.suspend();
+            }
+        }
+        evicted
+    }
+
     /// Whether the unit's agent is inside a run right now. `Ok(false)` for an
     /// idle unit, `Err` for an unknown session.
     pub fn in_flight(&self, session_id: &str) -> Result<bool, HostError> {
@@ -945,8 +949,8 @@ impl Host {
     /// session file. A suspended unit is woken; a crashed thread is respawned;
     /// a live unit is left alone. Returns whether the session is known.
     ///
-    /// This never creates a new unit, so it cannot hit [`HostError::AtCapacity`];
-    /// recovery of a dead/stalled unit should call this rather than `open`.
+    /// This never creates a new unit; recovery of a dead/stalled unit should
+    /// call this rather than `open`.
     pub fn restart(&mut self, session_id: &str) -> bool {
         match self.units.get_mut(session_id) {
             Some(unit) => {

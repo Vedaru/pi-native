@@ -44,13 +44,15 @@ Findings from the investigation:
    not file descriptor. It owns attach/detach, event fan-out + replay, idle
    suspend/wake, and crash recovery. The session JSONL remains the source of
    truth with one writer per session.
-4. Expose units over an **HTTP + SSE gateway** with pi-web-compatible semantics
+4. Expose units over an **HTTP + SSE serve** with pi-web-compatible semantics
    (snapshot + live + `Last-Event-ID` replay, backpressure that drops
-   rebuildable deltas).
+   rebuildable deltas). The serve is **single-unit** (VED-420): rig owns the
+   fleet and launches one `pipelets` process per seat (VED-417), so a process
+   hosts exactly one session while keeping the pi-web routes unchanged.
 
 An in-unit **trigger engine** (decision 5 in the original ADR: schedules,
 episodes, budgets, durable run records) was built and then removed by VED-419.
-Scheduling is owned by rig, which drives a scheduled prompt over the gateway like
+Scheduling is owned by rig, which drives a scheduled prompt over the serve like
 any other client; the unit carries no clock and no run ledger.
 
 ## Milestones

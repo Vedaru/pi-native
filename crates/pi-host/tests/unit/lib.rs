@@ -264,19 +264,24 @@ fn replay_ids_align_with_replay_and_track_the_oldest() {
 }
 
 #[test]
-fn open_refuses_new_units_at_the_cap() {
-    let dir = temp_dir("cap");
-    let mut host = one_turn_host(&dir, "hello").with_max_units(1);
+fn retain_only_evicts_every_other_unit() {
+    // A single-unit serve opens its session, then drops any unit a client
+    // opened alongside it; reopening an evicted path re-creates it.
+    let dir = temp_dir("retain-only");
+    let mut host = one_turn_host(&dir, "hello");
     let first = host.open(dir.join("a.jsonl")).expect("open a");
+    let second = host.open(dir.join("b.jsonl")).expect("open b");
+    assert_eq!(host.session_ids().len(), 2);
 
-    match host.open(dir.join("b.jsonl")) {
-        Err(HostError::AtCapacity(1)) => {}
-        other => panic!("expected AtCapacity, got {other:?}"),
-    }
+    let evicted = host.retain_only(&second);
+    assert_eq!(evicted, vec![first.clone()]);
+    assert_eq!(host.session_ids(), vec![second.clone()]);
+    assert!(host.is_running(&second));
+    assert!(!host.session_ids().contains(&first));
 
-    // A unit already inside the cap can still be reopened.
-    let again = host.open(dir.join("a.jsonl")).expect("reopen a");
-    assert_eq!(again, first);
+    // The evicted session file survives, so the same path reopens.
+    let reopened = host.open(dir.join("a.jsonl")).expect("reopen a");
+    assert_eq!(reopened, first);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -505,14 +510,14 @@ fn restart_respawns_a_dead_worker_without_reopening() {
     // H6/H10: a dead thread is respawned through restart, never `open`, so it
     // cannot hit the capacity ceiling even at the cap.
     let dir = temp_dir("restart-dead");
-    let mut host = panicking_host(&dir).with_max_units(1);
+    let mut host = panicking_host(&dir);
     let id = host.open(dir.join("s.jsonl")).expect("open");
     assert!(wait_until(|| !host.is_alive(&id), Duration::from_secs(2)));
     assert!(host.is_dead(&id));
 
     assert!(host.restart(&id), "restart knows the session");
-    // The new worker panics again, but restart itself must not have needed a
-    // new unit slot: the session id is unchanged and capacity was never hit.
+    // The new worker panics again, but restart itself must not have created a
+    // second unit: the session id is unchanged.
     let info = host
         .swarm()
         .into_iter()

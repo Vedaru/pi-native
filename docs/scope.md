@@ -8,8 +8,8 @@ and the guard for new work.
 
 The binary is the **bare core** a single unit needs. Swarm orchestration — a
 conductor, role units, a Linear board — lives in a separate repo
-(`pipelets-swarm`), driving the core over the gateway. It is never part of the
-shipped binary, so an idle unit stays at ~4–5 MB.
+(`pipelets-swarm`), driving the core over the single-unit serve. It is never
+part of the shipped binary, so an idle unit stays at ~4–5 MB.
 
 The reference port (`Dicklesworthstone/pi_agent_rust`) is used for
 **architecture** (QuickJS + Rust-backed Node shims, crate choices), never for
@@ -32,8 +32,8 @@ Core primitives a swarm host drives:
 
 | Surface | Notes |
 | --- | --- |
-| Unit host: addressable agents, attach/detach, event fan-out, idle suspend | `pi-host` |
-| HTTP + SSE gateway | `pi-gateway` |
+| Unit host: one addressable agent, attach/detach, event fan-out, idle suspend | `pi-host` |
+| HTTP + SSE serve (one unit) | `pi-gateway` |
 | Direct unit-to-unit mailbox (ack, ownership) | `pi-host` |
 
 ## Out of scope (reference-port bloat)
@@ -77,3 +77,5 @@ conductor, DAGs, dashboards, Linear) is a separate repo, never in the unit.
 | VED-337–343 | web/host infra |
 | VED-379 | direct unit-to-unit mailbox |
 | VED-419 | drop the trigger engine; rig owns scheduling |
+| VED-420 | single-unit serve; keep pi-web compatible |
+| VED-421 | remove the mailbox and `/units` routes (rig owns coordination) |

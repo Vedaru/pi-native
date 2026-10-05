@@ -33,11 +33,12 @@ Remove the TUI and the `--client` mode.
 
 ## Consequences
 
-- `pipelets` is a strict headless core: `--print`/one-shot, `--serve` (RPC),
-  `--gateway`. Interactive clients (a web UI, a robot, a script) attach to those
-  surfaces instead of a bundled terminal UI.
+- `pipelets` is a strict headless core: `--print`/one-shot, `--serve` over stdio
+  (RPC), and `--serve --addr` (single-unit HTTP + SSE). Interactive clients (a
+  web UI, a robot, a script) attach to those surfaces instead of a bundled
+  terminal UI.
 - One fewer crate and two fewer dependencies; the release binary shrinks.
-- A user who wants a terminal client can build one against the RPC/gateway
+- A user who wants a terminal client can build one against the RPC/serve
   protocol, exactly as pi-web does. If a first-party terminal client is ever
   wanted, it should be its own crate that depends on the core, never a mode
   inside the worker.

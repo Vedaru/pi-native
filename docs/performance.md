@@ -24,7 +24,7 @@ export PIPELETS_BIN="$PWD/target/release/pipelets"
 | --- | --- | --- |
 | shipped runtime | one **9.5 MB** binary (4.0 MB tarball) | Node + `node_modules` |
 | cold-idle RSS (`--rpc`) | **4.4 MB** | 111.3 MB |
-| cold-idle RSS (`--gateway`) | **5.0 MB** | — |
+| cold-idle RSS (single-unit serve) | **5.0 MB** | — |
 | ratio | — | **0.04×** (≈25× smaller) |
 | idle CPU (3 s) | **0.001 s** (no busy-wait) | — |
 
@@ -152,10 +152,11 @@ both the transient (`--max-mb 60`) and the retained run (`--max-mb 60`).
 
 ### Concurrency
 
-The gateway hosts many units in one process, so image decodes are capped by a
-process-global gate (default 2, `PIPELETS_IMAGE_CONCURRENCY`), bounding
-aggregate image memory while a decode is in flight. `malloc_trim(0)` runs after
-each decode so the transient is not left resident.
+The serve hosts one unit per process (rig launches one process per seat), so
+image decodes are capped by a process-global gate (default 2,
+`PIPELETS_IMAGE_CONCURRENCY`), bounding aggregate image memory while a decode is
+in flight. `malloc_trim(0)` runs after each decode so the transient is not left
+resident.
 
 ## Session store
 

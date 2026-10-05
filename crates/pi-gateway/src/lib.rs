@@ -2,7 +2,14 @@
 //!
 //! This is the transport the web UI attaches to. It is intentionally small and
 //! dependency-free (a blocking `std::net` server), and its routes mirror the
-//! subset of pi-web's `/api/agent/*` surface that the browser needs:
+//! subset of pi-web's `/api/agent/*` surface that the browser needs.
+//!
+//! The shipped serve is **single-unit** (VED-420): rig owns the fleet and
+//! launches one `pipelets` process per seat (VED-417), so a serve hosts exactly
+//! one session. [`Gateway::single_unit`] makes a later `POST /sessions` replace
+//! the open unit rather than grow a fleet. The pi-web routes below keep working
+//! unchanged for that one unit; see `integrations/pi-web/README.md` for where a
+//! fleet points pi-web (rig) and `docs/gateway.md` for the seam.
 //!
 //! | Method | Path | Meaning |
 //! | --- | --- | --- |
@@ -53,6 +60,12 @@ pub struct Gateway {
     /// anything else are rejected to blunt DNS-rebinding attacks. Loopback
     /// names are always accepted.
     allowed_hosts: Vec<String>,
+    /// Serve exactly one unit (VED-420). Rig launches one `pipelets` process per
+    /// seat (VED-417), so the shipped serve hosts a single session: a client may
+    /// still open a session, but doing so evicts any other unit rather than
+    /// growing a fleet. The multi-unit host and the mailbox it backs remain in
+    /// the library until the fleet routes are removed (VED-421).
+    single_unit: bool,
 }
 
 impl Gateway {
@@ -61,7 +74,16 @@ impl Gateway {
             host: Mutex::new(host),
             token: None,
             allowed_hosts: Vec::new(),
+            single_unit: false,
         }
+    }
+
+    /// Serve exactly one unit: a second `POST /sessions` replaces the first
+    /// instead of adding to a fleet. [`Host::retain_only`] releases the evicted
+    /// unit's agent; its session file survives.
+    pub fn single_unit(mut self) -> Self {
+        self.single_unit = true;
+        self
     }
 
     /// Require `token` on every request (as `Authorization: Bearer <token>` or
@@ -373,7 +395,6 @@ fn write_json(stream: &mut TcpStream, status: u16, value: &Value) {
 fn status_for(error: &HostError) -> u16 {
     match error {
         HostError::UnknownSession(_) => 404,
-        HostError::AtCapacity(_) => 429,
         // A full mailbox is a *sender-visible* backpressure signal (VED-379),
         // never a silent drop: the caller must retry after the recipient acks.
         HostError::MailboxFull { .. } => 429,
@@ -470,11 +491,19 @@ fn create_session(stream: &mut TcpStream, gateway: &Gateway, request: &Request) 
     };
     let opened = gateway.host().open(path.clone());
     match opened {
-        Ok(id) => write_json(
-            stream,
-            201,
-            &json!({ "sessionId": id, "sessionPath": path.to_string_lossy() }),
-        ),
+        Ok(id) => {
+            // Single-unit serve: a client (pi-web's "new session") may open a
+            // session, but the gateway keeps only the newest unit. The evicted
+            // unit's session file is untouched.
+            if gateway.single_unit {
+                gateway.host().retain_only(&id);
+            }
+            write_json(
+                stream,
+                201,
+                &json!({ "sessionId": id, "sessionPath": path.to_string_lossy() }),
+            )
+        }
         Err(error) => write_json(
             stream,
             status_for(&error),

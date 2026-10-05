@@ -38,6 +38,31 @@ fn start_gateway_with_token(dir: &Path, text: &str, token: Option<&str>) -> Gate
     GatewayServer { addr }
 }
 
+/// A gateway in single-unit mode (VED-420): the shipped serve hosts one unit,
+/// so a later `POST /sessions` replaces the open unit rather than adding one.
+fn start_single_unit_gateway(dir: &Path, text: &str, session: &Path) -> GatewayServer {
+    let turns = vec![AssistantTurn {
+        text: text.to_string(),
+        stop_reason: Some("end_turn".to_string()),
+        ..Default::default()
+    }];
+    let cwd = dir.to_path_buf();
+    let mut host = Host::new(cwd.to_string_lossy().to_string(), move |unit_cwd: &str| {
+        Agent::new(
+            Box::new(FauxProvider::new(turns.clone())),
+            Vec::new(),
+            "system",
+            ToolContext::new(unit_cwd),
+        )
+    });
+    host.open(session.to_path_buf()).expect("open the one unit");
+    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let gateway = Arc::new(Gateway::new(host).single_unit());
+    std::thread::spawn(move || serve(listener, gateway));
+    GatewayServer { addr }
+}
+
 /// A blocking one-shot HTTP request (the server closes the connection).
 fn request(addr: SocketAddr, method: &str, path: &str, body: Option<Value>) -> (u16, String) {
     request_with_auth(addr, method, path, body, None)
@@ -943,5 +968,82 @@ fn gateway_pushes_a_direct_message_over_sse() {
         seen.lines().any(|line| line.starts_with("id: ")),
         "has id: {seen}"
     );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// --- Single-unit serve (VED-420) ------------------------------------------
+
+/// The shipped serve hosts one unit: the pi-web routes answer for its session,
+/// and a later `POST /sessions` replaces the unit instead of adding one.
+#[test]
+fn single_unit_serve_answers_the_pi_web_routes() {
+    let dir = temp_dir("single-unit");
+    let server = start_single_unit_gateway(&dir, "hello", &dir.join("s.jsonl"));
+
+    // `GET /sessions` lists exactly the one unit.
+    let (status, body) = request(server.addr, "GET", "/sessions", None);
+    assert_eq!(status, 200, "{body}");
+    let listed: Value = serde_json::from_str(&body).unwrap();
+    let ids = listed["sessions"].as_array().expect("sessions");
+    assert_eq!(ids.len(), 1, "serves exactly one unit: {body}");
+    let id = ids[0].as_str().expect("session id").to_string();
+
+    // `GET /sessions/:id` resolves that unit.
+    let (status, body) = request(server.addr, "GET", &format!("/sessions/{id}"), None);
+    assert_eq!(status, 200, "{body}");
+    let state: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(state["type"], json!("state"), "{state}");
+
+    // SSE + `POST /sessions/:id/commands` drive that unit (pi-web's live path).
+    let mut sse = open_sse(server.addr, &format!("/sessions/{id}/events?format=pi"));
+    let (status, body) = request(
+        server.addr,
+        "POST",
+        &format!("/sessions/{id}/commands"),
+        Some(json!({ "type": "prompt", "text": "go" })),
+    );
+    assert_eq!(status, 202, "{body}");
+    let seen = wait_for_sse(&mut sse, "agent_settled", Duration::from_secs(3));
+    assert!(seen.contains("message_start"), "SSE carried pi events: {seen}");
+
+    // `ui_response` is accepted for the one unit.
+    let (status, body) = request(
+        server.addr,
+        "POST",
+        &format!("/sessions/{id}/ui_response"),
+        Some(json!({ "id": "d1", "value": true })),
+    );
+    assert_eq!(status, 202, "{body}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A second `POST /sessions` replaces the unit: the process still serves one.
+#[test]
+fn single_unit_serve_replaces_a_second_session() {
+    let dir = temp_dir("single-unit-replace");
+    let server = start_single_unit_gateway(&dir, "hello", &dir.join("first.jsonl"));
+
+    let (status, body) = request(
+        server.addr,
+        "POST",
+        "/sessions",
+        Some(json!({ "sessionPath": dir.join("second.jsonl").to_string_lossy() })),
+    );
+    assert_eq!(status, 201, "{body}");
+    let second = serde_json::from_str::<Value>(&body).unwrap()["sessionId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let (status, body) = request(server.addr, "GET", "/sessions", None);
+    assert_eq!(status, 200, "{body}");
+    let listed: Value = serde_json::from_str(&body).unwrap();
+    let ids = listed["sessions"].as_array().expect("sessions");
+    assert_eq!(ids.len(), 1, "still exactly one unit: {body}");
+    assert_eq!(ids[0], json!(second), "the newest session won: {body}");
+
+    // The replaced unit's session file survives on disk.
+    assert!(dir.join("first.jsonl").exists());
     let _ = std::fs::remove_dir_all(&dir);
 }
