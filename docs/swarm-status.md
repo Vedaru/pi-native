@@ -7,45 +7,35 @@ exported via `linear issue mine --team VED --project 4d5e47500fa6 --all-states`.
 
 ## Board summary
 
-- **54 issues total**
-- **48 Done**
-- **3 In Progress**
-- **1 Todo**
-- **1 Backlog**
+- **58 issues total**
+- **56 Done**
+- **1 In Progress**
 - **1 Canceled**
 
-The rewrite is essentially feature-complete: the native host, agent loop, tools,
-RPC/JSON protocol, gateway, unit host, triggers, provider layer, session store,
-packaging, and the memory/CPU gates are all landed. What remains is a small
-tail of **swarm-audit follow-ups** (found while reviewing the landed crates)
-plus one deferred port item.
+The rewrite is feature-complete: the native host, agent loop, tools, RPC/JSON
+protocol, gateway, unit host, triggers, provider layer, session store,
+packaging, and the memory/CPU gates are all landed. The swarm-audit follow-up
+batch (VED-346 — VED-359) has been resolved. The only remaining workstream is
+the deferred TUI port.
 
 ## Open issues
 
 | Issue | State | Priority | Title |
 | --- | --- | --- | --- |
-| VED-348 | In Progress | High | Swarm audit: RPC tool-result shape + stale session name on switch |
-| VED-350 | In Progress | High | Swarm audit: plugin randomBytes DoS, swallowed fs errors, path-denial signaling |
-| VED-356 | In Progress | No priority | Make a unit removable: `Host::remove` + `DELETE /sessions/:id` |
-| VED-347 | Todo | High | Swarm audit: session compaction is never recorded, persist can diverge |
-| VED-307 | Backlog | Medium | Port TUI renderer and terminal core to Rust |
+| VED-307 | In Progress | Medium | Port TUI renderer and terminal core to Rust |
 
-### Notes on open issues
+### Notes on the open issue
 
-- **VED-348** — RPC role fixed the two high-severity items
-  (`tool_execution_end` content blocks; stale `name` cleared on `switch`).
-  Remaining: `start_new` ignores `parentSession`, and `entries()` re-reads and
-  re-serializes the whole session file on every call.
-- **VED-350** — plugin runtime: randomBytes DoS, swallowed fs errors, and
-  path-denial signaling.
-- **VED-356** — follow-up to VED-355 (idle eviction); units are suspended but
-  never removed, so the host map grows with session count. Adds
-  `Host::remove` + `DELETE /sessions/:id`, with tests.
-- **VED-347** — session compaction is never recorded; persisted state can
-  diverge from in-memory state.
-- **VED-307** — deferred: port the TUI renderer / terminal core. Sits in
-  Backlog (VED-319 decided against reusing pi's TS TUI; VED-310 chord tracker
-  is already Done).
+- **VED-307** — port the TUI renderer / terminal core. Sits in milestone
+  `M4 - Native host: agent loop, tools, headless protocol`. VED-319 decided
+  against reusing pi's original TS TUI; VED-310 (chord delta tracker) is Done.
+
+## Recently closed (this cycle)
+
+The whole audit tail landed: VED-347, VED-348, VED-350, VED-355, VED-356,
+VED-358, VED-359. VED-360 (a lifecycle/routing fix for conductor → reviewer
+handling of `rpc` issues) is also Done. VED-357 (this status note) is Done and
+was committed as `0bd6ad7`.
 
 ## The six role units
 
@@ -60,15 +50,17 @@ Coordination is Linear-only; there is no shared chat. Scopes are disjoint.
 | **tester** | tests and gates | `crates/*/tests/*`, `scripts/*.py` | no |
 | **synthesizer** | status, docs | `docs/*.md` only | no |
 
-## Recent audit trail
+## Commits landed since the last snapshot
 
-The swarm-audit batch (VED-346 — VED-355) produced ten issues across the
-landed crates; nine are Done and only VED-347 and VED-348 remain open. VED-355
-(gateway idle eviction) immediately spawned VED-356 (full unit removal), which
-is the current in-flight coder workstream.
+- `e6326f0` — feat(agent): wire the session thinking level to the request and
+  make the tool loop unbounded
+- `0bd6ad7` — docs(swarm): add the swarm status note (`docs/swarm-status.md`)
+
+Pushed to `origin/master` as `1689197..0bd6ad7`. Gates at that point:
+`cargo fmt --all` clean, `cargo clippy --workspace --all-targets -- -D warnings`
+clean, `cargo test --workspace` → 228 passed / 0 failed.
 
 ## Verification / provenance
 
 - Board exported from Linear: `linear issue mine --team VED --project 4d5e47500fa6 --all-states --limit 100 --json`.
-- No source files outside `docs/` were touched. Changes are left in the working
-  tree; nothing is committed.
+- No source files outside `docs/` were touched by the synthesizer.
