@@ -24,7 +24,8 @@ pub use providers::{
 };
 pub use session::{
     agent_dir, append_compaction, append_messages, message_value, messages_from_session,
-    new_session_path, new_session_path_in, transcript_values, SessionJournal,
+    new_session_path, new_session_path_in, new_session_path_in_unit, new_session_path_with_unit,
+    transcript_values, SessionJournal,
 };
 
 /// A tool call requested by the model.

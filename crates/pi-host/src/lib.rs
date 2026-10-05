@@ -285,6 +285,8 @@ type Factory = Arc<dyn Fn(&str) -> Agent + Send + Sync>;
 struct Unit {
     session_path: PathBuf,
     cwd: String,
+    /// The swarm unit recorded in the session header.
+    unit: Option<String>,
     factory: Factory,
     shared: Arc<Shared>,
     commands: Option<Sender<Vec<u8>>>,
@@ -292,7 +294,13 @@ struct Unit {
 }
 
 impl Unit {
-    fn spawn(session_path: PathBuf, cwd: String, factory: Factory, shared: Arc<Shared>) -> Self {
+    fn spawn(
+        session_path: PathBuf,
+        cwd: String,
+        unit: Option<String>,
+        factory: Factory,
+        shared: Arc<Shared>,
+    ) -> Self {
         let (tx, rx) = mpsc::channel::<Vec<u8>>();
         let writer = ChannelWriter::new(shared.clone());
         let path = session_path.clone();
@@ -308,6 +316,7 @@ impl Unit {
         Self {
             session_path,
             cwd,
+            unit,
             factory,
             shared,
             commands: Some(tx),
@@ -372,6 +381,8 @@ impl Unit {
 #[serde(rename_all = "camelCase")]
 pub struct UnitInfo {
     pub session_id: String,
+    /// The swarm unit that owns this session, if any.
+    pub unit: Option<String>,
     pub name: Option<String>,
     pub cwd: String,
     pub session_path: String,
@@ -409,6 +420,7 @@ impl Host {
         let (journal, _) = pi_agent::SessionJournal::open(session_path.clone(), &self.cwd)
             .map_err(|error| HostError::Io(error.to_string()))?;
         let id = journal.session_id().to_string();
+        let unit_name = journal.unit().map(str::to_string);
         let cwd = if journal.cwd().is_empty() {
             self.cwd.clone()
         } else {
@@ -419,6 +431,7 @@ impl Host {
             let unit = Unit::spawn(
                 session_path,
                 cwd,
+                unit_name,
                 self.factory.clone(),
                 Arc::new(Shared::default()),
             );
@@ -491,6 +504,7 @@ impl Host {
             .iter()
             .map(|(session_id, unit)| UnitInfo {
                 session_id: session_id.clone(),
+                unit: unit.unit.clone(),
                 name: unit.shared.session_name(&unit.session_path),
                 cwd: unit.cwd.clone(),
                 session_path: unit.session_path.to_string_lossy().into_owned(),

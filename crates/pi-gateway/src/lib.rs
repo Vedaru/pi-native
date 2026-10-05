@@ -294,7 +294,8 @@ fn create_session(stream: &mut TcpStream, gateway: &Gateway, request: &Request) 
                 .and_then(Value::as_str)
                 .map(str::to_string)
                 .unwrap_or_else(|| gateway.host().cwd().to_string());
-            match pi_agent::new_session_path(std::path::Path::new(&cwd)) {
+            let unit = body.get("unit").and_then(Value::as_str);
+            match pi_agent::new_session_path_with_unit(std::path::Path::new(&cwd), unit) {
                 Ok(path) => path,
                 Err(error) => {
                     write_json(stream, 500, &json!({ "error": error.to_string() }));

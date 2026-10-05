@@ -52,19 +52,39 @@ fn expand_tilde(path: PathBuf) -> PathBuf {
 /// name, which is the layout pi and pi-web expect:
 /// `<agent>/sessions/--<encoded-cwd>--/<timestamp>_<id>.jsonl`.
 pub fn new_session_path(cwd: &Path) -> std::io::Result<PathBuf> {
-    new_session_path_in(&agent_dir(), cwd)
+    new_session_path_with_unit(cwd, None)
+}
+
+/// Like [`new_session_path`] but records the owning swarm unit in the header.
+pub fn new_session_path_with_unit(cwd: &Path, unit: Option<&str>) -> std::io::Result<PathBuf> {
+    new_session_path_in_unit(&agent_dir(), cwd, unit)
 }
 
 /// Like [`new_session_path`] but with an explicit agent directory (testable).
 pub fn new_session_path_in(agent_dir: &Path, cwd: &Path) -> std::io::Result<PathBuf> {
+    new_session_path_in_unit(agent_dir, cwd, None)
+}
+
+/// Like [`new_session_path_in`] but records the owning swarm unit.
+pub fn new_session_path_in_unit(
+    agent_dir: &Path,
+    cwd: &Path,
+    unit: Option<&str>,
+) -> std::io::Result<PathBuf> {
     let dir = session_dir_for(agent_dir, cwd);
     std::fs::create_dir_all(&dir)?;
     let id = new_id();
     let timestamp = now_iso();
     let file_timestamp = timestamp.replace([':', '.'], "-");
     let path = dir.join(format!("{file_timestamp}_{id}.jsonl"));
+    let mut header = session_header(&id, &timestamp, &cwd.to_string_lossy());
+    if let Some(unit) = unit {
+        header
+            .extra
+            .insert("unit".to_string(), serde_json::json!(unit));
+    }
     let session = SessionFile {
-        header: session_header(&id, &timestamp, &cwd.to_string_lossy()),
+        header,
         entries: Vec::new(),
     };
     session.write(&path).map_err(io_err)?;
@@ -364,6 +384,11 @@ impl SessionJournal {
     /// The session id from the file header.
     pub fn session_id(&self) -> &str {
         &self.session.header.id
+    }
+
+    /// The owning swarm unit recorded in the header, if any.
+    pub fn unit(&self) -> Option<&str> {
+        self.session.unit()
     }
 
     /// The working directory recorded in the file header.

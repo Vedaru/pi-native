@@ -272,6 +272,11 @@ impl SessionFile {
             .filter(|entry| entry.kind == "session_info")
             .find_map(|entry| entry.get("name").and_then(Value::as_str))
     }
+
+    /// The owning swarm unit recorded in the header, if any.
+    pub fn unit(&self) -> Option<&str> {
+        self.header.extra.get("unit").and_then(Value::as_str)
+    }
 }
 
 #[cfg(test)]
