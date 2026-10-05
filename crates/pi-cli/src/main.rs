@@ -68,6 +68,10 @@ struct Cli {
     /// How often the trigger loop wakes, in seconds.
     #[arg(long, default_value_t = 1)]
     trigger_interval: u64,
+    /// Trigger run pricing as `input,output,cache_read,cache_write`, in
+    /// micro-units per million tokens, used to enforce spend budgets.
+    #[arg(long, value_parser = parse_price)]
+    run_price: Option<pi_triggers::Price>,
     /// Suspend a gateway unit after this many idle seconds; 0 disables (default 900).
     #[arg(long, default_value_t = 900)]
     idle_timeout: u64,
@@ -234,6 +238,7 @@ fn main() {
             cli.trigger_interval,
             cli.idle_timeout,
             cli.max_units,
+            cli.run_price.clone(),
         );
         return;
     }
@@ -623,6 +628,27 @@ fn missing(what: &str) -> ! {
     std::process::exit(2);
 }
 
+/// Parse `--run-price input,output,cache_read,cache_write` (micros/million).
+fn parse_price(value: &str) -> Result<pi_triggers::Price, String> {
+    let parts: Vec<i64> = value
+        .split(',')
+        .map(|part| {
+            part.trim()
+                .parse::<i64>()
+                .map_err(|_| format!("invalid price component `{part}`"))
+        })
+        .collect::<Result<_, _>>()?;
+    if parts.len() != 4 {
+        return Err("price needs 4 comma-separated values".to_string());
+    }
+    Ok(pi_triggers::Price {
+        input_micros_per_million: parts[0],
+        output_micros_per_million: parts[1],
+        cache_read_micros_per_million: parts[2],
+        cache_write_micros_per_million: parts[3],
+    })
+}
+
 impl Cli {
     fn provider_config(&self) -> ProviderConfig {
         let provider = self
@@ -807,6 +833,7 @@ fn run_gateway(
     trigger_interval: u64,
     idle_timeout: u64,
     max_units: usize,
+    run_price: Option<pi_triggers::Price>,
 ) {
     // Fail closed: never serve an unauthenticated control plane off-loopback.
     let bind_addr = match pi_gateway::check_bind_security(addr, token.is_some()) {
@@ -857,7 +884,11 @@ fn run_gateway(
                 std::process::exit(1);
             });
             let sessions = cwd.join(".pi-native").join("trigger-sessions");
-            let runner = pi_triggers::Runner::new(triggers, sessions);
+            let mut runner =
+                pi_triggers::Runner::new(triggers, sessions).with_workspace(cwd.clone());
+            if let Some(price) = run_price {
+                runner = runner.with_price(price);
+            }
             pi_gateway::Gateway::with_triggers(host, runner, Box::new(store))
         }
         None => pi_gateway::Gateway::new(host),

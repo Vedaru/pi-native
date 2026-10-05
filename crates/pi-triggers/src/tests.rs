@@ -1,5 +1,6 @@
 use super::*;
 use pi_agent::{Agent, AssistantTurn, FauxProvider, ToolContext};
+use pi_providers::Usage;
 use std::path::PathBuf;
 
 fn temp_dir(name: &str) -> PathBuf {
@@ -10,9 +11,14 @@ fn temp_dir(name: &str) -> PathBuf {
 }
 
 fn test_host(dir: &Path) -> Host {
+    test_host_with_usage(dir, None)
+}
+
+fn test_host_with_usage(dir: &Path, usage: Option<Usage>) -> Host {
     let turns = vec![AssistantTurn {
         text: "ok".to_string(),
         stop_reason: Some("end_turn".to_string()),
+        usage,
         ..Default::default()
     }];
     let cwd = dir.to_path_buf();
@@ -104,6 +110,192 @@ fn max_runs_per_window_is_enforced() {
 
     assert_eq!(runner.tick(&mut host, &mut store, 100).len(), 1);
     assert_eq!(runner.tick(&mut host, &mut store, 200).len(), 0);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_budgeted_run_stops_and_records_a_receipt() {
+    let dir = temp_dir("receipt-budget");
+    let usage = Usage {
+        input: 100,
+        output: 50,
+        ..Default::default()
+    };
+    let mut host = test_host_with_usage(&dir, Some(usage));
+    let mut trigger = Trigger::interval("t", Duration::from_secs(1), "go");
+    trigger.model = Some("deepseek-flash".to_string());
+    trigger.budget.max_tokens = 10;
+    let mut runner = Runner::new(vec![trigger], dir.join("sessions"));
+    let mut store = InMemoryRuns::default();
+
+    assert_eq!(runner.tick(&mut host, &mut store, 100).len(), 1);
+    let receipts = store.receipts();
+    assert_eq!(receipts.len(), 1);
+    let receipt = &receipts[0];
+    assert_eq!(receipt.outcome, ReceiptOutcome::BudgetExceeded);
+    assert_eq!(receipt.model.as_deref(), Some("deepseek-flash"));
+    assert_eq!(receipt.usage.total_tokens(), 150);
+    assert!(receipt.breach.as_deref().unwrap().contains("token"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn cost_budget_uses_configured_price() {
+    let dir = temp_dir("receipt-cost");
+    let usage = Usage {
+        input: 1_000_000,
+        output: 1_000_000,
+        ..Default::default()
+    };
+    let mut host = test_host_with_usage(&dir, Some(usage));
+    let mut trigger = Trigger::interval("t", Duration::from_secs(1), "go");
+    trigger.budget.max_cost_micros = 1_000;
+    let price = Price {
+        input_micros_per_million: 1_000,
+        output_micros_per_million: 1_000,
+        ..Default::default()
+    };
+    let mut runner = Runner::new(vec![trigger], dir.join("sessions")).with_price(price);
+    let mut store = InMemoryRuns::default();
+
+    runner.tick(&mut host, &mut store, 100);
+    let receipt = &store.receipts()[0];
+    assert_eq!(receipt.cost_micros, 2_000);
+    assert_eq!(receipt.outcome, ReceiptOutcome::BudgetExceeded);
+    assert!(receipt.breach.as_deref().unwrap().contains("cost"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_completed_run_records_a_receipt() {
+    let dir = temp_dir("receipt-ok");
+    let usage = Usage {
+        input: 5,
+        output: 5,
+        ..Default::default()
+    };
+    let mut host = test_host_with_usage(&dir, Some(usage));
+    let trigger = Trigger::interval("t", Duration::from_secs(1), "go");
+    let mut runner = Runner::new(vec![trigger], dir.join("sessions"));
+    let mut store = InMemoryRuns::default();
+
+    runner.tick(&mut host, &mut store, 100);
+    let receipt = &store.receipts()[0];
+    assert_eq!(receipt.outcome, ReceiptOutcome::Completed);
+    assert_eq!(receipt.exit_code.as_deref(), Some("end_turn"));
+    assert_eq!(receipt.usage.total_tokens(), 10);
+    assert!(receipt.breach.is_none());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn per_agent_budget_refuses_and_receipts_the_next_run() {
+    let dir = temp_dir("agent-budget");
+    let usage = Usage {
+        input: 100,
+        output: 0,
+        ..Default::default()
+    };
+    let mut host = test_host_with_usage(&dir, Some(usage));
+    let mut trigger = Trigger::interval("t", Duration::from_secs(1), "go");
+    trigger.agent_budget.max_tokens = 10;
+    let mut runner = Runner::new(vec![trigger], dir.join("sessions"));
+    let mut store = InMemoryRuns::default();
+
+    // First run completes but spends past the agent budget.
+    assert_eq!(runner.tick(&mut host, &mut store, 100).len(), 1);
+    assert_eq!(store.receipts().len(), 1);
+    // The next firing is refused before it starts, with its own receipt.
+    assert_eq!(runner.tick(&mut host, &mut store, 200).len(), 0);
+    assert_eq!(store.receipts().len(), 2);
+    let refusal = &store.receipts()[1];
+    assert_eq!(refusal.outcome, ReceiptOutcome::BudgetExceeded);
+    assert!(refusal.breach.as_deref().unwrap().contains("agent token"));
+    assert!(refusal.session_id.is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_breached_run_restores_the_working_tree() {
+    let dir = temp_dir("rollback");
+    // A git repository whose tracked file we modify after the run starts.
+    let repo = dir.join("repo");
+    std::fs::create_dir_all(&repo).expect("repo");
+    assert!(git(&repo, &["init"]).is_some());
+    std::fs::write(repo.join("tracked.txt"), "original\n").expect("write");
+    assert!(git(&repo, &["add", "tracked.txt"]).is_some());
+    assert!(git(
+        &repo,
+        &[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-m",
+            "init",
+        ],
+    )
+    .is_some());
+
+    let usage = Usage {
+        input: 100,
+        output: 0,
+        ..Default::default()
+    };
+    let mut host = test_host_with_usage(&repo, Some(usage));
+    let mut trigger = Trigger::interval("t", Duration::from_secs(1), "go");
+    trigger.budget.max_tokens = 1;
+    let mut runner = Runner::new(vec![trigger], dir.join("sessions"))
+        .with_workspace(&repo)
+        .with_rollback(RollbackPolicy::Restore);
+    let mut store = InMemoryRuns::default();
+
+    // Simulate the run leaving a change behind: the runner snapshots before and
+    // disposes after, so mutate the file before the abort is applied is hard to
+    // interleave; instead assert a change made before the tick is rolled back.
+    std::fs::write(repo.join("tracked.txt"), "dirty\n").expect("write");
+    runner.tick(&mut host, &mut store, 100);
+    let receipt = &store.receipts()[0];
+    assert_eq!(receipt.outcome, ReceiptOutcome::BudgetExceeded);
+    assert_eq!(receipt.disposition, Disposition::RolledBack);
+    assert_eq!(
+        std::fs::read_to_string(repo.join("tracked.txt")).expect("read"),
+        "original\n"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn jsonl_receipts_survive_a_restart() {
+    let dir = temp_dir("jsonl-receipts");
+    let path = dir.join("runs.jsonl");
+    let receipt = Receipt {
+        trigger_id: "t".into(),
+        session_id: "s".into(),
+        model: Some("m".into()),
+        prompt: "go".into(),
+        usage: UsageTotals {
+            input: 1,
+            output: 2,
+            ..Default::default()
+        },
+        cost_micros: 3,
+        exit_code: Some("end_turn".into()),
+        outcome: ReceiptOutcome::Completed,
+        breach: None,
+        disposition: Disposition::None,
+        files_changed: vec!["a.txt".into()],
+        diff: "diff".into(),
+        started_at: 10,
+        finished_at: 11,
+    };
+    {
+        let mut store = JsonlRuns::open(&path).expect("open");
+        store.record_receipt(receipt.clone());
+    }
+    let reopened = JsonlRuns::open(&path).expect("reopen");
+    assert_eq!(reopened.load_receipts(), &[receipt]);
     let _ = std::fs::remove_dir_all(&dir);
 }
 

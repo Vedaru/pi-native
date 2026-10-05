@@ -258,6 +258,11 @@ fn triggers_fire_through_the_gateway() {
     let episodes = gateway.tick_triggers(1_000_000);
     assert_eq!(episodes.len(), 1);
     assert!(episodes[0].session_path.exists());
+    // The run left an inspectable receipt on the card.
+    let receipts = gateway.receipts();
+    assert_eq!(receipts.len(), 1);
+    assert_eq!(receipts[0].trigger_id, "t");
+    assert_eq!(receipts[0].outcome, pi_triggers::ReceiptOutcome::Completed);
     // Same minute/interval: not due again.
     assert!(gateway.tick_triggers(1_000_000).is_empty());
     let _ = std::fs::remove_dir_all(&dir);

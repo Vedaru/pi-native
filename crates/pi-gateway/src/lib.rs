@@ -8,6 +8,7 @@
 //! | --- | --- | --- |
 //! | `GET` | `/sessions` | List running session ids |
 //! | `GET` | `/swarm` | Status snapshot of every unit |
+//! | `GET` | `/runs` | Receipts recorded for finished trigger runs |
 //! | `POST` | `/sessions` | Open/create a session (`{"sessionPath"?: "…", "cwd"?: "…"}`) |
 //! | `GET` | `/sessions/:id` | Resolve state (subscribe → `get_state` → `state`) |
 //! | `DELETE` | `/sessions/:id` | Forget a unit (keeps the session file on disk) |
@@ -23,7 +24,7 @@
 
 use pi_host::{Host, HostError, RecvError, Subscription};
 use pi_rpc::{Event, PiEventAdapter};
-use pi_triggers::{Episode, RunStore, Runner};
+use pi_triggers::{Episode, Receipt, RunStore, Runner};
 use serde_json::{json, Value};
 use std::io::{Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
@@ -143,6 +144,16 @@ impl Gateway {
         let mut host = self.host.lock().unwrap_or_else(|error| error.into_inner());
         let TriggerRuntime { runner, store } = &mut *runtime;
         runner.tick(&mut host, store.as_mut(), now)
+    }
+
+    /// Receipts recorded for finished runs, newest last. Empty when no trigger
+    /// runner is attached.
+    pub fn receipts(&self) -> Vec<Receipt> {
+        let Some(triggers) = &self.triggers else {
+            return Vec::new();
+        };
+        let runtime = triggers.lock().unwrap_or_else(|error| error.into_inner());
+        runtime.store.receipts().to_vec()
     }
 
     /// Start a background thread that ticks triggers every `interval`.
@@ -438,6 +449,10 @@ fn handle_connection(mut stream: TcpStream, gateway: Arc<Gateway>) -> std::io::R
             let cwd = host.cwd().to_string();
             drop(host);
             write_json(&mut stream, 200, &json!({ "units": units, "cwd": cwd }));
+        }
+        ("GET", ["runs"]) => {
+            let receipts = gateway.receipts();
+            write_json(&mut stream, 200, &json!({ "receipts": receipts }));
         }
         ("POST", ["sessions"]) => create_session(&mut stream, &gateway, &request),
         ("GET", ["sessions", id]) => session_state(&mut stream, &gateway, id),

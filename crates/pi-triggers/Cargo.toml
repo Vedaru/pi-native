@@ -13,3 +13,6 @@ sha2 = "0.10"
 pi-host = { path = "../pi-host" }
 pi-agent = { path = "../pi-agent" }
 time = { version = "0.3", features = ["formatting", "macros"] }
+
+[dev-dependencies]
+pi-providers = { path = "../pi-providers" }

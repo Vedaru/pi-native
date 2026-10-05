@@ -138,6 +138,7 @@ pi-native --gateway --gateway-addr 127.0.0.1:30142 \
 | --- | --- | --- |
 | `GET` | `/sessions` | List session ids |
 | `GET` | `/swarm` | Status snapshot of every unit (for a multi-agent dashboard) |
+| `GET` | `/runs` | Run receipts (model, tokens, cost, outcome, files changed) |
 | `POST` | `/sessions` | Open/create a session (`{"sessionPath"?: …, "cwd"?: …}`) |
 | `GET` | `/sessions/:id` | Resolved state |
 | `GET` | `/sessions/:id/commands` | Extension slash commands |
@@ -158,22 +159,34 @@ Units run tools without asking, matching pi.
 sessions. Each trigger has a stable session, so context accumulates across
 runs; run records are appended to `.pi-native/trigger-runs.jsonl` (or
 `--trigger-runs <path>`) and are the dedupe/idempotency layer across restarts.
+Every finished run also leaves a **receipt** (model, tokens, cost, exit code,
+files changed, diff, outcome) in a sibling `.receipts.jsonl` file, served over
+`GET /runs`.
 
 ```json
 [
   {"id":"hourly-sweep","interval_secs":3600,"prompt":"check the queue","dedupe_window_secs":3600},
-  {"id":"standup","cron":"0 9 * * 1-5","prompt":"summarize yesterday","max_runs_per_window":1,"budget_window_secs":86400}
+  {"id":"standup","cron":"0 9 * * 1-5","prompt":"summarize yesterday","max_runs_per_window":1,"budget_window_secs":86400,
+   "model":"deepseek-flash",
+   "budget":{"max_tokens":200000,"max_cost_micros":50000,"max_seconds":600},
+   "agent_budget":{"max_cost_micros":5000000}}
 ]
 ```
 
 ```bash
 pi-native --gateway --triggers ./triggers.json --trigger-interval 1 \
+  --run-price 270000,1100000,27000,270000 \
   --provider openai-completions --base-url … --model … --api-key …
 ```
 
 Schedules are `interval_secs` or a 5-field `cron` (`min hour day month weekday`).
-Budgets are dedupe windows and `max_runs_per_window`; model-level budgets
-(iterations, tokens, wall-clock) come from the agent configuration.
+A `budget` bounds each run (tokens, spend in micro-units, wall-clock) and an
+`agent_budget` bounds the cumulative spend of one trigger. `--run-price`
+supplies `input,output,cache_read,cache_write` rates in micro-units per million
+tokens so token usage becomes spend. When a run crosses a budget it is aborted
+and its changes are parked in a `git stash` (or restored, on request); the
+receipt records the breach and disposition. `max_runs_per_window` and dedupe
+windows continue to bound *when* a trigger fires.
 
 ## Prompt-cache primitives (`pi-cache`)
 
