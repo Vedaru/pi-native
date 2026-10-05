@@ -8,6 +8,10 @@
 //! | --- | --- | --- |
 //! | `GET` | `/sessions` | List running session ids |
 //! | `GET` | `/swarm` | Status snapshot of every unit |
+//! | `GET` | `/units/:id/messages?after=<seq>` | Direct messages enqueued to a unit |
+//! | `POST` | `/units/:id/messages` | Send a direct unit message |
+//! | `POST` | `/units/:id/messages/:msgid/ack` | Acknowledge a direct message |
+//! | `POST` | `/units/:id/ownership` | Transfer a unit's ownership |
 //! | `GET` | `/runs` | Receipts recorded for finished trigger runs |
 //! | `POST` | `/sessions` | Open/create a session (`{"sessionPath"?: "…", "cwd"?: "…"}`) |
 //! | `GET` | `/sessions/:id` | Resolve state (subscribe → `get_state` → `state`) |
@@ -23,7 +27,7 @@
 //! unless `?format=pi` asks for pi's canonical stream through
 //! [`pi_rpc::PiEventAdapter`].
 
-use pi_host::{Host, HostError, RecvError, Subscription};
+use pi_host::{Host, HostError, MessageKind, RecvError, Subscription};
 use pi_rpc::{Event, PiEventAdapter};
 use pi_triggers::{Episode, Receipt, RunStore, Runner, TriggerSpec};
 use serde_json::{json, Value};
@@ -398,7 +402,10 @@ fn write_headers(stream: &mut TcpStream, status: u16, content_type: &str, length
         401 => "Unauthorized",
         403 => "Forbidden",
         404 => "Not Found",
+        409 => "Conflict",
         413 => "Payload Too Large",
+        422 => "Unprocessable Entity",
+        429 => "Too Many Requests",
         _ => "Error",
     };
     let head = format!(
@@ -418,6 +425,13 @@ fn status_for(error: &HostError) -> u16 {
     match error {
         HostError::UnknownSession(_) => 404,
         HostError::AtCapacity(_) => 429,
+        // A full mailbox is a *sender-visible* backpressure signal (VED-379),
+        // never a silent drop: the caller must retry after the recipient acks.
+        HostError::MailboxFull { .. } => 429,
+        // An oversized body is a bad request, not a server fault.
+        HostError::BodyTooLarge { .. } => 413,
+        // A transfer by a non-owner is a conflict with the recorded owner.
+        HostError::NotOwner { .. } => 409,
         _ => 500,
     }
 }
@@ -454,6 +468,14 @@ fn handle_connection(mut stream: TcpStream, gateway: Arc<Gateway>) -> std::io::R
         ("GET", ["cron"]) => list_cron(&mut stream, &gateway),
         ("POST", ["cron"]) => upsert_cron(&mut stream, &gateway, &request),
         ("DELETE", ["cron", id]) => remove_cron(&mut stream, &gateway, id),
+        ("GET", ["units", id, "messages"]) => poll_messages(&mut stream, &gateway, id, &request),
+        ("POST", ["units", id, "messages"]) => send_message(&mut stream, &gateway, id, &request),
+        ("POST", ["units", id, "messages", msgid, "ack"]) => {
+            ack_message(&mut stream, &gateway, id, msgid)
+        }
+        ("POST", ["units", id, "ownership"]) => {
+            transfer_ownership(&mut stream, &gateway, id, &request)
+        }
         ("GET", ["runs"]) => {
             let receipts = gateway.receipts();
             write_json(&mut stream, 200, &json!({ "receipts": receipts }));
@@ -511,6 +533,134 @@ fn create_session(stream: &mut TcpStream, gateway: &Gateway, request: &Request) 
             201,
             &json!({ "sessionId": id, "sessionPath": path.to_string_lossy() }),
         ),
+        Err(error) => write_json(
+            stream,
+            status_for(&error),
+            &json!({ "error": error.to_string() }),
+        ),
+    }
+}
+
+// Direct unit-to-unit messaging routes (VED-379).
+
+/// `GET /units/:id/messages?after=<seq>` — messages enqueued to `id`.
+fn poll_messages(stream: &mut TcpStream, gateway: &Gateway, id: &str, request: &Request) {
+    let after = query_u64(&request.query, "after").unwrap_or(0);
+    match gateway.host().poll_messages(id, after) {
+        Ok((messages, next_seq)) => write_json(
+            stream,
+            200,
+            &json!({ "messages": messages, "nextSeq": next_seq }),
+        ),
+        Err(error) => write_json(
+            stream,
+            status_for(&error),
+            &json!({ "error": error.to_string() }),
+        ),
+    }
+}
+
+/// `POST /units/:id/messages` — send a direct message to `id`.
+///
+/// Body: `{from, kind, body, issue?, corrId?}`. Returns `202 Accepted` with the
+/// accepted envelope, `429` when the mailbox is full, `413` for an oversized
+/// body, and `404` for an unknown recipient.
+fn send_message(stream: &mut TcpStream, gateway: &Gateway, id: &str, request: &Request) {
+    let body = request.json().unwrap_or(Value::Null);
+    let Some(from) = body.get("from").and_then(Value::as_str) else {
+        write_json(stream, 400, &json!({ "error": "from is required" }));
+        return;
+    };
+    let kind = match body.get("kind").and_then(Value::as_str) {
+        Some(kind) => match parse_kind(kind) {
+            Some(kind) => kind,
+            None => {
+                write_json(stream, 400, &json!({ "error": "unknown kind" }));
+                return;
+            }
+        },
+        None => MessageKind::Request,
+    };
+    let Some(text) = body.get("body").and_then(Value::as_str) else {
+        write_json(stream, 400, &json!({ "error": "body is required" }));
+        return;
+    };
+    let issue = body.get("issue").and_then(Value::as_str);
+    let corr_id = body.get("corrId").and_then(Value::as_str);
+    let now = time::OffsetDateTime::now_utc().unix_timestamp();
+    match gateway
+        .host()
+        .send_message(from, id, kind, issue, corr_id, text, now)
+    {
+        Ok(envelope) => write_json(stream, 202, &json!({ "message": envelope })),
+        Err(error) => write_json(
+            stream,
+            status_for(&error),
+            &json!({ "error": error.to_string() }),
+        ),
+    }
+}
+
+/// These routes live on the gateway so the mailbox is a host-level resource,
+/// not a model turn: sending a message must never enter the recipient's
+/// transcript (VED-379 AC10). `parse_kind` and `query_u64` are the small
+/// helpers the routes share.
+fn parse_kind(kind: &str) -> Option<MessageKind> {
+    match kind {
+        "request" => Some(MessageKind::Request),
+        "reply" => Some(MessageKind::Reply),
+        "handoff" => Some(MessageKind::Handoff),
+        "ownership" => Some(MessageKind::Ownership),
+        "ack" => Some(MessageKind::Ack),
+        _ => None,
+    }
+}
+
+fn query_u64(query: &str, key: &str) -> Option<u64> {
+    query.split('&').find_map(|pair| {
+        let (name, value) = pair.split_once('=')?;
+        if name == key {
+            value.parse().ok()
+        } else {
+            None
+        }
+    })
+}
+
+/// `POST /units/:id/messages/:msgid/ack` — acknowledge a message. Marks it
+/// `acked` (freeing mailbox depth) and delivers an `ack` envelope to the
+/// original sender so the sender can observe delivery.
+fn ack_message(stream: &mut TcpStream, gateway: &Gateway, id: &str, msgid: &str) {
+    let now = time::OffsetDateTime::now_utc().unix_timestamp();
+    match gateway.host().ack_message(id, msgid, now) {
+        Ok(ack) => write_json(stream, 200, &json!({ "ack": ack })),
+        Err(error) => write_json(
+            stream,
+            status_for(&error),
+            &json!({ "error": error.to_string() }),
+        ),
+    }
+}
+
+/// `POST /units/:id/ownership` — transfer ownership of `id`.
+///
+/// Body: `{to, by, issue?}`. Records `ownerBefore`/`ownerAfter` and mirrors the
+/// new owner into the session header. A transfer by a non-owner fails `409`;
+/// an unknown target fails `404`.
+fn transfer_ownership(stream: &mut TcpStream, gateway: &Gateway, id: &str, request: &Request) {
+    let body = request.json().unwrap_or(Value::Null);
+    let Some(to) = body.get("to").and_then(Value::as_str) else {
+        write_json(stream, 400, &json!({ "error": "to is required" }));
+        return;
+    };
+    let Some(by) = body.get("by").and_then(Value::as_str) else {
+        write_json(stream, 400, &json!({ "error": "by is required" }));
+        return;
+    };
+    let issue = body.get("issue").and_then(Value::as_str);
+    let now = time::OffsetDateTime::now_utc().unix_timestamp();
+    match gateway.host().transfer_ownership(id, to, by, issue, now) {
+        Ok(envelope) => write_json(stream, 200, &json!({ "message": envelope })),
         Err(error) => write_json(
             stream,
             status_for(&error),

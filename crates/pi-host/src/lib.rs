@@ -28,6 +28,15 @@ pub const REPLAY_LIMIT: usize = 1024;
 /// How many events a live subscriber may lag behind before it is dropped.
 pub const SUBSCRIBER_QUEUE: usize = 256;
 
+/// How many un-acked messages a recipient's mailbox may hold before a send
+/// fails with [`HostError::MailboxFull`]. Bounded so a sender cannot grow a
+/// recipient's memory without bound; acking a message frees depth.
+pub const MAILBOX_LIMIT: usize = 256;
+
+/// Largest message body accepted by [`Host::send_message`] (bytes). An
+/// oversized body is rejected rather than allocated.
+pub const MAX_MESSAGE_BODY: usize = 64 * 1024;
+
 #[derive(Debug)]
 pub enum HostError {
     UnknownSession(String),
@@ -35,6 +44,20 @@ pub enum HostError {
     Json(String),
     Stopped,
     AtCapacity(usize),
+    /// The recipient's mailbox is at [`MAILBOX_LIMIT`]; the message was NOT
+    /// accepted (never a silent drop). Ack or drain the recipient to free room.
+    MailboxFull {
+        to: String,
+        depth: usize,
+    },
+    /// The message body exceeds [`MAX_MESSAGE_BODY`].
+    BodyTooLarge {
+        max: usize,
+    },
+    /// The sender is not the current owner of the unit it is transferring.
+    NotOwner {
+        unit: String,
+    },
 }
 
 impl std::fmt::Display for HostError {
@@ -47,6 +70,15 @@ impl std::fmt::Display for HostError {
             HostError::AtCapacity(max) => {
                 write!(f, "unit limit reached ({max}); remove a unit first")
             }
+            HostError::MailboxFull { to, depth } => {
+                write!(f, "mailbox for {to} is full ({depth} un-acked messages)")
+            }
+            HostError::BodyTooLarge { max } => {
+                write!(f, "message body too large (max {max} bytes)")
+            }
+            HostError::NotOwner { unit } => {
+                write!(f, "not the current owner of {unit}")
+            }
         }
     }
 }
@@ -55,6 +87,87 @@ impl std::error::Error for HostError {}
 
 /// A published event paired with its monotonic sequence id.
 type Sequenced = (u64, Value);
+
+/// What a direct unit-to-unit message is for.
+///
+/// `Ack` is emitted by the mailbox itself when a recipient acknowledges a
+/// message, so the sender can observe delivery without scraping transcripts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MessageKind {
+    Request,
+    Reply,
+    Handoff,
+    Ownership,
+    Ack,
+}
+
+impl MessageKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            MessageKind::Request => "request",
+            MessageKind::Reply => "reply",
+            MessageKind::Handoff => "handoff",
+            MessageKind::Ownership => "ownership",
+            MessageKind::Ack => "ack",
+        }
+    }
+}
+
+/// The delivery state of an [`Envelope`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DeliveryState {
+    Sent,
+    Acked,
+    Failed,
+}
+
+/// One durable direct message between units (VED-379).
+///
+/// The envelope is the single shape shared by the in-memory mailbox, the
+/// `swarm_message` session entry, and the Linear escrow comment, so a message
+/// is the same object at every hop.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Envelope {
+    /// Globally unique id: `<sender>-<seq>`.
+    pub id: String,
+    /// Sender unit role (or session id).
+    pub from: String,
+    /// Recipient unit role (or session id).
+    pub to: String,
+    pub kind: MessageKind,
+    /// Work card this message concerns, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue: Option<String>,
+    /// Request id this message replies to / acknowledges.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub corr_id: Option<String>,
+    pub body: String,
+    /// Unix seconds at which the message was accepted.
+    pub created_at: i64,
+    pub state: DeliveryState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acked_at: Option<i64>,
+    /// Ownership messages only: the owner before/after the transfer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_before: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_after: Option<String>,
+    /// The host sequence id assigned when the message was enqueued. This is the
+    /// cursor a client uses with `after=` to resume without gaps or duplicates.
+    pub seq: u64,
+}
+
+/// A recipient's mailbox: FIFO un-acked messages plus the highest acked seq.
+#[derive(Default)]
+struct Mailbox {
+    messages: VecDeque<Envelope>,
+    /// Highest sequence id the recipient has acknowledged. Used only for the
+    /// resume cursor; un-acked entries stay in `messages` for redelivery.
+    acked: u64,
+}
 
 /// State shared between a unit's writer thread and its subscribers.
 #[derive(Default)]
@@ -70,6 +183,12 @@ struct Shared {
     last_event_at: Mutex<i64>,
     /// Session display name, cached against the session file's mtime.
     name_cache: Mutex<Option<(u64, Option<String>)>>,
+    /// The unit's direct-message mailbox (VED-379). The `Shared` is per-unit,
+    /// so this is per-recipient FIFO; `seq` below stamps each entry.
+    mailbox: Mutex<Mailbox>,
+    /// The unit that currently owns this session/card. `None` until a
+    /// transfer records one; the header `unit` mirrors it for durability.
+    owner: Mutex<Option<String>>,
     /// Unix-seconds of the last command or event, used by the idle reaper.
     last_activity: AtomicI64,
     /// Whether the agent is currently inside a run (`agent_start`/`turn_start`
@@ -177,6 +296,105 @@ impl Shared {
 
     fn in_flight(&self) -> bool {
         self.in_flight.load(Ordering::SeqCst)
+    }
+
+    /// The unit that currently owns this session/card, if recorded.
+    fn owner(&self) -> Option<String> {
+        self.owner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+    }
+
+    /// Enqueue `message` into this recipient's mailbox and fan it out to live
+    /// subscribers as an `swarm_message` event, so a recipient can either poll
+    /// or consume the existing SSE stream. Returns the mailbox depth after the
+    /// append, or `Err(depth)` when the mailbox is already at [`MAILBOX_LIMIT`].
+    fn enqueue_message(&self, message: Envelope) -> Result<usize, usize> {
+        let depth = {
+            let mut mailbox = self
+                .mailbox
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            // Only un-acked (`Sent`) messages occupy mailbox depth; acked ones
+            // stay for state inspection but do not count against the cap.
+            let unacked = mailbox
+                .messages
+                .iter()
+                .filter(|message| message.state == DeliveryState::Sent)
+                .count();
+            if unacked >= MAILBOX_LIMIT {
+                return Err(unacked);
+            }
+            mailbox.messages.push_back(message.clone());
+            unacked + 1
+        };
+        // Fan out under the same seq as channel events: a polling client and an
+        // SSE client observe the same order.
+        let event = serde_json::json!({
+            "type": "swarm_message",
+            "seq": message.seq,
+            "message": message,
+        });
+        self.publish(event);
+        Ok(depth)
+    }
+
+    /// Messages with `seq > after`, oldest first, and the cursor to resume from
+    /// (the highest seq currently enqueued, or `after` when there are none).
+    fn poll_messages(&self, after: u64) -> (Vec<Envelope>, u64) {
+        let mailbox = self
+            .mailbox
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let messages: Vec<Envelope> = mailbox
+            .messages
+            .iter()
+            .filter(|message| message.seq > after)
+            .cloned()
+            .collect();
+        let next = messages
+            .last()
+            .map(|message| message.seq)
+            .unwrap_or_else(|| mailbox.acked.max(after));
+        (messages, next)
+    }
+
+    /// Mark the message `id` acked in this mailbox and return the original
+    /// envelope (now `Acked`) plus the `Ack` draft addressed to the sender.
+    ///
+    /// The caller enqueues the draft into the sender's mailbox; `Shared` is
+    /// per-unit and cannot reach another unit's mailbox itself.
+    fn ack_message(&self, id: &str, now: i64) -> Option<(Envelope, Envelope)> {
+        let mut mailbox = self
+            .mailbox
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let position = mailbox
+            .messages
+            .iter()
+            .position(|message| message.id == id)?;
+        let mut original = mailbox.messages[position].clone();
+        original.state = DeliveryState::Acked;
+        original.acked_at = Some(now);
+        mailbox.acked = mailbox.acked.max(original.seq);
+        mailbox.messages[position] = original.clone();
+        let ack = Envelope {
+            id: format!("{}-ack-{}", original.to, original.seq),
+            from: original.to.clone(),
+            to: original.from.clone(),
+            kind: MessageKind::Ack,
+            issue: original.issue.clone(),
+            corr_id: Some(original.id.clone()),
+            body: String::new(),
+            created_at: now,
+            state: DeliveryState::Sent,
+            acked_at: None,
+            owner_before: None,
+            owner_after: None,
+            seq: 0,
+        };
+        Some((original, ack))
     }
 
     fn subscriber_count(&self) -> usize {
@@ -534,6 +752,9 @@ pub struct UnitInfo {
     pub session_id: String,
     /// The swarm unit that owns this session, if any.
     pub unit: Option<String>,
+    /// The unit that currently owns this card/session after an ownership
+    /// transfer (VED-379). `None` until a transfer records one.
+    pub owner: Option<String>,
     pub name: Option<String>,
     pub cwd: String,
     pub session_path: String,
@@ -755,6 +976,7 @@ impl Host {
             .map(|(session_id, unit)| UnitInfo {
                 session_id: session_id.clone(),
                 unit: unit.unit.clone(),
+                owner: unit.shared.owner(),
                 name: unit.shared.session_name(&unit.session_path),
                 cwd: unit.cwd.clone(),
                 session_path: unit.session_path.to_string_lossy().into_owned(),
@@ -774,6 +996,187 @@ impl Host {
     pub fn cwd(&self) -> &str {
         &self.cwd
     }
+
+    // --- Direct unit-to-unit messaging (VED-379) --------------------------
+
+    /// Send a direct message from `from` to the unit/session `to`.
+    ///
+    /// The message is assigned the next sequence id and appended to the
+    /// recipient's mailbox; it is also fanned out to the recipient's live SSE
+    /// subscribers as an `swarm_message` event. Returns the accepted envelope
+    /// (with its id and seq). Fails with [`HostError::MailboxFull`] when the
+    /// recipient is at [`MAILBOX_LIMIT`] — never a silent drop — and with
+    /// [`HostError::UnknownSession`] for an unknown recipient.
+    ///
+    /// `now` is unix seconds; callers inject it so tests are deterministic.
+    #[allow(clippy::too_many_arguments)] // A message is its fields; grouping them adds churn at every call site.
+    pub fn send_message(
+        &self,
+        from: &str,
+        to: &str,
+        kind: MessageKind,
+        issue: Option<&str>,
+        corr_id: Option<&str>,
+        body: &str,
+        now: i64,
+    ) -> Result<Envelope, HostError> {
+        if body.len() > MAX_MESSAGE_BODY {
+            return Err(HostError::BodyTooLarge {
+                max: MAX_MESSAGE_BODY,
+            });
+        }
+        let recipient = self
+            .units
+            .get(to)
+            .ok_or_else(|| HostError::UnknownSession(to.to_string()))?;
+        let seq = recipient.shared.seq.fetch_add(1, Ordering::SeqCst) + 1;
+        let envelope = Envelope {
+            id: format!("{from}-{seq}"),
+            from: from.to_string(),
+            to: to.to_string(),
+            kind,
+            issue: issue.map(str::to_string),
+            corr_id: corr_id.map(str::to_string),
+            body: body.to_string(),
+            created_at: now,
+            state: DeliveryState::Sent,
+            acked_at: None,
+            owner_before: None,
+            owner_after: None,
+            seq,
+        };
+        match recipient.shared.enqueue_message(envelope.clone()) {
+            Ok(_) => Ok(envelope),
+            Err(depth) => Err(HostError::MailboxFull {
+                to: to.to_string(),
+                depth,
+            }),
+        }
+    }
+
+    /// Messages enqueued to `unit` after `after`, oldest first, plus the cursor
+    /// (`nextSeq`) a client persists to resume after a reconnect. Mirrors
+    /// `Last-Event-ID`: strictly newer messages, no gaps and no duplicates.
+    pub fn poll_messages(&self, unit: &str, after: u64) -> Result<(Vec<Envelope>, u64), HostError> {
+        let mailbox = self
+            .units
+            .get(unit)
+            .ok_or_else(|| HostError::UnknownSession(unit.to_string()))?;
+        Ok(mailbox.shared.poll_messages(after))
+    }
+
+    /// Acknowledge message `id` in `unit`'s mailbox. Marks it `acked`, frees a
+    /// mailbox slot, and delivers an `ack` envelope to the original sender so
+    /// the sender can observe delivery. Returns the ack envelope.
+    pub fn ack_message(&self, unit: &str, id: &str, now: i64) -> Result<Envelope, HostError> {
+        let mailbox = self
+            .units
+            .get(unit)
+            .ok_or_else(|| HostError::UnknownSession(unit.to_string()))?;
+        let (original, mut ack) = mailbox
+            .shared
+            .ack_message(id, now)
+            .ok_or_else(|| HostError::UnknownSession(format!("{unit}:{id}")))?;
+        // Deliver the ack to the original sender's mailbox, if it is a live
+        // unit. A sender that has gone away does not fail the ack.
+        if let Some(sender) = self.units.get(&original.from) {
+            let seq = sender.shared.seq.fetch_add(1, Ordering::SeqCst) + 1;
+            ack.seq = seq;
+            let _ = sender.shared.enqueue_message(ack.clone());
+        }
+        Ok(ack)
+    }
+
+    /// The current owner of `unit`, if any has been recorded.
+    pub fn owner(&self, unit: &str) -> Result<Option<String>, HostError> {
+        self.units
+            .get(unit)
+            .map(|unit| unit.shared.owner())
+            .ok_or_else(|| HostError::UnknownSession(unit.to_string()))
+    }
+
+    /// Transfer ownership of `unit` from `by` to `to`, recording
+    /// `ownerBefore`/`ownerAfter` on an `ownership` envelope.
+    ///
+    /// Only the current owner may transfer: when an owner is already recorded
+    /// and it is not `by`, the transfer is rejected with
+    /// [`HostError::NotOwner`] (one writer per unit, ADR 0003). The host also
+    /// mirrors the new owner into the session header `unit` field so the record
+    /// survives a restart, and delivers the envelope to `to`'s mailbox when
+    /// that unit is open.
+    pub fn transfer_ownership(
+        &mut self,
+        unit: &str,
+        to: &str,
+        by: &str,
+        issue: Option<&str>,
+        now: i64,
+    ) -> Result<Envelope, HostError> {
+        if !self.units.contains_key(to) {
+            return Err(HostError::UnknownSession(to.to_string()));
+        }
+        let before = {
+            let owner_unit = self
+                .units
+                .get(unit)
+                .ok_or_else(|| HostError::UnknownSession(unit.to_string()))?;
+            let before = owner_unit.shared.owner();
+            if let Some(current) = &before {
+                if current != by {
+                    return Err(HostError::NotOwner {
+                        unit: unit.to_string(),
+                    });
+                }
+            }
+            before
+        };
+        let envelope = self.send_message(
+            by,
+            to,
+            MessageKind::Ownership,
+            issue,
+            None,
+            &format!(
+                "ownership {unit}: {} -> {to}",
+                before.as_deref().unwrap_or("none")
+            ),
+            now,
+        )?;
+        // Record the new owner and mirror it into the session header `unit`
+        // (the durable copy). The owner unit is the single writer for its own
+        // header; `Host::set_unit` appends/persists it.
+        let mut envelope = envelope;
+        envelope.owner_before = before.clone();
+        envelope.owner_after = Some(to.to_string());
+        if let Some(owner_unit) = self.units.get(unit) {
+            if let Ok(mut owner) = owner_unit.shared.owner.lock() {
+                *owner = Some(to.to_string());
+            }
+        }
+        let session_path = self.units.get(unit).map(|u| u.session_path.clone());
+        if let Some(path) = session_path {
+            let _ = set_session_unit(&path, to);
+        }
+        Ok(envelope)
+    }
+}
+
+/// Mirror the owning unit into a session file's header `unit` field.
+///
+/// Ownership transfer is recorded on the envelope; this keeps the durable
+/// header copy (which `Host::open` reads back on restart) in step. The write
+/// uses [`pi_session::SessionFile::write`]'s atomic replace, so a reader never
+/// sees a truncated file.
+fn set_session_unit(path: &std::path::Path, unit: &str) -> Result<(), HostError> {
+    let mut session =
+        pi_session::SessionFile::read(path).map_err(|error| HostError::Io(error.to_string()))?;
+    session
+        .header
+        .extra
+        .insert("unit".to_string(), Value::String(unit.to_string()));
+    session
+        .write(path)
+        .map_err(|error| HostError::Io(error.to_string()))
 }
 
 #[cfg(test)]

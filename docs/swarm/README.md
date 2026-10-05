@@ -66,6 +66,44 @@ resolution instead of passing as disjoint. `--force` overrides a block but the
 override is recorded on both cards — it is never silent. The pure rules live in
 `scripts/swarm_collision.py` (`scripts/test_swarm_collision.py`).
 
+## Direct unit-to-unit messaging (mailbox + escrow)
+
+Linear comments are the durable work board, but they are high-latency and not
+machine-addressed. Units coordinate over an in-memory **mailbox** in
+`crates/pi-host`, surfaced by additive gateway routes:
+
+| Method | Path | Meaning |
+| --- | --- | --- |
+| `GET` | `/units/:id/messages?after=<seq>` | Messages enqueued to a unit, plus `nextSeq` |
+| `POST` | `/units/:id/messages` | Send a direct message |
+| `POST` | `/units/:id/messages/:msgid/ack` | Acknowledge a message |
+| `POST` | `/units/:id/ownership` | Transfer ownership of a unit |
+
+A message is an envelope (`id`, `from`, `to`, `kind`, `issue`, `corrId`, `body`,
+`state`, `ownerBefore/After`, `seq`) shared verbatim by the mailbox, the
+`swarm_message` session entry, and the Linear escrow comment. `kind` is one of
+`request|reply|handoff|ownership|ack`.
+
+- **Send + ack.** `POST /units/:id/messages` returns `202` with the accepted
+  envelope; the recipient polls (`after=0`) or consumes the existing SSE stream.
+  `POST .../ack` marks the original `acked` and delivers an `ack` envelope to
+  the sender, which observes delivery by `corrId` — no reply scraping.
+- **FIFO + resume.** Messages carry the host's monotonic `seq`, so
+  `after=<seq>` is exact (strictly newer, no gaps or duplicates) and `nextSeq`
+  is the cursor to persist across a reconnect.
+- **Backpressure.** The mailbox is bounded; a full mailbox returns `429` to the
+  **sender** (`HostError::MailboxFull`) — never a silent drop. Acking frees a
+  slot. An oversized body is `413`.
+- **Ownership.** `transfer_ownership` records `ownerBefore`/`ownerAfter`, sets
+  the owner, and mirrors it into the session header `unit`. Only the current
+  owner may transfer (`409` otherwise).
+- **Non-pollution.** `swarm_message`/`swarm_ownership` entries are durable but
+  are excluded from `build_context`, so transport never reaches the model.
+- **Escrow.** `handoff`/`ownership`/terminal-`ack` messages are mirrored by
+  `scripts/swarm_mail.py` as signed Linear comments (a fenced `swarm-envelope`
+  block); a Linear failure is surfaced, never swallowed. See
+  `docs/adr/0004-swarm-mailbox.md`.
+
 ## Patterns
 
 `python3 scripts/swarm_run.py --pattern concurrent|sequential|moa --task "..."` runs

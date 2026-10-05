@@ -28,6 +28,7 @@ jobs:
           python3 scripts/test_swarm_watchdog.py
           python3 scripts/test_swarm_columns.py
           python3 scripts/test_swarm_dag.py
+          python3 scripts/test_swarm_mail.py
 
   swarm-tests:
     runs-on: ubuntu-latest
@@ -42,6 +43,7 @@ jobs:
           python3 scripts/test_swarm_dag.py
           python3 scripts/test_swarm_collision.py
           python3 scripts/test_mem_gate.py
+          python3 scripts/test_swarm_mail.py
 
   package:
     runs-on: ubuntu-latest
