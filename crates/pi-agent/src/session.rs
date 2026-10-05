@@ -332,6 +332,11 @@ impl SessionJournal {
         &self.session.header.id
     }
 
+    /// The working directory recorded in the file header.
+    pub fn cwd(&self) -> &str {
+        &self.session.header.cwd
+    }
+
     /// Open an existing session (returning its transcript to seed) or create a
     /// new file with just the header.
     pub fn open(

@@ -7,7 +7,7 @@
 //! | Method | Path | Meaning |
 //! | --- | --- | --- |
 //! | `GET` | `/sessions` | List running session ids |
-//! | `POST` | `/sessions` | Open/create a session (`{"sessionPath"?: "…"}`) |
+//! | `POST` | `/sessions` | Open/create a session (`{"sessionPath"?: "…", "cwd"?: "…"}`) |
 //! | `GET` | `/sessions/:id` | Resolve state (subscribe → `get_state` → `state`) |
 //! | `GET` | `/sessions/:id/events` | SSE: replay + live (`?format=pi` for pi's shapes) |
 //! | `POST` | `/sessions/:id/commands` | Send a command (202 Accepted) |
@@ -250,7 +250,11 @@ fn create_session(stream: &mut TcpStream, gateway: &Gateway, request: &Request) 
     let path = match body.get("sessionPath").and_then(Value::as_str) {
         Some(path) => PathBuf::from(path),
         None => {
-            let cwd = gateway.host().cwd().to_string();
+            let cwd = body
+                .get("cwd")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .unwrap_or_else(|| gateway.host().cwd().to_string());
             match pi_agent::new_session_path(std::path::Path::new(&cwd)) {
                 Ok(path) => path,
                 Err(error) => {

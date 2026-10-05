@@ -19,12 +19,12 @@ fn start_gateway(dir: &Path, text: &str) -> GatewayServer {
         ..Default::default()
     }];
     let cwd = dir.to_path_buf();
-    let host = Host::new(cwd.to_string_lossy().to_string(), move || {
+    let host = Host::new(cwd.to_string_lossy().to_string(), move |unit_cwd: &str| {
         Agent::new(
             Box::new(FauxProvider::new(turns.clone())),
             Vec::new(),
             "system",
-            ToolContext::new(cwd.clone()),
+            ToolContext::new(unit_cwd),
         )
     });
     bind(host).expect("bind")
@@ -191,12 +191,12 @@ fn triggers_fire_through_the_gateway() {
         ..Default::default()
     }];
     let cwd = dir.clone();
-    let host = Host::new(cwd.to_string_lossy().to_string(), move || {
+    let host = Host::new(cwd.to_string_lossy().to_string(), move |unit_cwd: &str| {
         Agent::new(
             Box::new(FauxProvider::new(turns.clone())),
             Vec::new(),
             "system",
-            ToolContext::new(cwd.clone()),
+            ToolContext::new(unit_cwd),
         )
     });
     let runner = pi_triggers::Runner::new(

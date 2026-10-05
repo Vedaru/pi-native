@@ -16,12 +16,12 @@ fn test_host(dir: &Path) -> Host {
         ..Default::default()
     }];
     let cwd = dir.to_path_buf();
-    Host::new(cwd.to_string_lossy().to_string(), move || {
+    Host::new(cwd.to_string_lossy().to_string(), move |unit_cwd: &str| {
         Agent::new(
             Box::new(FauxProvider::new(turns.clone())),
             Vec::new(),
             "system",
-            ToolContext::new(cwd.clone()),
+            ToolContext::new(unit_cwd),
         )
     })
 }

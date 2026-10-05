@@ -183,7 +183,7 @@ impl Subscription {
     }
 }
 
-type Factory = Arc<dyn Fn() -> Agent + Send + Sync>;
+type Factory = Arc<dyn Fn(&str) -> Agent + Send + Sync>;
 
 /// One addressable agent.
 struct Unit {
@@ -203,7 +203,7 @@ impl Unit {
         let unit_cwd = cwd.clone();
         let agent_factory = factory.clone();
         let thread = std::thread::spawn(move || {
-            let mut agent = agent_factory();
+            let mut agent = agent_factory(&unit_cwd);
             let reader = BufReader::new(ChannelReader::new(rx));
             let _ = pi_rpc::serve_unit_session(
                 &mut agent,
@@ -248,7 +248,7 @@ impl Unit {
         let cwd = self.cwd.clone();
         let factory = self.factory.clone();
         self.thread = Some(std::thread::spawn(move || {
-            let mut agent = factory();
+            let mut agent = factory(&cwd);
             let reader = BufReader::new(ChannelReader::new(rx));
             let _ =
                 pi_rpc::serve_unit_session(&mut agent, Some(path), &cwd, reader, writer, |_| {});
@@ -285,7 +285,7 @@ pub struct Host {
 impl Host {
     pub fn new(
         cwd: impl Into<String>,
-        factory: impl Fn() -> Agent + Send + Sync + 'static,
+        factory: impl Fn(&str) -> Agent + Send + Sync + 'static,
     ) -> Self {
         Self {
             cwd: cwd.into(),
@@ -296,15 +296,23 @@ impl Host {
 
     /// Open (creating if necessary) the session at `session_path` and start its
     /// unit if it is not already running. Returns the session id.
+    ///
+    /// The unit runs in the working directory recorded in the session header, so
+    /// one host can serve sessions from different projects.
     pub fn open(&mut self, session_path: PathBuf) -> Result<String, HostError> {
         let (journal, _) = pi_agent::SessionJournal::open(session_path.clone(), &self.cwd)
             .map_err(|error| HostError::Io(error.to_string()))?;
         let id = journal.session_id().to_string();
+        let cwd = if journal.cwd().is_empty() {
+            self.cwd.clone()
+        } else {
+            journal.cwd().to_string()
+        };
         drop(journal);
         if !self.units.contains_key(&id) {
             let unit = Unit::spawn(
                 session_path,
-                self.cwd.clone(),
+                cwd,
                 self.factory.clone(),
                 Arc::new(Shared::default()),
             );

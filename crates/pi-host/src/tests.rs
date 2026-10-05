@@ -17,12 +17,12 @@ fn one_turn_host(cwd: &std::path::Path, text: &str) -> Host {
         ..Default::default()
     }];
     let cwd = cwd.to_path_buf();
-    Host::new(cwd.to_string_lossy().to_string(), move || {
+    Host::new(cwd.to_string_lossy().to_string(), move |unit_cwd: &str| {
         Agent::new(
             Box::new(FauxProvider::new(turns.clone())),
             Vec::new(),
             "system",
-            ToolContext::new(cwd.clone()),
+            ToolContext::new(unit_cwd),
         )
     })
 }
@@ -143,4 +143,38 @@ fn unknown_session_is_an_error() {
         Err(HostError::UnknownSession(id)) => assert_eq!(id, "nope"),
         other => panic!("expected unknown session, got {other:?}"),
     }
+}
+
+#[test]
+fn units_run_in_their_session_cwd() {
+    let dir = temp_dir("per-cwd");
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let recorder = seen.clone();
+    let mut host = Host::new(dir.to_string_lossy().to_string(), move |unit_cwd: &str| {
+        recorder.lock().unwrap().push(unit_cwd.to_string());
+        Agent::new(
+            Box::new(FauxProvider::new(Vec::new())),
+            Vec::new(),
+            "system",
+            ToolContext::new(unit_cwd),
+        )
+    });
+
+    let agent_dir = dir.join("agent");
+    std::fs::create_dir_all(&agent_dir).expect("agent dir");
+    let a = pi_agent::new_session_path_in(&agent_dir, std::path::Path::new("/tmp/project-a"))
+        .expect("session a");
+    let b = pi_agent::new_session_path_in(&agent_dir, std::path::Path::new("/tmp/project-b"))
+        .expect("session b");
+    host.open(a).expect("open a");
+    host.open(b).expect("open b");
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while seen.lock().unwrap().len() < 2 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let cwds = seen.lock().unwrap().clone();
+    assert!(cwds.contains(&"/tmp/project-a".to_string()), "{cwds:?}");
+    assert!(cwds.contains(&"/tmp/project-b".to_string()), "{cwds:?}");
+    let _ = std::fs::remove_dir_all(&dir);
 }

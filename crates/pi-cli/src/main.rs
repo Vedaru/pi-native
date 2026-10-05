@@ -312,6 +312,7 @@ fn run_print(
         &system,
         extensions,
         extension_allow,
+        &cwd,
     );
     let session = resolve_session(session, no_session, &cwd);
     let mut journal = open_session(&mut agent, session.as_deref(), &cwd);
@@ -690,6 +691,7 @@ fn make_provider(config: &ProviderConfig) -> Box<dyn ModelProvider> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn resolve_agent(
     config: &ProviderConfig,
     yolo: bool,
@@ -698,6 +700,7 @@ fn resolve_agent(
     system: &str,
     extensions: &[PathBuf],
     extension_allow: &[String],
+    cwd: &std::path::Path,
 ) -> Agent {
     let approver: Rc<dyn Approver> = if yolo {
         Rc::new(AllowAll)
@@ -706,9 +709,8 @@ fn resolve_agent(
     } else {
         Rc::new(DenyAll)
     };
-    let cwd = std::env::current_dir().unwrap_or_default();
     let mut tools = default_tools();
-    tools.extend(load_extension_tools(extensions, extension_allow, &cwd));
+    tools.extend(load_extension_tools(extensions, extension_allow, cwd));
     // Tools are jailed to the working directory unless the caller explicitly
     // opted into unrestricted execution with `--yolo`.
     let tool_context = ToolContext::new(cwd).allow_outside(yolo);
@@ -785,6 +787,7 @@ fn run_serve(
         &system,
         extensions,
         extension_allow,
+        &cwd,
     );
     let path = resolve_session(session, no_session, &cwd);
     let cwd_string = cwd.to_string_lossy().into_owned();
@@ -816,10 +819,11 @@ fn run_gateway(
     trigger_interval: u64,
 ) {
     let cwd = std::env::current_dir().unwrap_or_default();
-    let system = system_prompt_for(&cwd);
     let extensions = extensions.to_vec();
     let extension_allow = extension_allow.to_vec();
-    let factory = move || {
+    let factory = move |unit_cwd: &str| {
+        let path = std::path::Path::new(unit_cwd);
+        let system = system_prompt_for(path);
         resolve_agent(
             &config,
             false,
@@ -828,6 +832,7 @@ fn run_gateway(
             &system,
             &extensions,
             &extension_allow,
+            path,
         )
     };
     let host = pi_host::Host::new(cwd.to_string_lossy().to_string(), factory);
