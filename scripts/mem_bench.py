@@ -6,7 +6,7 @@ state. Used to compare:
 
   - pi-node    : the current Node/V8 implementation
   - pi-rust    : the reference native port (Dicklesworthstone/pi_agent_rust)
-  - pi-native   : our build, once it exists
+  - pipelets   : our build, once it exists
 
 The zero point is a fixed idle taxonomy so runs are comparable. Only
 `cold-idle` is implemented today; the remaining taxonomies are declared so the
@@ -108,7 +108,7 @@ def resolve_targets() -> dict[str, dict]:
     """Build the target table, honoring env overrides for binary locations."""
     node_pi = shutil.which("pi")
     rust_pi = os.environ.get("PI_RUST_BIN", str(Path(tempfile.gettempdir()) / "pi-rust" / "pi"))
-    native_pi = os.environ.get("PI_NATIVE_BIN")
+    native_pi = os.environ.get("PIPELETS_BIN")
 
     targets: dict[str, dict] = {}
 
@@ -122,7 +122,7 @@ def resolve_targets() -> dict[str, dict]:
     if rust_pi and Path(rust_pi).exists():
         # `pi-rust` is the THIRD-PARTY reference port
         # (Dicklesworthstone/pi_agent_rust), not this project. Our build is the
-        # `pi-native` target below (PI_NATIVE_BIN).
+        # `pipelets` target below (PIPELETS_BIN).
         targets["pi-rust"] = {
             "kind": "native",
             "argv": [
@@ -140,7 +140,7 @@ def resolve_targets() -> dict[str, dict]:
         }
 
     if native_pi and Path(native_pi).exists():
-        targets["pi-native"] = {
+        targets["pipelets"] = {
             "kind": "native",
             "argv": [native_pi, "--rpc", "--no-session"],
             "env": {},

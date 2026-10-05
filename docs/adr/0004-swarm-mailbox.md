@@ -3,7 +3,7 @@
 - Status: Proposed
 - Date: 2026-10-05
 - Issues: VED-379 (this)
-- Deciders: pi-native maintainers
+- Deciders: pipelets maintainers
 
 ## Context
 

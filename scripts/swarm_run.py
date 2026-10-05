@@ -2,7 +2,7 @@
 """Run an orchestration pattern across the swarm — the conductor's method.
 
 This is the executable form of the topology runner: the conductor (or a human)
-calls it instead of filling in a form. It drives the pi-native gateway directly,
+calls it instead of filling in a form. It drives the pipelets gateway directly,
 so it has no dependency on the web app.
 
 Patterns:

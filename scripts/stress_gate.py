@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Pressure gate for the native harness (VED-328).
 
-Runs `pi-native --stress N` (a deterministic in-process workload) and fails if
+Runs `pipelets --stress N` (a deterministic in-process workload) and fails if
 peak RSS exceeds a ceiling or the run does not finish in time. Unlike the idle
 benchmark, this measures the harness under load.
 
@@ -25,7 +25,7 @@ from pathlib import Path
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--binary", default="target/release/pi-native")
+    parser.add_argument("--binary", default="target/release/pipelets")
     parser.add_argument("--turns", type=int, default=50000)
     parser.add_argument("--tools", nargs="+", default=["ls"])
     parser.add_argument("--session", action="store_true", help="run the agent session loop (compaction) instead of direct tool calls")

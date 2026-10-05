@@ -643,7 +643,7 @@ fn last_assistant_text(agent: &Agent) -> Option<String> {
 }
 
 fn export_html(agent: &Agent, path: &std::path::Path) -> std::io::Result<()> {
-    let mut body = String::from("<h1>pi-native session</h1>");
+    let mut body = String::from("<h1>pipelets session</h1>");
     for message in transcript_values(agent.messages()) {
         let text = serde_json::to_string_pretty(&message).unwrap_or_default();
         body.push_str(&format!("<pre>{}</pre>", escape_html(&text)));

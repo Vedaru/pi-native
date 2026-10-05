@@ -6,7 +6,7 @@ members = ["crates/*"]
 version = "0.0.1"
 edition = "2021"
 license = "MIT"
-repository = "https://github.com/Vedaru/pi-native"
+repository = "https://github.com/Vedaru/pipelets"
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }

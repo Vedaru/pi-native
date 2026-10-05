@@ -1,4 +1,5 @@
-//! `pi-native` CLI.
+//! `pipelets` — a low-memory, low-CPU bare-core agent runtime for swarms,
+//! wire-compatible with pi.
 //!
 //! Early scaffold. Today it exposes the prompt-cache policy decisions so the
 //! provider-parity gate can be exercised from the command line; the agent host
@@ -26,18 +27,18 @@ use std::sync::Arc;
 const LONG_VERSION: &str = concat!(
     env!("CARGO_PKG_VERSION"),
     " (",
-    env!("PI_NATIVE_GIT_SHA"),
+    env!("PIPELETS_GIT_SHA"),
     ", ",
-    env!("PI_NATIVE_TARGET"),
+    env!("PIPELETS_TARGET"),
     ")"
 );
 
 #[derive(Parser)]
 #[command(
-    name = "pi-native",
+    name = "pipelets",
     version,
     long_version = LONG_VERSION,
-    about = "Native Rust runtime for pi"
+    about = "Low-memory bare-core agent runtime for swarms (pi-compatible)"
 )]
 struct Cli {
     /// Start in RPC mode and idle on stdin (used by the memory benchmark).
@@ -55,7 +56,7 @@ struct Cli {
     /// Bind address for `--gateway`.
     #[arg(long, default_value = "127.0.0.1:30142")]
     gateway_addr: String,
-    /// Bearer token required on every gateway request (or PI_NATIVE_GATEWAY_TOKEN).
+    /// Bearer token required on every gateway request (or PIPELETS_GATEWAY_TOKEN).
     /// Required when `--gateway-addr` is not a loopback address.
     #[arg(long)]
     gateway_token: Option<String>,
@@ -271,7 +272,7 @@ fn main() {
     match cli.command {
         Some(command) => run_command(command),
         None => {
-            eprintln!("pi-native: no command given (try --help, or --rpc to idle)");
+            eprintln!("pipelets: no command given (try --help, or --rpc to idle)");
             std::process::exit(2);
         }
     }
@@ -376,7 +377,7 @@ fn run_print(
             }
         }
         Err(error) => {
-            eprintln!("pi-native: {error}");
+            eprintln!("pipelets: {error}");
             std::process::exit(1);
         }
     }
@@ -426,7 +427,7 @@ fn run_stress_tool(turns: usize, tool: &str) {
     let ctx = ToolContext::new(&dir);
     let tools = all_tools();
     let Some(selected) = tools.iter().find(|candidate| candidate.name() == tool) else {
-        eprintln!("pi-native --stress: unknown tool `{tool}`");
+        eprintln!("pipelets --stress: unknown tool `{tool}`");
         std::process::exit(2);
     };
 
@@ -531,7 +532,7 @@ fn run_stress_session(turns: usize, tool: &str, byte_limit_mb: usize, context_to
             }
         }
         Err(error) => {
-            eprintln!("pi-native --stress: {error}");
+            eprintln!("pipelets --stress: {error}");
             std::process::exit(1);
         }
     }
@@ -624,7 +625,7 @@ struct ProviderConfig {
 }
 
 fn missing(what: &str) -> ! {
-    eprintln!("pi-native: set {what}");
+    eprintln!("pipelets: set {what}");
     std::process::exit(2);
 }
 
@@ -670,7 +671,7 @@ impl Cli {
             Some("deepseek") => ThinkingFormat::Deepseek,
             Some("none") | None => ThinkingFormat::None,
             Some(other) => {
-                eprintln!("pi-native: unknown thinking format `{other}` (none, deepseek)");
+                eprintln!("pipelets: unknown thinking format `{other}` (none, deepseek)");
                 std::process::exit(2);
             }
         };
@@ -704,7 +705,7 @@ fn make_provider(config: &ProviderConfig) -> Box<dyn ModelProvider> {
         )),
         other => {
             eprintln!(
-                "pi-native: unknown provider `{other}` (openai-completions, openai-responses)"
+                "pipelets: unknown provider `{other}` (openai-completions, openai-responses)"
             );
             std::process::exit(2);
         }
@@ -760,7 +761,7 @@ fn resolve_session(
     match pi_agent::new_session_path(cwd) {
         Ok(path) => Some(path),
         Err(error) => {
-            eprintln!("pi-native: cannot create a session file: {error}");
+            eprintln!("pipelets: cannot create a session file: {error}");
             None
         }
     }
@@ -780,7 +781,7 @@ fn open_session(
             Some(journal)
         }
         Err(error) => {
-            eprintln!("pi-native: cannot open session {}: {error}", path.display());
+            eprintln!("pipelets: cannot open session {}: {error}", path.display());
             std::process::exit(2);
         }
     }
@@ -839,13 +840,13 @@ fn run_gateway(
     let bind_addr = match pi_gateway::check_bind_security(addr, token.is_some()) {
         Ok(bind_addr) => bind_addr,
         Err(error) => {
-            eprintln!("pi-native: {error}");
+            eprintln!("pipelets: {error}");
             std::process::exit(1);
         }
     };
     let cwd = std::env::current_dir().unwrap_or_default();
     // `--gateway-token` wins; otherwise fall back to the environment.
-    let token = token.or_else(|| std::env::var("PI_NATIVE_GATEWAY_TOKEN").ok());
+    let token = token.or_else(|| std::env::var("PIPELETS_GATEWAY_TOKEN").ok());
     let extensions = extensions.to_vec();
     let extension_allow = extension_allow.to_vec();
     let factory = move |unit_cwd: &str| {
@@ -866,7 +867,7 @@ fn run_gateway(
     let listener = match std::net::TcpListener::bind(bind_addr) {
         Ok(listener) => listener,
         Err(error) => {
-            eprintln!("pi-native: cannot bind {bind_addr}: {error}");
+            eprintln!("pipelets: cannot bind {bind_addr}: {error}");
             std::process::exit(1);
         }
     };
@@ -874,19 +875,19 @@ fn run_gateway(
     // via `POST /cron`; `--triggers` only seeds the initial set.
     let initial = match triggers {
         Some(path) => pi_triggers::load_triggers(path).unwrap_or_else(|error| {
-            eprintln!("pi-native: {error}");
+            eprintln!("pipelets: {error}");
             std::process::exit(1);
         }),
         None => Vec::new(),
     };
     let runs = trigger_runs
         .map(PathBuf::from)
-        .unwrap_or_else(|| cwd.join(".pi-native").join("trigger-runs.jsonl"));
+        .unwrap_or_else(|| cwd.join(".pipelets").join("trigger-runs.jsonl"));
     let store = pi_triggers::JsonlRuns::open(&runs).unwrap_or_else(|error| {
-        eprintln!("pi-native: cannot open {}: {error}", runs.display());
+        eprintln!("pipelets: cannot open {}: {error}", runs.display());
         std::process::exit(1);
     });
-    let sessions = cwd.join(".pi-native").join("trigger-sessions");
+    let sessions = cwd.join(".pipelets").join("trigger-sessions");
     let mut runner = pi_triggers::Runner::new(initial, sessions).with_workspace(cwd.clone());
     if let Some(price) = run_price {
         runner = runner.with_price(price);
@@ -906,7 +907,7 @@ fn run_gateway(
             std::time::Duration::from_secs(idle_timeout),
         );
     }
-    eprintln!("pi-native gateway listening on http://{bind_addr}");
+    eprintln!("pipelets gateway listening on http://{bind_addr}");
     pi_gateway::serve(listener, gateway);
 }
 
@@ -961,7 +962,7 @@ fn run_client(
     let mut child = match command.stdin(Stdio::piped()).stdout(Stdio::piped()).spawn() {
         Ok(child) => child,
         Err(error) => {
-            eprintln!("pi-native --client: {error}");
+            eprintln!("pipelets --client: {error}");
             std::process::exit(1);
         }
     };
@@ -974,7 +975,7 @@ fn run_client(
     // long transcript is not re-emitted when only the editor line changes.
     let mut screen = pi_tui::Screen::new();
     screen.push_text(
-        "pi-native client. Type a prompt; Ctrl-D to quit.",
+        "pipelets client. Type a prompt; Ctrl-D to quit.",
         dim_style(),
     );
     let (mut width, mut height) = terminal_size();
@@ -1301,7 +1302,7 @@ fn load_extension_tools(
             "write" => policy = policy.allow(pi_plugins::Capability::Write),
             "exec" => policy = policy.allow(pi_plugins::Capability::Exec),
             "http" => policy = policy.allow(pi_plugins::Capability::Http),
-            other => eprintln!("pi-native: unknown extension capability `{other}`"),
+            other => eprintln!("pipelets: unknown extension capability `{other}`"),
         }
     }
     let mut tools: Vec<Box<dyn Tool>> = Vec::new();
@@ -1339,7 +1340,7 @@ fn load_extension_tools(
                     }));
                 }
             }
-            Err(error) => eprintln!("pi-native: extension {}: {error}", path.display()),
+            Err(error) => eprintln!("pipelets: extension {}: {error}", path.display()),
         }
     }
     (tools, commands)

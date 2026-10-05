@@ -3,12 +3,12 @@
 - Status: Proposed
 - Date: 2026-10-05
 - Issues: VED-337 (this), VED-338, VED-339, VED-340, VED-341, VED-342, VED-343
-- Deciders: pi-native maintainers
+- Deciders: pipelets maintainers
 
 ## Context
 
 We want `pi-web` (https://github.com/agegr/pi-web) to be the UI end for
-pi-native unit agents, and we want units to run long sessions and run on
+pipelets unit agents, and we want units to run long sessions and run on
 triggers.
 
 Findings from the investigation:
@@ -23,7 +23,7 @@ Findings from the investigation:
   `turn_start/end`, `message_start/update/end` + `assistantMessageEvent`,
   `tool_execution_start/update/end`, `queue_update`, `compaction_*`, `retry_*`,
   `extension_ui_request/response`. pi-web consumes exactly these.
-- pi-native's RPC matches pi's **commands** (VED-335) but emits a coarser,
+- pipelets's RPC matches pi's **commands** (VED-335) but emits a coarser,
   non-standard **event** set (`assistant_text`, `tool_start`, `tool_end`,
   `done`, `usage`, `ui_request`).
 - Session files were incompatible: `SessionJournal` wrote
@@ -35,9 +35,9 @@ Findings from the investigation:
 
 1. **Fork pi-web** and keep its frontend, SSE plumbing, session viewer, file
    browser, and most API routes. Replace only the embedded agent runtime with a
-   pi-native client adapter.
-2. **Align pi-native's RPC event stream to pi's `json.md`** rather than build a
-   lossy translator. This also makes pi-native consumable by pi's own
+   pipelets client adapter.
+2. **Align pipelets's RPC event stream to pi's `json.md`** rather than build a
+   lossy translator. This also makes pipelets consumable by pi's own
    `RpcClient`.
 3. Introduce a **unit host** (supervisor) that addresses units by session id,
    not file descriptor. It owns attach/detach, event fan-out + replay, idle

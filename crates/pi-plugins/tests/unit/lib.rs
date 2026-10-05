@@ -84,7 +84,7 @@ fn runs_a_typescript_entrypoint() {
 
 fn temp_path(name: &str) -> std::path::PathBuf {
     let mut path = std::env::temp_dir();
-    path.push(format!("pi-native-test-{}-{name}", std::process::id()));
+    path.push(format!("pipelets-test-{}-{name}", std::process::id()));
     path
 }
 
@@ -309,10 +309,10 @@ fn path_resolve_uses_the_injected_cwd() {
 
 #[test]
 fn process_env_is_populated() {
-    std::env::set_var("PI_NATIVE_TEST_ENV", "hello");
+    std::env::set_var("PIPELETS_TEST_ENV", "hello");
     let host = PluginHost::new(PluginPolicy::permissive());
     let calls = host
-        .run(r#"import process from "node:process"; pi.log(process.env.PI_NATIVE_TEST_ENV);"#)
+        .run(r#"import process from "node:process"; pi.log(process.env.PIPELETS_TEST_ENV);"#)
         .expect("runs");
     assert_eq!(calls[0].args, serde_json::json!("hello"));
 }

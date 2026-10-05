@@ -1,23 +1,35 @@
-# pi-native
+# pipelets
 
-Workspace for the **pi native runtime** project: a headless-first Rust rewrite of
-pi that drops Node, ships as one small binary, and stays byte-identical to pi at
-the provider API — so a swarm of agent units is cheap to run and keeps pi's
-prompt-cache behavior.
+**A swarm-friendly, low-memory, low-CPU agent bare core.**
+
+pipelets is the headless-first Rust core that agent swarms run on: one small
+self-contained binary per unit, no Node/V8, and byte-identical provider requests
+to pi so prompt caching keeps working. A unit is addressed over JSON-lines RPC or
+the HTTP+SSE gateway; a conductor drives many of them at once.
+
+- **Bare core.** The agent loop, tools, session store, provider transport, and
+  plugin host — and nothing else. No editor, no cloud, no per-user daemon.
+- **Low memory.** ~4.4 MB idle in `--rpc`, ~5.0 MB serving a unit; bounded I/O,
+  token-based compaction, and a windowed transcript keep long sessions flat.
+- **Low CPU.** Idle costs ~0.001 s of CPU per 3 s (no busy-wait); tools stream
+  bounded buffers and a 20k-call tool run stays under a second of CPU.
+- **Swarm friendly.** 32 idle units ≈ 3.8 MB each; the dynamic build shares libc
+  pages across units, so a swarm costs less than the per-unit sum.
+- **pi-compatible.** Outbound request bytes and prompt-cache behavior match pi.
 
 Linear project: *pi native runtime: Rust memory-heavy rewrite, drop Node*
 (team `VED`).
 
-## Why pi-native
+## Why pipelets
 
-A headless-first Rust runtime for a **swarm of coding-agent units**: one small
-self-contained binary each, no Node/V8, provider-identical to pi.
+One small self-contained binary per unit, no Node/V8, provider-identical to pi.
+Measured 2026-10-05 (release build, x86_64):
 
-| | pi-native | pi-node |
+| | pipelets | pi-node |
 | --- | --- | --- |
-| shipped runtime | one ~7.5 MB static-capable binary | Node + `node_modules` |
-| idle RSS (`--rpc`) | **4.1 MB** | 111.7 MB |
-| idle RSS (full unit, `--serve`) | **5.3 MB** | 111.7 MB |
+| shipped runtime | one ~8.6 MB binary | Node + `node_modules` |
+| idle RSS (`--rpc`) | **4.4 MB** | 111.7 MB |
+| idle RSS (full unit, `--gateway`) | **5.0 MB** | 111.7 MB |
 | RSS per real agent turn (tools) | **7.7 MB** | — |
 | idle CPU | **~0.001 s / 3 s** (no busy-wait) | — |
 
@@ -48,7 +60,7 @@ a pi-compatible implementation.
 ```
 crates/pi-cache/       provider prompt-cache primitives, ported from pi (VED-314)
 crates/pi-providers/   OpenAI request builders with pi's cache placement
-crates/pi-cli/         `pi-native` CLI
+crates/pi-cli/         `pipelets` CLI
 scripts/               benchmark, stress, and parity harnesses
 artifacts/             committed measurement history
 docs/adr/              architecture decision records
@@ -65,32 +77,32 @@ cargo clippy --workspace --all-targets
 Packaging builds a single self-contained binary and tars it with the license:
 
 ```bash
-scripts/package.sh                      # -> dist/pi-native-<version>-<target>.tar.gz
+scripts/package.sh                      # -> dist/pipelets-<version>-<target>.tar.gz
 scripts/package.sh x86_64-unknown-linux-musl   # static build (needs musl-tools)
 ```
 
-`pi-native --version` reports the version, git revision, and target triple.
+`pipelets --version` reports the version, git revision, and target triple.
 
 ## Headless host
 
-`pi-native` runs the agent loop over the JSON-lines protocol
+`pipelets` runs the agent loop over the JSON-lines protocol
 (`docs/rpc-protocol.md`). One generic path: pick a provider, the loop and tools
 are the same.
 
 ```bash
 # one-shot (provider, base URL, model, and key are explicit — no baked-in defaults)
-OPENAI_API_KEY=… pi-native \
+OPENAI_API_KEY=… pipelets \
   --provider openai-completions --base-url https://api.deepseek.com \
   --model deepseek-flash --thinking-format deepseek -p "summarize README.md"
 
 # a unit: protocol on stdio
-pi-native --serve --provider openai-completions --base-url … --model …
+pipelets --serve --provider openai-completions --base-url … --model …
 
 # drive a local unit from the terminal
-pi-native --client
+pipelets --client
 
 # OpenAI Responses
-pi-native --serve --provider openai-responses --base-url https://api.openai.com/v1 --model gpt-4o
+pipelets --serve --provider openai-responses --base-url https://api.openai.com/v1 --model gpt-4o
 ```
 
 Flags: `--provider openai-completions|openai-responses`, `--base-url` (or
@@ -117,9 +129,9 @@ be granted with `--extension-allow read,write,exec,http`, and file/process paths
 are jailed to the working directory.
 
 ```bash
-pi-native --serve --extension ./extensions/my-tool.ts
+pipelets --serve --extension ./extensions/my-tool.ts
 # grant an extension read-only workspace access
-pi-native --serve --extension ./my.ts --extension-allow read
+pipelets --serve --extension ./my.ts --extension-allow read
 ```
 
 ## Unit gateway (HTTP + SSE)
@@ -130,7 +142,7 @@ descriptor; any number of clients can attach, and an idle unit releases its
 in-memory agent until the next command.
 
 ```bash
-pi-native --gateway --gateway-addr 127.0.0.1:30142 \
+pipelets --gateway --gateway-addr 127.0.0.1:30142 \
   --provider openai-completions --base-url … --model … --api-key …
 ```
 
@@ -157,7 +169,7 @@ Units run tools without asking, matching pi.
 
 `--triggers <file>` (with `--gateway`) fires scheduled prompts into long-lived
 sessions. Each trigger has a stable session, so context accumulates across
-runs; run records are appended to `.pi-native/trigger-runs.jsonl` (or
+runs; run records are appended to `.pipelets/trigger-runs.jsonl` (or
 `--trigger-runs <path>`) and are the dedupe/idempotency layer across restarts.
 Every finished run also leaves a **receipt** (model, tokens, cost, exit code,
 files changed, diff, outcome) in a sibling `.receipts.jsonl` file, served over
@@ -174,7 +186,7 @@ files changed, diff, outcome) in a sibling `.receipts.jsonl` file, served over
 ```
 
 ```bash
-pi-native --gateway --triggers ./triggers.json --trigger-interval 1 \
+pipelets --gateway --triggers ./triggers.json --trigger-interval 1 \
   --run-price 270000,1100000,27000,270000 \
   --provider openai-completions --base-url … --model … --api-key …
 ```
@@ -201,7 +213,7 @@ the current branch. Read-only cards that never edit a tree are dispatched the
 same way. No per-card worktrees.
 
 ```bash
-SWARM_REPO=/path/to/pi-native \
+SWARM_REPO=/path/to/pipelets \
 python3 scripts/swarm_conductor.py
 python3 scripts/test_swarm_conductor.py   # routing + dispatch
 ```
@@ -217,10 +229,10 @@ ports the primitives from pi and is unit-tested against pi's semantics:
 - cache-warming delay, replayability, and economics.
 
 ```bash
-cargo run -q -p pi-native -- cache-control --retention long
+cargo run -q -p pipelets -- cache-control --retention long
 # {"cache_control":{"ttl":"1h","type":"ephemeral"},"retention":"long"}
 
-cargo run -q -p pi-native -- prompt-cache-key --session-id sess-123 --responses
+cargo run -q -p pipelets -- prompt-cache-key --session-id sess-123 --responses
 # {"prompt_cache_key":"sess-123","retention":"short"}
 ```
 
@@ -281,23 +293,23 @@ Targets are auto-detected:
 
 - `pi-node` — the current `pi` on `PATH` (Node/V8).
 - `pi-rust` — reference port, path from `PI_RUST_BIN` (default `/tmp/pi-rust/pi`).
-- `pi-native` — our build, path from `PI_NATIVE_BIN`.
+- `pipelets` — our build, path from `PIPELETS_BIN`.
 
 Idle taxonomy (VED-302): only `cold-idle` is implemented; the remaining four
 states are declared in the artifact schema so it does not churn later.
 
-## Baseline (2026-10-04)
+## Baseline (2026-10-05)
 
 | Target | cold-idle RSS | session-loaded (3.2 MB JSONL) |
 | --- | --- | --- |
 | `pi-node` (headless RPC) | 111.7 MB | 124.8 MB |
 | `pi-rust` (reference port, headless) | 38.9 MB | 50.7 MB |
-| **`pi-native` (our build, headless)** | **4.1 MB** | 6.3 MB (stress) |
+| **`pipelets` (our build, headless)** | **4.4 MB** | 6.3 MB (stress) |
 | `pi-node` (interactive TUI) | 117.2 MB | **207.1 MB** |
 
-`pi-native` now runs the full agent loop, tools, RPC, and plugins, so its idle
+`pipelets` now runs the full agent loop, tools, RPC, and plugins, so its idle
 footprint grew from the idle-only scaffold; it is still ~27x below pi-node. The reference `pi-rust` is the third-party port, included
-only for comparison — our build is `pi-native` (`PI_NATIVE_BIN`).
+only for comparison — our build is `pipelets` (`PIPELETS_BIN`).
 
 Headless, a 3.2 MB session costs ~12-13 MB. The **interactive TUI adds ~90 MB**
 for the same session (retained rendered transcript components) — the variable
@@ -340,7 +352,7 @@ sharing libc pages across a swarm, so the dynamic build is kept.
 
 ## Pressure (`--stress`)
 
-`pi-native --stress N` runs a deterministic in-process workload (N turns of an
+`pipelets --stress N` runs a deterministic in-process workload (N turns of an
 `ls` tool call, no network, no subprocesses). `scripts/stress_gate.py` fails CI
 if peak RSS exceeds a ceiling or the run does not finish in time.
 

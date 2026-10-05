@@ -477,7 +477,7 @@ impl PendingRun {
                 }
             }
             RollbackPolicy::Park => {
-                let message = format!("pi-native rollback: {} @ {}", self.trigger.id, self.now);
+                let message = format!("pipelets rollback: {} @ {}", self.trigger.id, self.now);
                 if git(workspace, &["stash", "push", "-u", "-m", &message]).is_some() {
                     Disposition::Parked
                 } else {

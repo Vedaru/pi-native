@@ -158,7 +158,7 @@ pub fn virtual_module_source(canonical: &str) -> Option<String> {
 /// generic import rewrite.
 pub fn stub_module_source(spec: &str) -> String {
     let mut source = String::new();
-    source.push_str("// pi-native generic package stub for ");
+    source.push_str("// pipelets generic package stub for ");
     source.push_str(spec);
     source.push_str(
         "\nconst __stub = new Proxy(function () {}, {\n\

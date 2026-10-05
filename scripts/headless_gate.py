@@ -5,14 +5,14 @@ A swarm unit is a headless worker: it prints, serves RPC, or drives the
 gateway, and it never draws a terminal. Projects that ship a TUI as just
 another mode still compile the TUI in; this one does not build it at all, and
 this gate keeps it that way. It fails if a UI-only crate - a terminal renderer,
-a clipboard, an image codec, a GUI toolkit - ever enters `pi-native`'s normal
+a clipboard, an image codec, a GUI toolkit - ever enters `pipelets`'s normal
 dependency tree.
 
 Names are matched exactly, not as substrings: `webpki-roots` is a TLS
 dependency, not the `webp` image codec, and this gate must not confuse them.
 
 Usage:
-    python3 scripts/headless_gate.py                 # check pi-native
+    python3 scripts/headless_gate.py                 # check pipelets
     python3 scripts/headless_gate.py -p some-worker  # check a split worker
 """
 
@@ -94,8 +94,8 @@ def main() -> int:
     parser.add_argument(
         "-p",
         "--package",
-        default="pi-native",
-        help="package to check (default: pi-native)",
+        default="pipelets",
+        help="package to check (default: pipelets)",
     )
     args = parser.parse_args()
 

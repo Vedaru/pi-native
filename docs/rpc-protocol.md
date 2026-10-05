@@ -1,6 +1,6 @@
 # RPC protocol
 
-A headless unit is driven over JSON lines: one request or event per line. The
+A pipelets unit is driven over JSON lines: one request or event per line. The
 host does not assume a terminal, so any client (a terminal client, a web page, a
 test harness) can drive it and render **generic UI requests**.
 
@@ -126,7 +126,7 @@ message); tools themselves do not prompt — they run as in pi.
   approval, matching pi.
 - `get_state` returns the unit's resolved context (`system` + `transcript` in
   pi's message shape), so a UI service can render it without owning the session.
-- The memory benchmark's `pi-native --rpc` idle mode is separate from this
+- The memory benchmark's `pipelets --rpc` idle mode is separate from this
   protocol.
 - `--session <path>` seeds the transcript and persists each turn back to the
   file (append; rewrite after compaction).

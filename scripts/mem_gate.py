@@ -33,9 +33,9 @@ DEFAULT_RATIO_THRESHOLD = 0.60
 # percentage threshold and would false-fail CI.
 DEFAULT_MIN_ABSOLUTE_DELTA_MB = 2.0
 NODE_TARGET = "pi-node"
-NATIVE_TARGETS = {"pi-rust", "pi-native"}
+NATIVE_TARGETS = {"pi-rust", "pipelets"}
 # Our build. The ceiling applies only to this; the reference is for comparison.
-OUR_TARGET = "pi-native"
+OUR_TARGET = "pipelets"
 
 
 def project_root() -> Path:

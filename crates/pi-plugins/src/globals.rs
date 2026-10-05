@@ -128,7 +128,7 @@ pub const PRELUDE: &str = r#"
     arch: env.arch,
     cwd: () => env.cwd,
     env: env.env || {},
-    argv: ["pi-native"],
+    argv: ["pipelets"],
     version: "v22.0.0",
     versions: { node: "22.0.0" },
     stdout: { write: (s) => { globalThis.__pi_host.apiCall("process.stdout.write", JSON.stringify([String(s)])); return true; }, isTTY: false },

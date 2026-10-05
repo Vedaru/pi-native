@@ -11,4 +11,4 @@ dist/
 .pi/swarm-memory.jsonl
 
 # runtime trigger state (VED-372), not source
-.pi-native/
+.pipelets/

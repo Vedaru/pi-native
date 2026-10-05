@@ -273,6 +273,6 @@ fn spool_path() -> Option<PathBuf> {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
     let mut path = std::env::temp_dir();
-    path.push(format!("pi-native-bash-{}-{n}.log", std::process::id()));
+    path.push(format!("pipelets-bash-{}-{n}.log", std::process::id()));
     Some(path)
 }

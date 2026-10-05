@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Swarm conductor: planning/prioritisation over the open Linear board.
 
-A pi-native unit is request-driven: it runs one agent loop for a prompt and then
+A pipelets unit is request-driven: it runs one agent loop for a prompt and then
 idles. Nothing schedules the *next* prompt, which is why the swarm "stops".
 The conductor reads the open issues in the VED "pi native runtime" project and
 maps each to a role unit.

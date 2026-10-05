@@ -4,7 +4,7 @@
 A swarm multiplies both memory and CPU, so the interesting numbers are the
 aggregate, not a single unit. Two modes:
 
-- `idle`: N `pi-native --rpc` units sitting idle (the swarm floor).
+- `idle`: N `pipelets --rpc` units sitting idle (the swarm floor).
 - `busy`: N units each running a stress session (load).
 
 Usage:
@@ -44,7 +44,7 @@ def cpu_seconds(pid: int) -> float | None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--binary", default="target/release/pi-native")
+    parser.add_argument("--binary", default="target/release/pipelets")
     parser.add_argument("--units", type=int, default=8)
     parser.add_argument("--mode", choices=["idle", "busy"], default="idle")
     parser.add_argument("--turns", type=int, default=5000)

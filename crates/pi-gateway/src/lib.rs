@@ -234,7 +234,7 @@ pub fn check_bind_security(addr: &str, has_token: bool) -> Result<SocketAddr, St
         if all.iter().any(|addr| !addr.ip().is_loopback()) {
             return Err(format!(
                 "refusing to bind non-loopback address {addr}: set --gateway-token or \
-                 PI_NATIVE_GATEWAY_TOKEN (or bind a loopback address)"
+                 PIPELETS_GATEWAY_TOKEN (or bind a loopback address)"
             ));
         }
     }

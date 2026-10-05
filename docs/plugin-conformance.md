@@ -1,6 +1,6 @@
 # Plugin conformance
 
-How many of pi's own example extensions load through the native QuickJS host.
+How many of pi's own example extensions load through the pipelets QuickJS host.
 
 Reproduce:
 

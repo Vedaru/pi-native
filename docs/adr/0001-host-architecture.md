@@ -3,7 +3,7 @@
 - Status: Accepted
 - Date: 2026-10-04
 - Issue: VED-303
-- Deciders: pi-native maintainers
+- Deciders: pipelets maintainers
 
 ## Context
 

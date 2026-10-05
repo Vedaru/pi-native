@@ -4,7 +4,7 @@
 #   scripts/package.sh                 # host target
 #   scripts/package.sh <target-triple> # cross/static target (e.g. *-musl)
 #
-# Output: dist/pi-native-<version>-<target>.tar.gz (+ .sha256)
+# Output: dist/pipelets-<version>-<target>.tar.gz (+ .sha256)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -20,17 +20,17 @@ else
 fi
 
 version="$(cargo metadata --no-deps --format-version 1 \
-    | python3 -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"]=="pi-native"))')"
+    | python3 -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"]=="pipelets"))')"
 
-name="pi-native-${version}-${suffix}"
+name="pipelets-${version}-${suffix}"
 dist="dist"
 rm -rf "$dist/$name"
 mkdir -p "$dist/$name"
-cp "$out_dir/pi-native" "$dist/$name/"
+cp "$out_dir/pipelets" "$dist/$name/"
 cp README.md LICENSE "$dist/$name/"
 
 tar -C "$dist" -czf "$dist/$name.tar.gz" "$name"
 ( cd "$dist" && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256" )
 
 echo "packaged dist/$name.tar.gz"
-"$dist/$name/pi-native" --version
+"$dist/$name/pipelets" --version

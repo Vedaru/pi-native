@@ -1,9 +1,15 @@
-# Scope: pi's minimal core
+# Scope: the pipelets bare core
 
-This project is a **partial rewrite of pi's core plus a plugin wrapper** — not a
-full port, and not a port of the reference Rust project's extended feature set.
-pi describes itself as "a minimal, extensible agent harness"; this document is
-the canonical in/out list and the guard for new work.
+pipelets is a **swarm-friendly, low-memory, low-CPU agent bare core**: a partial
+rewrite of pi's core plus a plugin wrapper. It is not a full port, and not a port
+of the reference Rust project's extended feature set. pi describes itself as "a
+minimal, extensible agent harness"; this document is the canonical in/out list
+and the guard for new work.
+
+The binary is the **bare core** a single unit needs. The **swarm layer** is a
+thin set of scripts (`scripts/swarm_*.py`) on top of the core's unit-host,
+gateway, and trigger primitives; it is deliberately not part of the shipped
+binary, so an idle unit stays at ~4–5 MB.
 
 The reference port (`Dicklesworthstone/pi_agent_rust`) is used for
 **architecture** (QuickJS + Rust-backed Node shims, crate choices), never for
@@ -24,10 +30,20 @@ scope.
 | JSON revision diffing | `pi-delta` |
 | Prompt-cache primitives | `pi-cache` |
 
+Core primitives the swarm layer stands on:
+
+| Surface | Notes |
+| --- | --- |
+| Unit host: addressable agents, attach/detach, event fan-out, idle suspend | `pi-host` |
+| HTTP + SSE gateway | `pi-gateway` |
+| Trigger engine: schedules, episodes, budgets, durable run records | `pi-triggers` |
+| Direct unit-to-unit mailbox (ack, ownership) | `pi-host` |
+
 ## Out of scope (reference-port bloat)
 
-swarm, beads, LSP, browser, computer, web UI, sub-agents, plan mode, memory
-bank, worktrees, and any other feature pi's core does not ship.
+beads, LSP, browser, computer, sub-agents, plan mode, memory bank, worktrees,
+and any other feature pi's core does not ship. The swarm orchestration scripts
+are not part of the shipped binary.
 
 ## Hard constraints
 
@@ -37,6 +53,9 @@ bank, worktrees, and any other feature pi's core does not ship.
 - **Plugin compatibility**: existing pi plugins load and run unchanged through
   the wrapper (VED-304). Plugin API compatibility wins over native-core
   convenience when the two conflict.
+- **Low memory and low CPU**: an idle unit stays near the Rust floor (~4–5 MB,
+  ~0 CPU). New core features must not add unbounded buffers or busy-waits; the
+  memory and pressure gates fail CI on a regression.
 - **Generalize, do not special-case** (ADR 0001): one mechanism covering many
   cases, mapping tables over branches, provider wire formats as the only
   legitimate format-specific exception.
@@ -58,3 +77,6 @@ bank, worktrees, and any other feature pi's core does not ship.
 | VED-312 | interim lazy imports in pi (not part of the native runtime) |
 | VED-313/314/315 | provider parity and the release gate |
 | VED-318 | this scope definition |
+| VED-337–343 | web/host/trigger infra |
+| VED-379 | direct unit-to-unit mailbox |
+| VED-389 | release the host lock while a trigger runs |

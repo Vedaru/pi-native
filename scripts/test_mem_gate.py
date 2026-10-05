@@ -81,13 +81,13 @@ class IndexResultsTests(unittest.TestCase):
     def test_zero_and_missing_rss_are_ignored(self):
         artifact = {
             "results": [
-                {"target": "pi-native", "taxonomy": "cold-idle", "rss_bytes": 0},
+                {"target": "pipelets", "taxonomy": "cold-idle", "rss_bytes": 0},
                 {"target": "pi-node", "taxonomy": "cold-idle"},
-                {"target": "pi-native", "taxonomy": "warm-idle", "rss_bytes": 123},
+                {"target": "pipelets", "taxonomy": "warm-idle", "rss_bytes": 123},
             ]
         }
         indexed = gate.index_results(artifact)
-        self.assertEqual(indexed, {("pi-native", "warm-idle"): 123})
+        self.assertEqual(indexed, {("pipelets", "warm-idle"): 123})
 
 
 if __name__ == "__main__":

@@ -1,13 +1,13 @@
 [package]
-name = "pi-native"
+name = "pipelets"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Native Rust runtime for pi (work in progress)"
+description = "Pipelets: a low-memory, low-CPU bare-core agent runtime for swarms, ports pi's behavior"
 
 [[bin]]
-name = "pi-native"
+name = "pipelets"
 path = "src/main.rs"
 
 [dependencies]

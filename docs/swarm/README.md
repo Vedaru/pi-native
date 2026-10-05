@@ -1,6 +1,6 @@
-# pi-native swarm — unit guide
+# pipelets swarm — unit guide
 
-You are one **role unit** in a pi-native swarm. This file lives in the repo so
+You are one **role unit** in a pipelets swarm. This file lives in the repo so
 you can read it inside the workspace jail. The human talks to the **conductor**
 unit; you receive work from the conductor and coordinate through Linear.
 

@@ -55,12 +55,12 @@ jobs:
       - name: Smoke-test the artifact
         run: |
           mkdir -p /tmp/pkg
-          tar -xzf dist/pi-native-*.tar.gz -C /tmp/pkg
-          /tmp/pkg/pi-native-*/pi-native --version
-          ( cd dist && sha256sum -c pi-native-*.tar.gz.sha256 )
+          tar -xzf dist/pipelets-*.tar.gz -C /tmp/pkg
+          /tmp/pkg/pipelets-*/pipelets --version
+          ( cd dist && sha256sum -c pipelets-*.tar.gz.sha256 )
       - uses: actions/upload-artifact@v4
         with:
-          name: pi-native-linux-x86_64
+          name: pipelets-linux-x86_64
           path: |
             dist/*.tar.gz
             dist/*.sha256
@@ -82,17 +82,17 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Build our native target
         run: |
-          cargo build --release -p pi-native
-          echo "PI_NATIVE_BIN=$PWD/target/release/pi-native" >> "$GITHUB_ENV"
+          cargo build --release -p pipelets
+          echo "PIPELETS_BIN=$PWD/target/release/pipelets" >> "$GITHUB_ENV"
       # Absolute baseline is a dev-machine measurement, so CI uses the
       # environment-independent ratio check (native <= 60% of Node).
       - name: Memory regression gate
         run: python3 scripts/mem_gate.py --no-absolute --ratio-threshold 0.6 --max-native-mb 25
       - name: Pressure gate (tools)
-        run: python3 scripts/stress_gate.py --binary target/release/pi-native --turns 20000 --tools ls grep find edit read --max-mb 100 --max-cpu 5
+        run: python3 scripts/stress_gate.py --binary target/release/pipelets --turns 20000 --tools ls grep find edit read --max-mb 100 --max-cpu 5
       - name: Pressure gate (session/compaction)
-        run: python3 scripts/stress_gate.py --binary target/release/pi-native --turns 20000 --tools read --max-mb 100 --max-cpu 5 --session
+        run: python3 scripts/stress_gate.py --binary target/release/pipelets --turns 20000 --tools read --max-mb 100 --max-cpu 5 --session
       - name: Swarm gate
         run: |
-          python3 scripts/swarm_stress.py --binary target/release/pi-native --units 8 --mode idle --max-total-mb 100
-          python3 scripts/swarm_stress.py --binary target/release/pi-native --units 8 --mode busy --turns 200000 --max-total-mb 200
+          python3 scripts/swarm_stress.py --binary target/release/pipelets --units 8 --mode idle --max-total-mb 100
+          python3 scripts/swarm_stress.py --binary target/release/pipelets --units 8 --mode busy --turns 200000 --max-total-mb 200
