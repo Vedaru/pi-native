@@ -28,6 +28,10 @@ from pathlib import Path
 
 DEFAULT_THRESHOLD = 0.10
 DEFAULT_RATIO_THRESHOLD = 0.60
+# Below this absolute regression (MB) the relative check is ignored: for a tiny
+# baseline (single-digit MB) a few hundred KB of run-to-run noise exceeds the
+# percentage threshold and would false-fail CI.
+DEFAULT_MIN_ABSOLUTE_DELTA_MB = 2.0
 NODE_TARGET = "pi-node"
 NATIVE_TARGETS = {"pi-rust", "pi-native"}
 # Our build. The ceiling applies only to this; the reference is for comparison.
@@ -63,6 +67,18 @@ def human_mb(value: int) -> str:
     return f"{value / 1048576:.1f} MB"
 
 
+def absolute_regression_fails(
+    rss: int, baseline_rss: int, threshold: float, min_delta_mb: float
+) -> bool:
+    """A regression fails only when it is over the relative threshold *and*
+    at least the absolute noise floor. On a tiny baseline a few hundred KB of
+    measurement noise exceeds the percentage threshold and must not fail CI."""
+    delta = (rss - baseline_rss) / baseline_rss
+    if delta <= threshold:
+        return False
+    return (rss - baseline_rss) / 1048576 >= min_delta_mb
+
+
 def run_benchmark(current_path: Path) -> dict | None:
     run = subprocess.run(
         [
@@ -86,6 +102,12 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--threshold", type=float, default=DEFAULT_THRESHOLD)
     parser.add_argument("--ratio-threshold", type=float, default=DEFAULT_RATIO_THRESHOLD)
+    parser.add_argument(
+        "--min-absolute-delta-mb",
+        type=float,
+        default=DEFAULT_MIN_ABSOLUTE_DELTA_MB,
+        help="ignore absolute regressions smaller than this many MB (noise floor)",
+    )
     parser.add_argument("--from-json", help="evaluate this artifact instead of running the benchmark")
     parser.add_argument(
         "--no-absolute",
@@ -142,11 +164,18 @@ def main() -> int:
             if (target, taxonomy) not in baseline:
                 continue
             overlaps += 1
-            delta = (rss - baseline[(target, taxonomy)]) / baseline[(target, taxonomy)]
-            print(f"  {target} [{taxonomy}]: {human_mb(baseline[(target, taxonomy)])} -> {human_mb(rss)} ({delta * 100:+.1f}%)")
-            if delta > args.threshold:
+            base_rss = baseline[(target, taxonomy)]
+            delta = (rss - base_rss) / base_rss
+            abs_delta_mb = (rss - base_rss) / 1048576
+            print(f"  {target} [{taxonomy}]: {human_mb(base_rss)} -> {human_mb(rss)} ({delta * 100:+.1f}%, {abs_delta_mb:+.2f} MB)")
+            if absolute_regression_fails(rss, base_rss, args.threshold, args.min_absolute_delta_mb):
                 print(f"    FAIL: over {args.threshold * 100:.0f}%")
                 failed = True
+            elif delta > args.threshold:
+                print(
+                    f"    ok: over {args.threshold * 100:.0f}% but only {abs_delta_mb:+.2f} MB "
+                    f"(< {args.min_absolute_delta_mb:.1f} MB noise floor)"
+                )
         if overlaps == 0:
             print("  (no comparable baseline keys in this environment; skipped)")
 
