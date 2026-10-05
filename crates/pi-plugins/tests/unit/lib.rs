@@ -500,3 +500,30 @@ fn read_file_sync_throws_on_a_failed_read() {
     );
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[test]
+fn top_level_hostcall_error_makes_the_module_load_fail() {
+    // A hostcall that throws at module scope must fail the load with the real
+    // error, not be swallowed into the ignored module promise (VED-358).
+    let root = std::env::temp_dir().join(format!("pi-plugin-top-root-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("root");
+    let missing = root.join("missing.txt");
+
+    let host = PluginHost::new(PluginPolicy::for_extension(&root).allow(Capability::Read));
+    let result = host.run(&format!(
+        r#"import fs from "node:fs"; fs.readFileSync({:?}, "utf8");"#,
+        missing.to_string_lossy()
+    ));
+    match result {
+        Err(PluginError::Engine(message)) => {
+            assert!(
+                message.contains("readFileSync"),
+                "the real error must surface: {message}"
+            );
+        }
+        other => panic!("expected a top-level hostcall failure, got {other:?}"),
+    }
+
+    let _ = std::fs::remove_dir_all(&root);
+}

@@ -284,8 +284,17 @@ impl PluginHost {
             let entry = Module::declare(ctx.clone(), name, prepared.as_bytes())
                 .catch(&ctx)
                 .map_err(|error| caught_error("declare", error))?;
-            let (evaluated, _promise) = entry
+            let (evaluated, promise) = entry
                 .eval()
+                .catch(&ctx)
+                .map_err(|error| caught_error("eval", error))?;
+            // `Module::eval` reports top-level failures (including a hostcall
+            // that throws, e.g. an escaping write) as a rejected promise rather
+            // than an exception from `eval`. Drive the job queue to settle it and
+            // surface a rejection as an engine error, so a module-scope failure
+            // cannot masquerade as a successful load.
+            promise
+                .finish::<()>()
                 .catch(&ctx)
                 .map_err(|error| caught_error("eval", error))?;
             let namespace = evaluated
