@@ -113,7 +113,7 @@ fn serve_with_runs_the_hook_after_each_prompt() {
 }
 
 #[test]
-fn serve_unit_asks_the_client_before_approval_required_tools() {
+fn serve_session_runs_tools_without_approval() {
     use pi_agent::ToolCall;
     use pi_tools::{default_tools, ToolContext};
 
@@ -151,19 +151,19 @@ fn serve_unit_asks_the_client_before_approval_required_tools() {
         "system",
         ToolContext::new(std::env::temp_dir()),
     );
-    let input = concat!(
-        "{\"type\":\"prompt\",\"text\":\"go\"}\n",
-        "{\"type\":\"ui_response\",\"id\":\"ui-0\",\"value\":\"allow\"}\n",
-    );
+    let input = "{\"type\":\"prompt\",\"text\":\"go\"}\n";
     let buf = SharedBuf(std::rc::Rc::new(std::cell::RefCell::new(Vec::new())));
-    serve_unit(
+    serve_session(
         &mut agent,
+        None,
+        ".",
         std::io::Cursor::new(input.as_bytes().to_vec()),
         buf.clone(),
+        |_| {},
     )
     .expect("serves");
     let text = String::from_utf8(buf.0.borrow().clone()).unwrap();
-    assert!(text.contains("\"type\":\"ui_request\""), "{text}");
+    assert!(!text.contains("\"type\":\"ui_request\""), "{text}");
     assert!(text.contains("\"type\":\"tool_end\""), "{text}");
     assert!(!text.contains("\"is_error\":true"), "{text}");
 }
@@ -201,7 +201,7 @@ fn serve_session_answers_tree_messages_and_resume() {
         "{\"type\":\"get_last_assistant_text\"}\n",
     );
     let buf = SessionBuf(std::rc::Rc::new(std::cell::RefCell::new(Vec::new())));
-    serve_unit_session(
+    serve_session(
         &mut agent,
         Some(path.clone()),
         "/tmp",
@@ -257,54 +257,23 @@ fn serve_session_answers_model_thinking_and_bash() {
 }
 
 #[test]
-fn out_of_band_bash_is_denied_without_approval() {
+fn out_of_band_bash_runs_without_approval() {
     let mut agent = agent_with(vec![]);
     let input = "{\"type\":\"bash\",\"command\":\"echo pwned\"}\n";
     let buf = SessionBuf(std::rc::Rc::new(std::cell::RefCell::new(Vec::new())));
-    serve_unit(
+    serve_session(
         &mut agent,
+        None,
+        "/tmp",
         std::io::Cursor::new(input.as_bytes().to_vec()),
         buf.clone(),
+        |_| {},
     )
     .expect("serves");
     let text = String::from_utf8(buf.0.borrow().clone()).unwrap();
-    // The client was asked, then EOF denied the command.
-    assert!(text.contains("\"type\":\"ui_request\""), "{text}");
+    assert!(!text.contains("\"type\":\"ui_request\""), "{text}");
     assert!(text.contains("\"command\":\"bash\""), "{text}");
-    assert!(text.contains("\"success\":false"), "{text}");
-    assert!(
-        !text.contains("\"output\""),
-        "bash ran without approval: {text}"
-    );
-}
-
-#[test]
-fn commands_during_approval_are_replayed_not_dropped() {
-    let mut agent = agent_with(vec![]);
-    agent.push_user("seed");
-    let input = concat!(
-        "{\"type\":\"bash\",\"command\":\"echo approved\"}\n",
-        "{\"type\":\"get_state\"}\n",
-        "{\"type\":\"ui_response\",\"id\":\"ui-0\",\"value\":\"allow\"}\n",
-    );
-    let buf = SessionBuf(std::rc::Rc::new(std::cell::RefCell::new(Vec::new())));
-    serve_unit(
-        &mut agent,
-        std::io::Cursor::new(input.as_bytes().to_vec()),
-        buf.clone(),
-    )
-    .expect("serves");
-    let text = String::from_utf8(buf.0.borrow().clone()).unwrap();
-    assert!(text.contains("approved"), "bash did not run: {text}");
-    // `get_state` arrived while the approval was pending; it must still be answered
-    // (a `state` event, emitted after the bash response).
-    assert!(text.contains("\"type\":\"state\""), "{text}");
-    let state_at = text.find("\"type\":\"state\"").expect("state event");
-    let bash_at = text.find("\"command\":\"bash\"").expect("bash response");
-    assert!(
-        state_at > bash_at,
-        "state must be replayed after approval: {text}"
-    );
+    assert!(text.contains("pwned"), "{text}");
 }
 
 #[test]
@@ -322,7 +291,7 @@ fn export_html_rejects_a_path_outside_the_workspace() {
         outside.to_string_lossy()
     );
     let buf = SessionBuf(std::rc::Rc::new(std::cell::RefCell::new(Vec::new())));
-    serve_unit_session(
+    serve_session(
         &mut agent,
         None,
         &workspace.to_string_lossy(),

@@ -181,7 +181,7 @@ fn tool_end(events: &[AgentEvent]) -> (bool, String) {
 }
 
 #[test]
-fn denied_approval_blocks_an_approval_tool() {
+fn bash_tool_runs_without_approval() {
     let provider = FakeProvider::new(vec![
         bash_turn(),
         AssistantTurn {
@@ -194,34 +194,7 @@ fn denied_approval_blocks_an_approval_tool() {
         vec![Box::new(BashTool)],
         "s",
         ToolContext::new(std::env::temp_dir()),
-    )
-    .with_approver(std::rc::Rc::new(DenyAll));
-    agent.push_user("go");
-
-    let events = agent.run().expect("runs");
-    let (is_error, content) = tool_end(&events);
-    assert!(is_error, "denied tool should be an error: {content}");
-    assert!(content.contains("denied"), "{content}");
-    // The loop continues after a denial.
-    assert!(events.contains(&AgentEvent::AssistantText("ok".into())));
-}
-
-#[test]
-fn allowed_approval_runs_the_tool() {
-    let provider = FakeProvider::new(vec![
-        bash_turn(),
-        AssistantTurn {
-            text: "ok".into(),
-            ..Default::default()
-        },
-    ]);
-    let mut agent = Agent::new(
-        Box::new(provider),
-        vec![Box::new(BashTool)],
-        "s",
-        ToolContext::new(std::env::temp_dir()),
-    )
-    .with_approver(std::rc::Rc::new(AllowAll));
+    );
     agent.push_user("go");
 
     let events = agent.run().expect("runs");

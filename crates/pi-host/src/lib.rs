@@ -1,6 +1,6 @@
 //! Unit host: addressable agents that outlive a single client connection.
 //!
-//! Today the RPC loop (`pi_rpc::serve_unit_session`) is bound to one reader and
+//! Today the RPC loop (`pi_rpc::serve_session`) is bound to one reader and
 //! one writer. The host keeps that loop but gives each unit channel-backed I/O:
 //!
 //! * commands are written into an in-memory channel (any number of clients);
@@ -217,36 +217,12 @@ struct Unit {
     cwd: String,
     factory: Factory,
     shared: Arc<Shared>,
-    /// Ask the client before approval-required tools run (pi, by default, does not).
-    approvals: bool,
     commands: Option<Sender<Vec<u8>>>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
-/// Run one unit over its channel-backed I/O, with or without the protocol approver.
-fn serve_unit<R: std::io::BufRead + 'static, W: std::io::Write + 'static>(
-    agent: &mut Agent,
-    path: PathBuf,
-    cwd: &str,
-    reader: R,
-    writer: W,
-    approvals: bool,
-) {
-    if approvals {
-        let _ = pi_rpc::serve_unit_session(agent, Some(path), cwd, reader, writer, |_| {});
-    } else {
-        let _ = pi_rpc::serve_session(agent, Some(path), cwd, reader, writer, |_| {});
-    }
-}
-
 impl Unit {
-    fn spawn(
-        session_path: PathBuf,
-        cwd: String,
-        factory: Factory,
-        shared: Arc<Shared>,
-        approvals: bool,
-    ) -> Self {
+    fn spawn(session_path: PathBuf, cwd: String, factory: Factory, shared: Arc<Shared>) -> Self {
         let (tx, rx) = mpsc::channel::<Vec<u8>>();
         let writer = ChannelWriter::new(shared.clone());
         let path = session_path.clone();
@@ -255,14 +231,14 @@ impl Unit {
         let thread = std::thread::spawn(move || {
             let mut agent = agent_factory(&unit_cwd);
             let reader = BufReader::new(ChannelReader::new(rx));
-            serve_unit(&mut agent, path, &unit_cwd, reader, writer, approvals);
+            let _ =
+                pi_rpc::serve_session(&mut agent, Some(path), &unit_cwd, reader, writer, |_| {});
         });
         Self {
             session_path,
             cwd,
             factory,
             shared,
-            approvals,
             commands: Some(tx),
             thread: Some(thread),
         }
@@ -291,11 +267,10 @@ impl Unit {
         let path = self.session_path.clone();
         let cwd = self.cwd.clone();
         let factory = self.factory.clone();
-        let approvals = self.approvals;
         self.thread = Some(std::thread::spawn(move || {
             let mut agent = factory(&cwd);
             let reader = BufReader::new(ChannelReader::new(rx));
-            serve_unit(&mut agent, path, &cwd, reader, writer, approvals);
+            let _ = pi_rpc::serve_session(&mut agent, Some(path), &cwd, reader, writer, |_| {});
         }));
         self.commands = Some(tx);
     }
@@ -338,8 +313,6 @@ pub struct Host {
     cwd: String,
     factory: Factory,
     units: HashMap<String, Unit>,
-    /// Ask the client before approval-required tools run. Off matches pi.
-    approvals: bool,
 }
 
 impl Host {
@@ -351,15 +324,7 @@ impl Host {
             cwd: cwd.into(),
             factory: Arc::new(factory),
             units: HashMap::new(),
-            approvals: true,
         }
-    }
-
-    /// Run units without asking the client before approval-required tools. This
-    /// matches pi, which has no per-tool approval prompt.
-    pub fn without_approvals(mut self) -> Self {
-        self.approvals = false;
-        self
     }
 
     /// Open (creating if necessary) the session at `session_path` and start its
@@ -383,7 +348,6 @@ impl Host {
                 cwd,
                 self.factory.clone(),
                 Arc::new(Shared::default()),
-                self.approvals,
             );
             self.units.insert(id.clone(), unit);
         }

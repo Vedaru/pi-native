@@ -11,7 +11,6 @@
 use pi_providers::{AssistantBlock, ContentPart, ToolSpec, TranscriptMessage, Usage};
 use pi_tools::{Tool, ToolResult};
 use serde_json::Value;
-use std::rc::Rc;
 use std::sync::Arc;
 
 pub mod prompt;
@@ -232,38 +231,6 @@ impl Summarizer for ProviderSummarizer {
     }
 }
 
-/// Whether a tool may run.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Approval {
-    Allow,
-    Deny,
-}
-
-/// Decides whether approval-required tools may run. One generic hook — no
-/// per-tool branching in the loop. Not `Send`/`Sync`: a unit runs the agent on
-/// one thread, and the hook may hold protocol I/O.
-pub trait Approver {
-    fn approve(&self, tool: &str, input: &Value) -> Approval;
-}
-
-/// Trust everything (default; explicit trust is the caller's choice).
-pub struct AllowAll;
-
-impl Approver for AllowAll {
-    fn approve(&self, _tool: &str, _input: &Value) -> Approval {
-        Approval::Allow
-    }
-}
-
-/// Deny every approval-required tool (safe default for headless units).
-pub struct DenyAll;
-
-impl Approver for DenyAll {
-    fn approve(&self, _tool: &str, _input: &Value) -> Approval {
-        Approval::Deny
-    }
-}
-
 /// Runs turns over a transcript.
 pub struct Agent {
     provider: Box<dyn ModelProvider>,
@@ -271,7 +238,6 @@ pub struct Agent {
     system: String,
     messages: Vec<TranscriptMessage>,
     tool_context: ToolContext,
-    approver: Rc<dyn Approver>,
     max_iterations: usize,
     context_window: Option<usize>,
     context_bytes: Option<usize>,
@@ -297,7 +263,6 @@ impl Agent {
             system: system.into(),
             messages: Vec::new(),
             tool_context,
-            approver: Rc::new(AllowAll),
             max_iterations: 16,
             context_window: None,
             context_bytes: None,
@@ -323,24 +288,6 @@ impl Agent {
     pub fn with_max_iterations(mut self, max: usize) -> Self {
         self.max_iterations = max.max(1);
         self
-    }
-
-    /// Set the approval policy for tools that require approval.
-    pub fn with_approver(mut self, approver: Rc<dyn Approver>) -> Self {
-        self.approver = approver;
-        self
-    }
-
-    /// Replace the approval hook (e.g. after a protocol client connects).
-    pub fn set_approver(&mut self, approver: Rc<dyn Approver>) {
-        self.approver = approver;
-    }
-
-    /// Ask the configured approver about a tool invocation. Exposed so
-    /// out-of-band commands (e.g. the protocol `bash` command) take the same
-    /// approval path as tools run inside a turn.
-    pub fn approve(&self, tool: &str, input: &Value) -> Approval {
-        self.approver.approve(tool, input)
     }
 
     /// Bound retained context to the most recent `max_messages` entries.
@@ -634,11 +581,6 @@ impl Agent {
         let Some(tool) = self.tools.iter().find(|tool| tool.name() == call.name) else {
             return ToolResult::error(format!("unknown tool: {}", call.name));
         };
-        if tool.requires_approval()
-            && self.approver.approve(&call.name, &call.arguments) == Approval::Deny
-        {
-            return ToolResult::error(format!("{}: denied (no approval)", call.name));
-        }
         tool.run(&call.arguments, &self.tool_context)
     }
 

@@ -7,9 +7,9 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use pi_agent::prompt::{build_system_prompt, load_project_context_files, SystemPromptOptions};
 use pi_agent::{
-    openai_completions_provider, openai_responses_provider, Agent, AgentEvent, AllowAll, Approval,
-    Approver, AssistantTurn, DenyAll, FnProvider, ModelProvider, ProviderSummarizer,
-    SessionJournal, ThinkingFormat, ToolCall, DEFAULT_RESERVE_TOKENS,
+    openai_completions_provider, openai_responses_provider, Agent, AgentEvent, AssistantTurn,
+    FnProvider, ModelProvider, ProviderSummarizer, SessionJournal, ThinkingFormat, ToolCall,
+    DEFAULT_RESERVE_TOKENS,
 };
 use pi_cache::{
     clamp_openai_prompt_cache_key, get_cache_control, openai_completions_prompt_cache_key,
@@ -55,9 +55,6 @@ struct Cli {
     /// Bind address for `--gateway`.
     #[arg(long, default_value = "127.0.0.1:30142")]
     gateway_addr: String,
-    /// Require client approval before bash/write/edit. Off by default (matches pi).
-    #[arg(long)]
-    confirm_tools: bool,
     /// Load trigger definitions from a JSON array file (requires `--gateway`).
     #[arg(long)]
     triggers: Option<PathBuf>,
@@ -110,7 +107,7 @@ struct Cli {
     /// creates a file under the pi agent directory (`~/.pi/agent/sessions`).
     #[arg(long = "no-session")]
     no_session: bool,
-    /// Allow approval-required tools (bash/write/edit) without asking.
+    /// Allow tools to reach paths outside the working directory (opt-in).
     #[arg(long)]
     yolo: bool,
     /// Run a deterministic stress workload of N iterations.
@@ -220,7 +217,6 @@ fn main() {
             &cli.extensions,
             &cli.extension_allow,
             &cli.gateway_addr,
-            cli.confirm_tools,
             cli.triggers.as_deref(),
             cli.trigger_runs.as_deref(),
             cli.trigger_interval,
@@ -311,7 +307,6 @@ fn run_print(
     let mut agent = resolve_agent(
         config,
         yolo,
-        true,
         context_window,
         &system,
         extensions,
@@ -369,24 +364,6 @@ fn run_print(
 }
 
 /// Asks the terminal before running an approval-required tool.
-struct TerminalApprover;
-
-impl Approver for TerminalApprover {
-    fn approve(&self, tool: &str, input: &serde_json::Value) -> Approval {
-        print!("[approve] {tool} {input}? [y/N] ");
-        let _ = std::io::stdout().flush();
-        let mut answer = String::new();
-        if std::io::stdin().read_line(&mut answer).unwrap_or(0) == 0 {
-            return Approval::Deny;
-        }
-        if answer.trim().eq_ignore_ascii_case("y") {
-            Approval::Allow
-        } else {
-            Approval::Deny
-        }
-    }
-}
-
 /// A small workspace per tool so each has a deterministic input.
 fn stress_workspace(tool: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!("pi-stress-{}-{tool}", std::process::id()));
@@ -699,29 +676,20 @@ fn make_provider(config: &ProviderConfig) -> Box<dyn ModelProvider> {
 fn resolve_agent(
     config: &ProviderConfig,
     yolo: bool,
-    interactive: bool,
     context_window: usize,
     system: &str,
     extensions: &[PathBuf],
     extension_allow: &[String],
     cwd: &std::path::Path,
 ) -> Agent {
-    let approver: Rc<dyn Approver> = if yolo {
-        Rc::new(AllowAll)
-    } else if interactive {
-        Rc::new(TerminalApprover)
-    } else {
-        Rc::new(DenyAll)
-    };
     let mut tools = default_tools();
     let (extension_tools, commands) = load_extension_tools(extensions, extension_allow, cwd);
     tools.extend(extension_tools);
     // Tools are jailed to the working directory unless the caller explicitly
     // opted into unrestricted execution with `--yolo`.
     let tool_context = ToolContext::new(cwd).allow_outside(yolo);
-    let mut agent = Agent::new(make_provider(config), tools, system, tool_context)
-        .with_approver(approver)
-        .with_commands(commands);
+    let mut agent =
+        Agent::new(make_provider(config), tools, system, tool_context).with_commands(commands);
     if context_window > 0 {
         // Compaction summarizes dropped history with the model (pi's behavior).
         agent = agent
@@ -788,7 +756,6 @@ fn run_serve(
     let mut agent = resolve_agent(
         config,
         yolo,
-        false,
         context_window,
         &system,
         extensions,
@@ -797,16 +764,11 @@ fn run_serve(
     );
     let path = resolve_session(session, no_session, &cwd);
     let cwd_string = cwd.to_string_lossy().into_owned();
-    // Without `--yolo`, approval-required tools ask the connected client over
-    // the protocol (`ui_request` / `ui_response`). Session navigation commands
-    // (`get_tree`, `switch_session`, …) work on `--session`.
+    // Session navigation commands (`get_tree`, `switch_session`, …) work on
+    // `--session`; tools run without approval, matching pi.
     let reader = std::io::BufReader::new(std::io::stdin());
     let writer = std::io::stdout();
-    let result = if yolo {
-        pi_rpc::serve_session(&mut agent, path, &cwd_string, reader, writer, |_| {})
-    } else {
-        pi_rpc::serve_unit_session(&mut agent, path, &cwd_string, reader, writer, |_| {})
-    };
+    let result = pi_rpc::serve_session(&mut agent, path, &cwd_string, reader, writer, |_| {});
     let _ = result;
 }
 
@@ -820,7 +782,6 @@ fn run_gateway(
     extensions: &[PathBuf],
     extension_allow: &[String],
     addr: &str,
-    confirm_tools: bool,
     triggers: Option<&std::path::Path>,
     trigger_runs: Option<&std::path::Path>,
     trigger_interval: u64,
@@ -833,7 +794,6 @@ fn run_gateway(
         let system = system_prompt_for(path);
         resolve_agent(
             &config,
-            !confirm_tools,
             false,
             context_window,
             &system,
@@ -843,12 +803,6 @@ fn run_gateway(
         )
     };
     let host = pi_host::Host::new(cwd.to_string_lossy().to_string(), factory);
-    // pi has no per-tool approval; only ask when `--confirm-tools` opts in.
-    let host = if confirm_tools {
-        host
-    } else {
-        host.without_approvals()
-    };
     let listener = match std::net::TcpListener::bind(addr) {
         Ok(listener) => listener,
         Err(error) => {
@@ -1101,13 +1055,6 @@ impl Tool for PluginTool {
 
     fn input_schema(&self) -> serde_json::Value {
         self.parameters.clone()
-    }
-
-    /// Tools from extensions can run arbitrary plugin code (file/process/HTTP
-    /// side effects), so they always go through the same approval gate as
-    /// `bash`/`write`/`edit`.
-    fn requires_approval(&self) -> bool {
-        true
     }
 
     fn run(&self, input: &serde_json::Value, _ctx: &ToolContext) -> ToolResult {

@@ -83,7 +83,7 @@ OPENAI_API_KEY=… pi-native \
   --provider openai-completions --base-url https://api.deepseek.com \
   --model deepseek-flash --thinking-format deepseek -p "summarize README.md"
 
-# a unit: protocol on stdio (approval-required tools ask the client; --yolo allows all)
+# a unit: protocol on stdio
 pi-native --serve --provider openai-completions --base-url … --model …
 
 # drive a local unit from the terminal
@@ -107,17 +107,14 @@ and pi-web read, so their session browsers can list and resume native sessions.
 
 Tools are jailed to the working directory by default: absolute paths, `..`
 escapes, and symlinks that leave it are rejected, and `--yolo` is the explicit
-opt-out. `--serve` without `--yolo` routes both tool calls **and** the
-out-of-band `bash` command through the client approval (`ui_request`); a client
-that cannot write a `ui_response` cannot get a shell.
+opt-out. Tools run without approval, matching pi.
 
 Load pi extensions/plugins with `--extension <path>` (repeatable). Tools they
 register via `pi.registerTool` are exposed to the agent and run in QuickJS.
 Extensions are deny-by-default for ambient access: they may register tools,
 commands, and event handlers, but filesystem, process, and network access must
 be granted with `--extension-allow read,write,exec,http`, and file/process paths
-are jailed to the working directory. Extension tools always require approval
-(they are gated exactly like `bash`/`write`/`edit`).
+are jailed to the working directory.
 
 ```bash
 pi-native --serve --extension ./extensions/my-tool.ts
@@ -153,9 +150,7 @@ By default the SSE stream carries the native event envelope; add `?format=pi`
 to receive pi's canonical event stream (`agent_start`, `message_update`,
 `tool_execution_*`, `agent_settled`) through `pi_rpc::PiEventAdapter`.
 
-Units run tools without asking, matching pi. Pass `--confirm-tools` to route
-`bash`/`write`/`edit` (and approval-required extension tools) through a client
-`ui_request`/`ui_response` dialog instead.
+Units run tools without asking, matching pi.
 
 ### Triggers
 

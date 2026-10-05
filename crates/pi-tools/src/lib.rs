@@ -245,12 +245,6 @@ pub trait Tool {
     fn input_schema(&self) -> Value;
     fn run(&self, input: &Value, ctx: &ToolContext) -> ToolResult;
 
-    /// Whether running this tool needs explicit approval. Read-only tools do
-    /// not; anything that mutates the workspace or spawns a process does.
-    fn requires_approval(&self) -> bool {
-        false
-    }
-
     /// Whether the tool prefers constrained (strict) JSON-schema sampling,
     /// matching pi's `constrainedSampling` (`read`/`bash`/`edit`/`write`).
     fn strict(&self) -> bool {
@@ -381,10 +375,6 @@ impl Tool for BashTool {
         true
     }
 
-    fn requires_approval(&self) -> bool {
-        true
-    }
-
     fn description(&self) -> &'static str {
         "Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated to last 2000 lines or 50KB (whichever is hit first). If truncated, full output is saved to a temp file. Optionally provide a timeout in seconds."
     }
@@ -509,10 +499,6 @@ impl Tool for WriteTool {
         true
     }
 
-    fn requires_approval(&self) -> bool {
-        true
-    }
-
     fn description(&self) -> &'static str {
         "Write content to a file. Creates the file if it doesn't exist, overwrites if it does. Automatically creates parent directories."
     }
@@ -560,10 +546,6 @@ impl Tool for EditTool {
     }
 
     fn strict(&self) -> bool {
-        true
-    }
-
-    fn requires_approval(&self) -> bool {
         true
     }
 

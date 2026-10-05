@@ -12,8 +12,7 @@
 //! the unit's session file.
 
 use pi_agent::{
-    messages_from_session, transcript_values, Agent, AgentError, AgentEvent, Approval, Approver,
-    SessionJournal,
+    messages_from_session, transcript_values, Agent, AgentError, AgentEvent, SessionJournal,
 };
 use pi_session::SessionFile;
 use serde::{Deserialize, Serialize};
@@ -425,12 +424,6 @@ fn apply_command(
             command,
             exclude_from_context,
         } => {
-            // Out-of-band commands take the same approval path as a tool call;
-            // otherwise anyone who can write to the protocol fd has a shell.
-            let approval = serde_json::json!({ "command": command });
-            if agent.approve("bash", &approval) == Approval::Deny {
-                return Some(failure(id, "bash", "bash: denied (no approval)"));
-            }
             let result = pi_tools::shell::run_shell(&command, Path::new(cwd), None);
             let output = result.output;
             let exit_code = result.exit_code;
@@ -932,12 +925,10 @@ fn build_tree(entries: &[serde_json::Value]) -> (Vec<serde_json::Value>, Option<
     (tree, leaf_id)
 }
 
-/// A reader/writer pair shared between the serve loop and the approval hook.
+/// A reader/writer pair for the serve loop.
 struct SharedIo<R, W> {
     reader: std::cell::RefCell<R>,
     writer: std::cell::RefCell<W>,
-    /// Requests read while an approval was pending; replayed before more input.
-    pending: std::cell::RefCell<std::collections::VecDeque<(Option<String>, Request)>>,
 }
 
 impl<R: std::io::BufRead, W: std::io::Write> SharedIo<R, W> {
@@ -949,21 +940,9 @@ impl<R: std::io::BufRead, W: std::io::Write> SharedIo<R, W> {
         }
     }
 
-    /// Put requests read during an approval back, in order, so the serve loop
-    /// handles them instead of dropping them.
-    fn requeue_all(&self, items: Vec<(Option<String>, Request)>) {
-        let mut pending = self.pending.borrow_mut();
-        for item in items {
-            pending.push_back(item);
-        }
-    }
-
     /// The next valid request with its optional correlation id, or `None` at end
     /// of input. Invalid lines emit an `error` event and are skipped.
     fn next_request(&self) -> Option<(Option<String>, Request)> {
-        if let Some(item) = self.pending.borrow_mut().pop_front() {
-            return Some(item);
-        }
         loop {
             let mut line = String::new();
             match self.reader.borrow_mut().read_line(&mut line) {
@@ -1067,56 +1046,16 @@ pub fn serve_with<R: std::io::BufRead, W: std::io::Write, F: FnMut(&Agent)>(
     let io = std::rc::Rc::new(SharedIo {
         reader: std::cell::RefCell::new(reader),
         writer: std::cell::RefCell::new(writer),
-        pending: std::cell::RefCell::new(std::collections::VecDeque::new()),
     });
     let mut session = SessionState::empty();
     drive(agent, &io, &mut session, ".", after_turn);
     Ok(())
 }
 
-/// Serve a unit whose approval-required tools ask the client.
-pub fn serve_unit<R: std::io::BufRead + 'static, W: std::io::Write + 'static>(
-    agent: &mut Agent,
-    reader: R,
-    writer: W,
-) -> Result<(), AgentError> {
-    serve_unit_with(agent, reader, writer, |_| {})
-}
-
-/// Like [`serve_unit`], but calls `after_turn` once a prompt finishes.
-pub fn serve_unit_with<
-    R: std::io::BufRead + 'static,
-    W: std::io::Write + 'static,
-    F: FnMut(&Agent),
->(
-    agent: &mut Agent,
-    reader: R,
-    writer: W,
-    after_turn: F,
-) -> Result<(), AgentError> {
-    serve_unit_session(agent, None, ".", reader, writer, after_turn)
-}
-
-/// Serve a unit with protocol approvals and a session file.
+/// Serve a unit with a session file: seeds the transcript, persists each turn,
+/// and answers the session navigation commands (`get_tree`, `switch_session`, …).
 ///
-/// Seeds the transcript from `session_path` when given, persists each turn, and
-/// answers the session navigation commands (`get_tree`, `switch_session`, …).
-pub fn serve_unit_session<
-    R: std::io::BufRead + 'static,
-    W: std::io::Write + 'static,
-    F: FnMut(&Agent),
->(
-    agent: &mut Agent,
-    session_path: Option<PathBuf>,
-    cwd: &str,
-    reader: R,
-    writer: W,
-    after_turn: F,
-) -> Result<(), AgentError> {
-    serve_session_inner(agent, session_path, cwd, true, reader, writer, after_turn)
-}
-
-/// Like [`serve_unit_session`] but keeps the agent's approver (e.g. allow-all).
+/// Tools run without approval, matching pi.
 pub fn serve_session<
     R: std::io::BufRead + 'static,
     W: std::io::Write + 'static,
@@ -1129,87 +1068,13 @@ pub fn serve_session<
     writer: W,
     after_turn: F,
 ) -> Result<(), AgentError> {
-    serve_session_inner(agent, session_path, cwd, false, reader, writer, after_turn)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn serve_session_inner<
-    R: std::io::BufRead + 'static,
-    W: std::io::Write + 'static,
-    F: FnMut(&Agent),
->(
-    agent: &mut Agent,
-    session_path: Option<PathBuf>,
-    cwd: &str,
-    approvals: bool,
-    reader: R,
-    writer: W,
-    after_turn: F,
-) -> Result<(), AgentError> {
     let io = std::rc::Rc::new(SharedIo {
         reader: std::cell::RefCell::new(reader),
         writer: std::cell::RefCell::new(writer),
-        pending: std::cell::RefCell::new(std::collections::VecDeque::new()),
     });
-    if approvals {
-        agent.set_approver(std::rc::Rc::new(ProtocolApprover {
-            io: io.clone(),
-            counter: std::cell::Cell::new(0),
-        }));
-    }
     let mut session = SessionState::from_path(session_path, cwd, agent);
     drive(agent, &io, &mut session, cwd, after_turn);
     Ok(())
-}
-
-/// Asks the connected client before running an approval-required tool.
-struct ProtocolApprover<R, W> {
-    io: std::rc::Rc<SharedIo<R, W>>,
-    counter: std::cell::Cell<u64>,
-}
-
-impl<R: std::io::BufRead, W: std::io::Write> Approver for ProtocolApprover<R, W> {
-    fn approve(&self, tool: &str, input: &serde_json::Value) -> Approval {
-        let id = format!("ui-{}", self.counter.get());
-        self.counter.set(self.counter.get() + 1);
-        self.io.write(&Event::UiRequest {
-            id: id.clone(),
-            kind: "confirm".to_string(),
-            prompt: format!("Run {tool} with {input}?"),
-            options: vec!["allow".to_string(), "deny".to_string()],
-        });
-        let mut deferred: Vec<(Option<String>, Request)> = Vec::new();
-        while let Some((request_id, request)) = self.io.next_request() {
-            if let Request::UiResponse {
-                id: response_id,
-                value,
-            } = request
-            {
-                if response_id == id {
-                    self.io.requeue_all(deferred);
-                    let text = value.as_str().map(str::to_ascii_lowercase);
-                    let allow = value.as_bool().unwrap_or(false)
-                        || matches!(text.as_deref(), Some("y" | "yes" | "allow" | "true"));
-                    return if allow {
-                        Approval::Allow
-                    } else {
-                        Approval::Deny
-                    };
-                }
-                deferred.push((
-                    request_id,
-                    Request::UiResponse {
-                        id: response_id,
-                        value,
-                    },
-                ));
-            } else {
-                deferred.push((request_id, request));
-            }
-        }
-        self.io.requeue_all(deferred);
-        Approval::Deny
-    }
 }
 
 #[cfg(test)]

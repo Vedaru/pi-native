@@ -95,21 +95,17 @@ authoritative final value for the turn and does not duplicate the deltas.
 
 `ui_request` carries a `kind` (`confirm`/`select`/`input`/`notify`), a prompt, and
 up to a few options. The client renders it however it likes and replies with
-`ui_response { id, value }`. This is how a headless unit asks a human something
-without a terminal UI: approvals, choices, and free text all go through the same
-message.
+`ui_response { id, value }`. Extensions can use it to ask a human something
+without a terminal UI (approvals, choices, and free text go through the same
+message); tools themselves do not prompt — they run as in pi.
 
 ## Notes
 
 - `serve` / `serve_with` in `pi-rpc` read requests line by line and **stream**
   events as the turn produces them (no whole-turn buffering); `serve_with` runs
   a hook after each prompt (e.g. session persistence).
-- `serve_unit` backs approvals with the protocol: an approval-required tool
-  emits `ui_request { kind: "confirm" }` and blocks the turn until the matching
-  `ui_response` arrives. `--serve` uses it unless `--yolo`.
-- Requests that arrive while an approval is pending (for example a
-  `get_state` from a polling UI) are queued and replayed once the approval is
-  answered; they are not consumed and dropped.
+- `serve_session` serves a unit with a session file and runs tools without
+  approval, matching pi.
 - `get_state` returns the unit's resolved context (`system` + `transcript` in
   pi's message shape), so a UI service can render it without owning the session.
 - The memory benchmark's `pi-native --rpc` idle mode is separate from this
