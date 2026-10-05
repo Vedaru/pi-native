@@ -47,6 +47,14 @@ def _load_memory():
     return module
 
 
+def _load_merge_queue():
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "swarm_merge_queue.py")
+    spec = importlib.util.spec_from_file_location("swarm_merge_queue", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def _load_collision():
     path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "swarm_collision.py")
     spec = importlib.util.spec_from_file_location("swarm_collision", path)
@@ -57,6 +65,7 @@ def _load_collision():
 
 memory = _load_memory()
 collision = _load_collision()
+merge_queue = _load_merge_queue()
 
 GATEWAY = os.environ.get("SWARM_GATEWAY", "http://127.0.0.1:30142")
 POLL_SECONDS = 20
@@ -815,6 +824,47 @@ def collision_gate(
     return check_collisions(intents, candidate, terminal_issues=terminal_issues or set())
 
 
+def merge_queue_effects() -> tuple[set[str], set[str]]:
+    """Issues the merge queue has finished with, split by outcome.
+
+    Returns ``(merged, failed)``. A `merged` issue is terminal and must not be
+    re-dispatched; a `failed` one re-opens its claim so the conductor can send a
+    fix. The queue lives in `scripts/swarm_merge_queue.py` (VED-377).
+    """
+    try:
+        queue = merge_queue.load_queue()
+    except Exception:
+        return set(), set()
+    merged: set[str] = set()
+    failed: set[str] = set()
+    for entry in queue.get("entries", []):
+        if entry.get("status") == merge_queue.STATUS_MERGED:
+            merged.add(entry.get("issue"))
+        elif entry.get("status") in (merge_queue.STATUS_FAILED, merge_queue.STATUS_CONFLICT):
+            failed.add(entry.get("issue"))
+    return merged, failed
+
+
+def apply_merge_queue_effects(state: dict, merged: set[str], failed: set[str]) -> int:
+    """Mark merged issues terminal and re-open failed ones in the claim table."""
+    changed = 0
+    for identifier in merged:
+        record = state.setdefault(identifier, {"attempts": 0})
+        if not record.get("terminal"):
+            record["terminal"] = True
+            record["status"] = "merged"
+            changed += 1
+    for identifier in failed:
+        record = state.get(identifier)
+        # Re-open so the conductor can dispatch a fix; keep attempts so it is
+        # still bounded by MAX_ATTEMPTS.
+        if record and record.get("terminal"):
+            record["terminal"] = False
+            record["status"] = "queued"
+            changed += 1
+    return changed
+
+
 def main() -> None:
     """Conductor loop.
 
@@ -852,8 +902,12 @@ def main() -> None:
                 cleaned_up = True
             units = orchestrator_module.fetch_units()
             now = time.time()
-            units = orchestrator_module.fetch_units()
-            now = time.time()
+            # Fold the merge queue's outcome into the claim table (VED-377): a
+            # merged issue is terminal and never re-dispatched; a failed or
+            # conflicted one re-opens (keeping its attempt count) for a fix.
+            merged, failed = merge_queue_effects()
+            if orchestrator.apply_merge_outcomes(merged, failed):
+                orchestrator.save(orchestrator_module.STATE_PATH)
             # Cards that left the board release their intent so a finished card
             # never blocks new work (VED-375 AC8/AC11).
             terminal = terminal_issues_from_board()

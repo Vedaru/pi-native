@@ -659,5 +659,43 @@ class MergeQueueIntegrationTests(unittest.TestCase):
         state = {"VED-1": {"attempts": 1, "status": "merged", "terminal": True}}
         self.assertEqual(conductor.apply_merge_queue_effects(state, {"VED-1"}, set()), 0)
 
+
+
+class MergeQueueIntegrationTests(unittest.TestCase):
+    def test_effects_split_merged_and_failed(self):
+        import unittest.mock as mock
+
+        queue = {
+            "seq": 3,
+            "entries": [
+                {"issue": "VED-1", "status": "merged"},
+                {"issue": "VED-2", "status": "failed"},
+                {"issue": "VED-3", "status": "conflict"},
+                {"issue": "VED-4", "status": "queued"},
+            ],
+        }
+        with mock.patch.object(conductor.merge_queue, "load_queue", return_value=queue):
+            merged, failed = conductor.merge_queue_effects()
+        self.assertEqual(merged, {"VED-1"})
+        self.assertEqual(failed, {"VED-2", "VED-3"})
+
+    def test_merged_issue_becomes_terminal(self):
+        state = {"VED-1": {"attempts": 1, "status": "dispatched"}}
+        changed = conductor.apply_merge_queue_effects(state, {"VED-1"}, set())
+        self.assertEqual(changed, 1)
+        self.assertTrue(state["VED-1"]["terminal"])
+        self.assertEqual(state["VED-1"]["status"], "merged")
+
+    def test_failed_issue_reopens_a_terminal_claim(self):
+        state = {"VED-2": {"attempts": 2, "status": "done", "terminal": True}}
+        changed = conductor.apply_merge_queue_effects(state, set(), {"VED-2"})
+        self.assertEqual(changed, 1)
+        self.assertFalse(state["VED-2"]["terminal"])
+        self.assertEqual(state["VED-2"]["status"], "queued")
+
+    def test_already_terminal_merge_is_idempotent(self):
+        state = {"VED-1": {"attempts": 1, "status": "merged", "terminal": True}}
+        self.assertEqual(conductor.apply_merge_queue_effects(state, {"VED-1"}, set()), 0)
+
 if __name__ == "__main__":
     unittest.main()

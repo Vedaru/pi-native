@@ -36,16 +36,11 @@ jobs:
       - name: Swarm unit tests (stdlib, no build)
         run: |
           python3 scripts/test_swarm_conductor.py
+          python3 scripts/test_swarm_orchestrator.py
+          python3 scripts/test_swarm_watchdog.py
+          python3 scripts/test_swarm_columns.py
+          python3 scripts/test_swarm_dag.py
           python3 scripts/test_swarm_collision.py
-          python3 scripts/test_mem_gate.py
-
-  swarm-tests:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Swarm unit tests (stdlib, no build)
-        run: |
-          python3 scripts/test_swarm_conductor.py
           python3 scripts/test_swarm_merge_queue.py
           python3 scripts/test_mem_gate.py
 
