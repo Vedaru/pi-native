@@ -20,5 +20,6 @@ pi-gateway = { path = "../pi-gateway" }
 pi-triggers = { path = "../pi-triggers" }
 pi-session = { path = "../pi-session" }
 pi-plugins = { path = "../pi-plugins" }
+pi-tui = { path = "../pi-tui" }
 serde_json = { workspace = true }
 clap = { workspace = true }

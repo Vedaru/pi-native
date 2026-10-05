@@ -1123,6 +1123,7 @@ dependencies = [
  "pi-session",
  "pi-tools",
  "pi-triggers",
+ "pi-tui",
  "serde_json",
 ]
 

@@ -922,18 +922,43 @@ fn run_client(
     let mut server_out = BufReader::new(child.stdout.take().expect("server stdout"));
     let stdin = std::io::stdin();
 
-    eprintln!("pi-native client. Type a prompt; Ctrl-D to quit.");
+    // Interactive mode renders through the native renderer: the transcript and
+    // editor are composed into a cell buffer and diffed frame to frame, so a
+    // long transcript is not re-emitted when only the editor line changes.
+    let mut screen = pi_tui::Screen::new();
+    screen.push_text(
+        "pi-native client. Type a prompt; Ctrl-D to quit.",
+        dim_style(),
+    );
+    let (mut width, mut height) = terminal_size();
+    let mut renderer = pi_tui::Renderer::new();
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    render_frame(&mut out, &mut renderer, &screen, width, height);
+
     loop {
-        print!("> ");
-        let _ = std::io::stdout().flush();
+        screen.set_editor(String::new());
         let mut line = String::new();
         if stdin.read_line(&mut line).unwrap_or(0) == 0 {
             break;
         }
+        // A window resize between prompts is picked up on the next frame.
+        let (next_width, next_height) = terminal_size();
+        if (next_width, next_height) != (width, height) {
+            width = next_width;
+            height = next_height;
+            renderer.invalidate();
+        }
         let text = line.trim();
         if text.is_empty() {
+            render_frame(&mut out, &mut renderer, &screen, width, height);
             continue;
         }
+        screen.push_line(pi_tui::TranscriptLine::styled(
+            format!("> {text}"),
+            dim_style(),
+        ));
+        render_frame(&mut out, &mut renderer, &screen, width, height);
         if send(
             &mut server_in,
             &serde_json::json!({ "type": "prompt", "text": text }),
@@ -942,11 +967,64 @@ fn run_client(
         {
             break;
         }
-        if !pump(&mut server_out, &mut server_in, &stdin) {
+        if !pump(
+            &mut server_out,
+            &mut server_in,
+            &stdin,
+            &mut screen,
+            &mut renderer,
+            &mut out,
+            width,
+            height,
+        ) {
             break;
         }
     }
     let _ = child.kill();
+}
+
+/// Dim style for secondary chrome (prompt echo, hint line).
+fn dim_style() -> pi_tui::Style {
+    pi_tui::Style {
+        dim: true,
+        ..pi_tui::Style::default()
+    }
+}
+
+/// Best-effort terminal size, falling back to a conventional 80x24.
+fn terminal_size() -> (usize, usize) {
+    // `stty size` prints "rows cols"; unavailable when not attached to a TTY.
+    let output = ProcessCommand::new("stty").arg("size").output();
+    if let Ok(output) = output {
+        if output.status.success() {
+            let text = String::from_utf8_lossy(&output.stdout);
+            let mut parts = text.split_whitespace();
+            if let (Some(rows), Some(cols)) = (parts.next(), parts.next()) {
+                if let (Ok(rows), Ok(cols)) = (rows.parse::<usize>(), cols.parse::<usize>()) {
+                    if rows > 0 && cols > 0 {
+                        return (cols, rows);
+                    }
+                }
+            }
+        }
+    }
+    (80, 24)
+}
+
+/// Emit one frame through the differential renderer and park the cursor on the
+/// editor caret.
+fn render_frame(
+    out: &mut impl Write,
+    renderer: &mut pi_tui::Renderer,
+    screen: &pi_tui::Screen,
+    width: usize,
+    height: usize,
+) {
+    let frame = screen.compose(width, height);
+    let delta = renderer.render(frame.buffer);
+    let _ = out.write_all(delta.as_bytes());
+    let _ = out.write_all(pi_tui::cursor_sequence(frame.cursor).as_bytes());
+    let _ = out.flush();
 }
 
 fn send(writer: &mut impl Write, value: &serde_json::Value) -> std::io::Result<()> {
@@ -954,8 +1032,19 @@ fn send(writer: &mut impl Write, value: &serde_json::Value) -> std::io::Result<(
     writer.flush()
 }
 
-/// Read events until `done`, answering any generic UI request.
-fn pump(reader: &mut impl BufRead, writer: &mut impl Write, stdin: &std::io::Stdin) -> bool {
+/// Read events until `done`, appending them to the transcript and re-rendering,
+/// and answering any generic UI request.
+#[allow(clippy::too_many_arguments)]
+fn pump(
+    reader: &mut impl BufRead,
+    writer: &mut impl Write,
+    stdin: &std::io::Stdin,
+    screen: &mut pi_tui::Screen,
+    renderer: &mut pi_tui::Renderer,
+    out: &mut impl Write,
+    width: usize,
+    height: usize,
+) -> bool {
     let mut buffer = String::new();
     loop {
         buffer.clear();
@@ -970,29 +1059,48 @@ fn pump(reader: &mut impl BufRead, writer: &mut impl Write, stdin: &std::io::Std
         let Ok(event) = serde_json::from_str::<serde_json::Value>(trimmed) else {
             continue;
         };
+        let mut dirty = true;
         match event["type"].as_str() {
-            Some("assistant_text") => println!("{}", event["text"].as_str().unwrap_or("")),
-            Some("tool_start") => {
-                eprintln!("[tool {} start]", event["name"].as_str().unwrap_or(""))
-            }
-            Some("tool_end") => eprintln!(
-                "[tool {} {}]",
-                event["name"].as_str().unwrap_or(""),
-                if event["is_error"].as_bool().unwrap_or(false) {
-                    "error"
-                } else {
-                    "ok"
-                }
+            Some("assistant_text") => screen.push_text(
+                event["text"].as_str().unwrap_or(""),
+                pi_tui::Style::default(),
             ),
-            Some("done") => return true,
-            Some("error") => eprintln!("error: {}", event["message"].as_str().unwrap_or("")),
+            Some("tool_start") => screen.push_line(pi_tui::TranscriptLine::styled(
+                format!("[tool {} start]", event["name"].as_str().unwrap_or("")),
+                dim_style(),
+            )),
+            Some("tool_end") => screen.push_line(pi_tui::TranscriptLine::styled(
+                format!(
+                    "[tool {} {}]",
+                    event["name"].as_str().unwrap_or(""),
+                    if event["is_error"].as_bool().unwrap_or(false) {
+                        "error"
+                    } else {
+                        "ok"
+                    }
+                ),
+                dim_style(),
+            )),
+            Some("error") => screen.push_line(pi_tui::TranscriptLine::styled(
+                format!("error: {}", event["message"].as_str().unwrap_or("")),
+                pi_tui::Style {
+                    fg: Some(pi_tui::Color::Ansi(1)),
+                    ..pi_tui::Style::default()
+                },
+            )),
             Some("ui_request") => {
                 let kind = event["kind"].as_str().unwrap_or("input");
                 let prompt = event["prompt"].as_str().unwrap_or("");
-                print!("[{kind}] {prompt} ");
-                let _ = std::io::stdout().flush();
+                // Show the dialog, then answer it on the next stdin line. The
+                // cursor is parked on the input value for a real TTY driver.
+                screen.set_dialog(pi_tui::Dialog::Input {
+                    title: format!("[{kind}] {prompt}"),
+                    value: String::new(),
+                });
+                render_frame(out, renderer, screen, width, height);
                 let mut answer = String::new();
                 let _ = stdin.read_line(&mut answer);
+                screen.clear_dialog();
                 let response = serde_json::json!({
                     "type": "ui_response",
                     "id": event["id"],
@@ -1000,7 +1108,14 @@ fn pump(reader: &mut impl BufRead, writer: &mut impl Write, stdin: &std::io::Std
                 });
                 let _ = send(writer, &response);
             }
-            _ => {}
+            Some("done") => {
+                render_frame(out, renderer, screen, width, height);
+                return true;
+            }
+            _ => dirty = false,
+        }
+        if dirty {
+            render_frame(out, renderer, screen, width, height);
         }
     }
 }

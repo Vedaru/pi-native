@@ -15,6 +15,7 @@ pub mod dialog;
 pub mod editor;
 pub mod image;
 pub mod render;
+pub mod screen;
 
 pub use buffer::{Buffer, Cell, Color, Style};
 pub use dialog::{Dialog, DialogOutcome, DialogState};
@@ -25,6 +26,7 @@ pub use image::{
     ImageProtocol, RenderOptions, RenderedImage,
 };
 pub use render::{diff, Renderer};
+pub use screen::{cursor_sequence, Frame, Screen, TranscriptLine};
 
 #[cfg(test)]
 #[path = "../tests/unit/lib.rs"]

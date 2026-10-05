@@ -395,3 +395,105 @@ fn image_fallback_mentions_type_and_size() {
     );
     assert_eq!(fallback, "[Image: cat.png [image/png] 4x3]");
 }
+
+// ---- interactive screen composition (VED-307) ----
+
+use crate::screen::{cursor_sequence, Screen, TranscriptLine};
+
+fn row_string(buffer: &crate::buffer::Buffer, y: usize) -> String {
+    (0..buffer.width())
+        .map(|x| buffer.cell(x, y).and_then(|cell| cell.ch).unwrap_or(' '))
+        .collect::<String>()
+        .trim_end()
+        .to_string()
+}
+
+#[test]
+fn screen_composes_the_editor_on_the_bottom_row() {
+    let mut screen = Screen::new();
+    screen.set_editor("hello");
+    let frame = screen.compose(20, 5);
+    assert_eq!(row_string(&frame.buffer, 4), "> hello");
+    assert_eq!(frame.cursor, Some((7, 4)));
+}
+
+#[test]
+fn screen_cursor_tracks_editing() {
+    let mut screen = Screen::new();
+    screen.insert('a');
+    screen.insert('b');
+    screen.insert('c');
+    screen.move_cursor(-1);
+    let frame = screen.compose(20, 3);
+    // "> abc", cursor one grapheme back is after 'b'.
+    assert_eq!(row_string(&frame.buffer, 2), "> abc");
+    assert_eq!(frame.cursor, Some((4, 2)));
+}
+
+#[test]
+fn screen_backspace_removes_last_grapheme() {
+    let mut screen = Screen::new();
+    screen.insert_str("ab");
+    screen.backspace();
+    assert_eq!(screen.editor(), "a");
+    assert_eq!(screen.cursor(), 1);
+    screen.backspace();
+    screen.backspace();
+    assert_eq!(screen.editor(), "");
+}
+
+#[test]
+fn screen_transcript_fills_rows_above_the_editor() {
+    let mut screen = Screen::new();
+    screen.push_line(TranscriptLine::new("first"));
+    screen.push_line(TranscriptLine::new("second"));
+    let frame = screen.compose(20, 5);
+    assert_eq!(row_string(&frame.buffer, 0), "first");
+    assert_eq!(row_string(&frame.buffer, 1), "second");
+    assert_eq!(row_string(&frame.buffer, 4), ">");
+}
+
+#[test]
+fn screen_shows_the_tail_of_a_long_transcript() {
+    let mut screen = Screen::new();
+    for index in 0..10 {
+        screen.push_line(TranscriptLine::new(format!("line{index}")));
+    }
+    let frame = screen.compose(20, 4);
+    // The last three transcript rows plus the editor are visible.
+    assert_eq!(row_string(&frame.buffer, 0), "line7");
+    assert_eq!(row_string(&frame.buffer, 1), "line8");
+    assert_eq!(row_string(&frame.buffer, 2), "line9");
+    assert_eq!(row_string(&frame.buffer, 3), ">");
+}
+
+#[test]
+fn screen_scroll_reveals_earlier_lines() {
+    let mut screen = Screen::new();
+    for index in 0..10 {
+        screen.push_line(TranscriptLine::new(format!("line{index}")));
+    }
+    screen.scroll_up(4);
+    let frame = screen.compose(20, 3);
+    assert_eq!(row_string(&frame.buffer, 0), "line4");
+    assert_eq!(row_string(&frame.buffer, 1), "line5");
+}
+
+#[test]
+fn screen_renders_an_open_dialog_above_the_editor() {
+    let mut screen = Screen::new();
+    screen.set_dialog(crate::dialog::Dialog::Confirm {
+        title: "Run".into(),
+        message: "bash?".into(),
+    });
+    let frame = screen.compose(40, 4);
+    assert!(row_string(&frame.buffer, 2).contains("Run bash?"));
+    assert_eq!(row_string(&frame.buffer, 3), ">");
+}
+
+#[test]
+fn cursor_sequence_moves_to_a_one_based_cell() {
+    assert_eq!(cursor_sequence(Some((0, 0))), "\x1b[1;1H");
+    assert_eq!(cursor_sequence(Some((4, 2))), "\x1b[3;5H");
+    assert_eq!(cursor_sequence(None), "");
+}
