@@ -31,13 +31,14 @@ Commands reply with pi's envelope: `{"type":"response","id":?,"command":?,
 | `new_session` | `parentSession`? | Start an empty session (new file) |
 | `switch_session` | `sessionPath` | Load a session file and continue (resume) |
 | `set_session_name` | `name` | Name the current session |
-| `steer` / `follow_up` | `message` | Queue a message for the next prompt |
-| `abort`, `clear_queue`, `abort_retry`, `abort_bash` | — | No-ops for a synchronous unit |
+| `steer` / `follow_up` | `message` | Queue a message for the next prompt (steering before the model call, follow-up after the turn) |
+| `abort`, `clear_queue`, `abort_retry`, `abort_bash` | — | `abort`/`abort_retry`/`abort_bash` are no-ops for a synchronous unit; `clear_queue` drains both queues |
 | `set_model`, `cycle_model`, `get_available_models` | `provider`, `modelId` | Record the active model (the provider is fixed at startup) |
 | `set_thinking_level`, `cycle_thinking_level`, `get_available_thinking_levels` | `level` | Thinking level `off`…`max` |
-| `set_steering_mode`, `set_follow_up_mode` | `mode` | `all` or `one-at-a-time` |
-| `compact` | `customInstructions`? | Force compaction now |
-| `set_auto_compaction`, `set_auto_retry` | `enabled` | Record the flag |
+| `set_steering_mode`, `set_follow_up_mode` | `mode` | `all` or `one-at-a-time`; any other value returns `success:false` |
+| `compact` | `customInstructions`? | Force compaction now (ignores `auto_compaction`) |
+| `set_auto_compaction` | `enabled` | Enable/disable automatic threshold compaction for this session |
+| `set_auto_retry` | `enabled` | Enable/disable the transport retry loop (429/5xx) for this session |
 | `bash` | `command`, `excludeFromContext`? | Run a shell command out of band |
 | `export_html` | `outputPath`? | Write the session to an HTML file |
 | `fork`, `clone`, `get_fork_messages` | `entryId` | Branch/duplicate the session |
@@ -45,8 +46,13 @@ Commands reply with pi's envelope: `{"type":"response","id":?,"command":?,
 | `ui_response` | `id`, `value` | Answer a `ui_request` |
 
 This covers pi's 33 RPC commands. `set_model` records the model but does not swap
-the live provider; `steer`/`follow_up` are delivered with the next prompt (there
-is no concurrent run to steer); `get_commands` returns built-ins only.
+the live provider, and `abort`/`abort_retry`/`abort_bash` are no-ops for a
+synchronous unit; `get_commands` returns built-ins only. The remaining control
+flags are **honoured**, not merely recorded: `set_auto_compaction` gates the
+agent's threshold compaction, `set_auto_retry` gates the transport retry loop,
+and `set_steering_mode`/`set_follow_up_mode` control whether a prompt delivers
+all queued messages or one at a time (`steer` before the model call, `follow_up`
+after the turn). An unsupported mode returns `success:false` with an `error`.
 
 ## Events (unit to client)
 

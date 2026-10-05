@@ -478,6 +478,223 @@ fn out_of_band_bash_runs_without_approval() {
 }
 
 #[test]
+fn steer_and_follow_up_are_cleared_into_separate_lists() {
+    let mut agent = agent_with(Vec::new());
+    let input = concat!(
+        "{\"type\":\"steer\",\"message\":\"s1\"}\n",
+        "{\"type\":\"follow_up\",\"message\":\"f1\"}\n",
+        "{\"type\":\"steer\",\"message\":\"s2\"}\n",
+        "{\"type\":\"follow_up\",\"message\":\"f2\"}\n",
+        "{\"type\":\"clear_queue\"}\n",
+    );
+    let buf = SessionBuf(std::rc::Rc::new(std::cell::RefCell::new(Vec::new())));
+    serve_session(
+        &mut agent,
+        None,
+        ".",
+        std::io::Cursor::new(input.as_bytes().to_vec()),
+        buf.clone(),
+        |_| {},
+    )
+    .expect("serves");
+    let text = String::from_utf8(buf.0.borrow().clone()).unwrap();
+    let line = text
+        .lines()
+        .find(|line| line.contains("\"command\":\"clear_queue\""))
+        .expect("clear_queue response");
+    let value: Value = serde_json::from_str(line).expect("json");
+    assert_eq!(value["success"], json!(true));
+    assert_eq!(value["data"]["steering"], json!(["s1", "s2"]));
+    assert_eq!(value["data"]["followUp"], json!(["f1", "f2"]));
+}
+
+#[test]
+fn steering_is_delivered_before_the_turn_and_follow_up_after() {
+    // The provider records the user messages it sees each turn, so we can prove
+    // steering precedes the reply and follow-up starts a new run.
+    #[derive(Clone)]
+    struct SharedBuf(std::rc::Rc<std::cell::RefCell<Vec<u8>>>);
+    impl std::io::Write for SharedBuf {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.borrow_mut().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let seen_for_provider = std::sync::Arc::clone(&seen);
+    let provider = pi_agent::FnProvider::new(move |_index| {
+        seen_for_provider.lock().expect("lock").push("turn".into());
+        AssistantTurn {
+            text: "reply".into(),
+            stop_reason: Some("end_turn".into()),
+            ..Default::default()
+        }
+    });
+    let mut agent = Agent::new(
+        Box::new(provider),
+        Vec::new(),
+        "system",
+        ToolContext::new(std::env::temp_dir()),
+    );
+    let input = concat!(
+        "{\"type\":\"steer\",\"message\":\"steer-1\"}\n",
+        "{\"type\":\"follow_up\",\"message\":\"follow-1\"}\n",
+        "{\"type\":\"prompt\",\"text\":\"go\"}\n",
+    );
+    let buf = SharedBuf(std::rc::Rc::new(std::cell::RefCell::new(Vec::new())));
+    serve_session(
+        &mut agent,
+        None,
+        ".",
+        std::io::Cursor::new(input.as_bytes().to_vec()),
+        buf.clone(),
+        |_| {},
+    )
+    .expect("serves");
+
+    // The prompt + steering run first, then the follow-up runs as a new turn.
+    assert_eq!(seen.lock().unwrap().len(), 2, "follow-up did not run");
+    let messages: Vec<String> = agent
+        .messages()
+        .iter()
+        .filter_map(|message| match message {
+            pi_providers::TranscriptMessage::UserParts(parts) => {
+                parts.iter().find_map(|part| match part {
+                    pi_providers::ContentPart::Text { text } => Some(text.clone()),
+                    _ => None,
+                })
+            }
+            _ => None,
+        })
+        .collect();
+    // Ordering in the transcript: prompt, steering, follow-up.
+    assert_eq!(messages, vec!["go", "steer-1", "follow-1"]);
+}
+
+#[test]
+fn one_at_a_time_steering_leaves_the_rest_queued() {
+    let mut agent = agent_with(vec![AssistantTurn::default()]);
+    let input = concat!(
+        "{\"type\":\"set_steering_mode\",\"mode\":\"one-at-a-time\"}\n",
+        "{\"type\":\"steer\",\"message\":\"s1\"}\n",
+        "{\"type\":\"steer\",\"message\":\"s2\"}\n",
+        "{\"type\":\"prompt\",\"text\":\"go\"}\n",
+        "{\"type\":\"clear_queue\"}\n",
+    );
+    let buf = SessionBuf(std::rc::Rc::new(std::cell::RefCell::new(Vec::new())));
+    serve_session(
+        &mut agent,
+        None,
+        ".",
+        std::io::Cursor::new(input.as_bytes().to_vec()),
+        buf.clone(),
+        |_| {},
+    )
+    .expect("serves");
+    let text = String::from_utf8(buf.0.borrow().clone()).unwrap();
+    // Only s1 was delivered; s2 is still queued. The transcript holds the
+    // prompt and the delivered steering message (the reply is empty).
+    assert_eq!(agent.messages().len(), 2, "{}", agent.messages().len());
+    let line = text
+        .lines()
+        .find(|line| line.contains("\"command\":\"clear_queue\""))
+        .expect("clear_queue response");
+    let value: Value = serde_json::from_str(line).expect("json");
+    assert_eq!(value["data"]["steering"], json!(["s2"]));
+    assert_eq!(value["data"]["followUp"], json!([]));
+}
+
+#[test]
+fn unsupported_queue_mode_returns_failure() {
+    let mut agent = agent_with(Vec::new());
+    let input = concat!(
+        "{\"type\":\"set_steering_mode\",\"mode\":\"bogus\"}\n",
+        "{\"type\":\"set_follow_up_mode\",\"mode\":\"bogus\"}\n",
+    );
+    let buf = SessionBuf(std::rc::Rc::new(std::cell::RefCell::new(Vec::new())));
+    serve_session(
+        &mut agent,
+        None,
+        ".",
+        std::io::Cursor::new(input.as_bytes().to_vec()),
+        buf.clone(),
+        |_| {},
+    )
+    .expect("serves");
+    let text = String::from_utf8(buf.0.borrow().clone()).unwrap();
+    assert!(text.contains("\"command\":\"set_steering_mode\""), "{text}");
+    assert!(text.contains("\"success\":false"), "{text}");
+    assert!(text.contains("unsupported steering mode"), "{text}");
+    assert!(text.contains("unsupported follow-up mode"), "{text}");
+}
+
+#[test]
+fn auto_compaction_flag_gates_threshold_compaction_over_rpc() {
+    // Seed a transcript already past the compaction threshold. With
+    // auto_compaction off a prompt must not emit `compacted`; with it on a
+    // prompt must.
+    fn seeded_agent() -> Agent {
+        let mut agent = Agent::new(
+            Box::new(FauxProvider::new(vec![AssistantTurn {
+                text: "reply".into(),
+                stop_reason: Some("end_turn".into()),
+                ..Default::default()
+            }])),
+            Vec::new(),
+            "system",
+            ToolContext::new(std::env::temp_dir()),
+        )
+        .with_compaction(100, 10);
+        for index in 0..20 {
+            agent.push_user(format!(
+                "message {index} with several words to spend tokens"
+            ));
+        }
+        agent
+    }
+
+    let mut agent = seeded_agent();
+    let input = concat!(
+        "{\"type\":\"set_auto_compaction\",\"enabled\":false}\n",
+        "{\"type\":\"prompt\",\"text\":\"go\"}\n",
+    );
+    let buf = SessionBuf(std::rc::Rc::new(std::cell::RefCell::new(Vec::new())));
+    serve_session(
+        &mut agent,
+        None,
+        ".",
+        std::io::Cursor::new(input.as_bytes().to_vec()),
+        buf.clone(),
+        |_| {},
+    )
+    .expect("serves");
+    let text = String::from_utf8(buf.0.borrow().clone()).unwrap();
+    assert!(!text.contains("\"type\":\"compacted\""), "{text}");
+
+    let mut agent = seeded_agent();
+    let input = concat!(
+        "{\"type\":\"set_auto_compaction\",\"enabled\":true}\n",
+        "{\"type\":\"prompt\",\"text\":\"go\"}\n",
+    );
+    let buf = SessionBuf(std::rc::Rc::new(std::cell::RefCell::new(Vec::new())));
+    serve_session(
+        &mut agent,
+        None,
+        ".",
+        std::io::Cursor::new(input.as_bytes().to_vec()),
+        buf.clone(),
+        |_| {},
+    )
+    .expect("serves");
+    let text = String::from_utf8(buf.0.borrow().clone()).unwrap();
+    assert!(text.contains("\"type\":\"compacted\""), "{text}");
+}
+
+#[test]
 fn export_html_rejects_a_path_outside_the_workspace() {
     let mut agent = agent_with(vec![]);
     let workspace = std::env::temp_dir().join(format!("pi-rpc-export-{}", std::process::id()));

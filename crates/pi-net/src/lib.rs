@@ -57,6 +57,22 @@ pub fn post_json(
     headers: &[(&str, String)],
     body_json: &str,
 ) -> Result<HttpResponse, NetError> {
+    post_json_retry(url, headers, body_json, true)
+}
+
+/// Like [`post_json`], but the retry loop is only used when `retry` is true.
+///
+/// `retry = false` makes one attempt and surfaces the first failure, so a
+/// session that disabled auto-retry sees the 429/5xx instead of a silent retry.
+pub fn post_json_retry(
+    url: &str,
+    headers: &[(&str, String)],
+    body_json: &str,
+    retry: bool,
+) -> Result<HttpResponse, NetError> {
+    if !retry {
+        return post_json_once(url, headers, body_json);
+    }
     let mut attempt = 0u32;
     loop {
         match post_json_once(url, headers, body_json) {
@@ -222,15 +238,17 @@ pub fn stream_sse<P>(
 where
     P: SseProtocol,
 {
-    stream_sse_with::<P>(base_url, api_key, params, &mut |_| {})
+    stream_sse_with::<P>(base_url, api_key, params, true, &mut |_| {})
 }
 
 /// Like [`stream_sse`], but forwards each [`StreamDelta`] to `on_delta` as it
-/// arrives (before the final result is assembled).
+/// arrives (before the final result is assembled). `retry` gates the transport's
+/// retry loop so a session can turn auto-retry off.
 pub fn stream_sse_with<P>(
     base_url: &str,
     api_key: &str,
     params: &P::Params,
+    retry: bool,
     on_delta: &mut dyn FnMut(StreamDelta),
 ) -> Result<StreamResult, NetError>
 where
@@ -241,7 +259,7 @@ where
     let url = P::endpoint(base_url, params);
     let mut headers = P::headers(api_key);
     headers.push(("accept", "text/event-stream".to_string()));
-    let response = post_json(&url, &headers, &body)?;
+    let response = post_json_retry(&url, &headers, &body, retry)?;
     let mut protocol = P::default();
     read_sse(response.into_reader(), |event_type, data| {
         for delta in protocol.ingest(event_type, data) {

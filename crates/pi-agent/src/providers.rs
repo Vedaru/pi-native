@@ -5,12 +5,13 @@
 //! adding a provider is data (a builder), not a new adapter. All wire logic
 //! lives in `pi-providers`/`pi-net`; nothing here re-implements it.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::{AgentError, AssistantTurn, CompletionRequest, ModelProvider, ToolCall};
 use pi_net::{
-    stream_sse, stream_sse_with, OpenAiCompletionsProtocol, OpenAiResponsesProtocol, SseProtocol,
-    StreamDelta, StreamResult,
+    stream_sse_with, OpenAiCompletionsProtocol, OpenAiResponsesProtocol, SseProtocol, StreamDelta,
+    StreamResult,
 };
 use pi_providers::{
     build_openai_completions_params, build_openai_responses_params, CacheRetention, ContentBlock,
@@ -57,6 +58,9 @@ pub struct HttpProvider<P: SseProtocol> {
     /// Reasoning effort applied to every request. `set_thinking_level` writes
     /// it; the params builder reads it, so a session's level reaches the wire.
     thinking_effort: Arc<Mutex<Option<String>>>,
+    /// Whether the transport retries 429/5xx. `set_auto_retry` writes it; the
+    /// request path reads it, so disabling auto-retry surfaces the error.
+    auto_retry: Arc<AtomicBool>,
 }
 
 impl<P: SseProtocol> HttpProvider<P> {
@@ -70,6 +74,7 @@ impl<P: SseProtocol> HttpProvider<P> {
             api_key: api_key.into(),
             build: Box::new(build),
             thinking_effort: Arc::new(Mutex::new(None)),
+            auto_retry: Arc::new(AtomicBool::new(true)),
         }
     }
 }
@@ -92,8 +97,10 @@ fn level_effort(level: &str) -> Option<String> {
 impl<P: SseProtocol + 'static> ModelProvider for HttpProvider<P> {
     fn complete(&self, request: &CompletionRequest) -> Result<AssistantTurn, AgentError> {
         let params = (self.build)(request);
-        let result = stream_sse::<P>(&self.base_url, &self.api_key, &params)
-            .map_err(|error| AgentError::Provider(error.to_string()))?;
+        let retry = self.auto_retry.load(Ordering::Relaxed);
+        let result =
+            stream_sse_with::<P>(&self.base_url, &self.api_key, &params, retry, &mut |_| {})
+                .map_err(|error| AgentError::Provider(error.to_string()))?;
         Ok(turn_from_stream(result))
     }
 
@@ -103,7 +110,8 @@ impl<P: SseProtocol + 'static> ModelProvider for HttpProvider<P> {
         on_delta: &mut dyn FnMut(StreamDelta),
     ) -> Result<AssistantTurn, AgentError> {
         let params = (self.build)(request);
-        let result = stream_sse_with::<P>(&self.base_url, &self.api_key, &params, on_delta)
+        let retry = self.auto_retry.load(Ordering::Relaxed);
+        let result = stream_sse_with::<P>(&self.base_url, &self.api_key, &params, retry, on_delta)
             .map_err(|error| AgentError::Provider(error.to_string()))?;
         Ok(turn_from_stream(result))
     }
@@ -112,6 +120,10 @@ impl<P: SseProtocol + 'static> ModelProvider for HttpProvider<P> {
         if let Ok(mut effort) = self.thinking_effort.lock() {
             *effort = level_effort(level);
         }
+    }
+
+    fn set_auto_retry(&self, enabled: bool) {
+        self.auto_retry.store(enabled, Ordering::Relaxed);
     }
 }
 

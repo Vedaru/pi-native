@@ -316,7 +316,7 @@ fn apply_command(
             }
         }
         Request::Steer { text } => {
-            session.queued.push(text);
+            session.steering.push(text);
             Some(response(
                 id,
                 "steer",
@@ -324,7 +324,7 @@ fn apply_command(
             ))
         }
         Request::FollowUp { text } => {
-            session.queued.push(text);
+            session.follow_up.push(text);
             Some(response(
                 id,
                 "follow_up",
@@ -333,11 +333,12 @@ fn apply_command(
         }
         Request::Abort => Some(response(id, "abort", serde_json::json!({}))),
         Request::ClearQueue => {
-            let drained = std::mem::take(&mut session.queued);
+            let steering = std::mem::take(&mut session.steering);
+            let follow_up = std::mem::take(&mut session.follow_up);
             Some(response(
                 id,
                 "clear_queue",
-                serde_json::json!({ "steering": [], "followUp": drained }),
+                serde_json::json!({ "steering": steering, "followUp": follow_up }),
             ))
         }
         Request::SetModel { provider, model_id } => {
@@ -382,6 +383,15 @@ fn apply_command(
             serde_json::json!({ "levels": THINKING_LEVELS }),
         )),
         Request::SetSteeringMode { mode } => {
+            if !is_queue_mode(&mode) {
+                return Some(failure(
+                    id,
+                    "set_steering_mode",
+                    &format!(
+                        "unsupported steering mode `{mode}` (expected `all` or `one-at-a-time`)"
+                    ),
+                ));
+            }
             session.steering_mode = mode.clone();
             Some(response(
                 id,
@@ -390,6 +400,15 @@ fn apply_command(
             ))
         }
         Request::SetFollowUpMode { mode } => {
+            if !is_queue_mode(&mode) {
+                return Some(failure(
+                    id,
+                    "set_follow_up_mode",
+                    &format!(
+                        "unsupported follow-up mode `{mode}` (expected `all` or `one-at-a-time`)"
+                    ),
+                ));
+            }
             session.follow_up_mode = mode.clone();
             Some(response(
                 id,
@@ -433,6 +452,7 @@ fn apply_command(
         }
         Request::SetAutoCompaction { enabled } => {
             session.auto_compaction = enabled;
+            agent.set_auto_compaction(enabled);
             Some(response(
                 id,
                 "set_auto_compaction",
@@ -441,6 +461,7 @@ fn apply_command(
         }
         Request::SetAutoRetry { enabled } => {
             session.auto_retry = enabled;
+            agent.set_auto_retry(enabled);
             Some(response(
                 id,
                 "set_auto_retry",
@@ -635,11 +656,21 @@ struct SessionState {
     auto_compaction: bool,
     auto_retry: bool,
     model: Option<(String, String)>,
-    queued: Vec<String>,
+    /// Messages queued by `steer`, delivered before the next model call.
+    steering: Vec<String>,
+    /// Messages queued by `follow_up`, delivered after the current turn.
+    follow_up: Vec<String>,
 }
 
 /// pi's thinking levels, in order.
 const THINKING_LEVELS: &[&str] = &["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+
+/// A queue delivery mode: deliver every queued message at once, or one per
+/// turn. Anything else is rejected so a client cannot set a mode that is not
+/// honoured.
+fn is_queue_mode(mode: &str) -> bool {
+    matches!(mode, "all" | "one-at-a-time")
+}
 
 impl SessionState {
     fn empty() -> Self {
@@ -653,7 +684,8 @@ impl SessionState {
             auto_compaction: true,
             auto_retry: true,
             model: None,
-            queued: Vec::new(),
+            steering: Vec::new(),
+            follow_up: Vec::new(),
         }
     }
 
@@ -773,6 +805,32 @@ impl SessionState {
         } else {
             Vec::new()
         }
+    }
+
+    /// Drain queued messages per `mode`: all of them, or just the first one
+    /// (`one-at-a-time`), leaving the rest queued.
+    fn drain_queue(queue: &mut Vec<String>, mode: &str) -> Vec<String> {
+        if mode == "one-at-a-time" {
+            if queue.is_empty() {
+                Vec::new()
+            } else {
+                vec![queue.remove(0)]
+            }
+        } else {
+            std::mem::take(queue)
+        }
+    }
+
+    /// Steering messages to deliver before the next model call, respecting
+    /// `steering_mode` (leftover messages stay queued).
+    fn take_steering(&mut self) -> Vec<String> {
+        Self::drain_queue(&mut self.steering, &self.steering_mode)
+    }
+
+    /// Follow-up messages to deliver after the current turn, respecting
+    /// `follow_up_mode` (leftover messages stay queued).
+    fn take_follow_up(&mut self) -> Vec<String> {
+        Self::drain_queue(&mut self.follow_up, &self.follow_up_mode)
     }
 
     fn cycle_thinking(&mut self) -> String {
@@ -1002,6 +1060,37 @@ impl<R: std::io::BufRead, W: std::io::Write> SharedIo<R, W> {
     }
 }
 
+/// Run one agent turn, translating and streaming each event. Compaction events
+/// are annotated with the first kept session entry id, which pi reports on
+/// `compaction_end` (the journal still holds the pre-rewrite entries here).
+fn run_turn<R: std::io::BufRead, W: std::io::Write>(
+    agent: &mut Agent,
+    io: &std::rc::Rc<SharedIo<R, W>>,
+    session: &SessionState,
+) -> Result<(), AgentError> {
+    agent.run_with(|event| {
+        let event = match event {
+            AgentEvent::Compacted { dropped, .. } => {
+                let mut translated = from_agent_event(event.clone());
+                if let Event::Compacted {
+                    first_kept_entry_id,
+                    ..
+                } = &mut translated
+                {
+                    *first_kept_entry_id = session
+                        .journal
+                        .as_ref()
+                        .and_then(|journal| journal.entry_id_for_message(*dropped))
+                        .map(str::to_string);
+                }
+                translated
+            }
+            _ => from_agent_event(event.clone()),
+        };
+        io.write(&event)
+    })
+}
+
 fn drive<R: std::io::BufRead, W: std::io::Write, F: FnMut(&Agent)>(
     agent: &mut Agent,
     io: &std::rc::Rc<SharedIo<R, W>>,
@@ -1022,41 +1111,30 @@ fn drive<R: std::io::BufRead, W: std::io::Write, F: FnMut(&Agent)>(
                     serde_json::json!({ "disposition": "started" }),
                 ));
                 agent.push_user(text);
-                for queued in std::mem::take(&mut session.queued) {
+                // Steering messages are injected before the next model call.
+                // `one-at-a-time` delivers one and leaves the rest queued.
+                for queued in session.take_steering() {
                     agent.push_user(queued);
                 }
-                match agent.run_with(|event| {
-                    let event = match event {
-                        AgentEvent::Compacted { dropped, .. } => {
-                            let mut translated = from_agent_event(event.clone());
-                            // The agent drops a prefix and keeps the tail; the
-                            // entry id at the drop boundary is the first kept
-                            // entry, which pi reports on `compaction_end`. The
-                            // journal still holds the pre-rewrite entries here.
-                            if let Event::Compacted {
-                                first_kept_entry_id,
-                                ..
-                            } = &mut translated
-                            {
-                                *first_kept_entry_id = session
-                                    .journal
-                                    .as_ref()
-                                    .and_then(|journal| journal.entry_id_for_message(*dropped))
-                                    .map(str::to_string);
-                            }
-                            translated
-                        }
-                        _ => from_agent_event(event.clone()),
-                    };
-                    io.write(&event)
-                }) {
-                    Ok(()) => {
-                        session.persist(agent);
-                        after_turn(agent);
+                // Run the turn, then deliver follow-ups as subsequent turns
+                // (pi's follow-up semantics: after the current turn, not inside
+                // it). A failure stops the loop so the error is not masked.
+                loop {
+                    if let Err(error) = run_turn(agent, io, session) {
+                        io.write(&Event::Error {
+                            message: error.to_string(),
+                        });
+                        break;
                     }
-                    Err(error) => io.write(&Event::Error {
-                        message: error.to_string(),
-                    }),
+                    session.persist(agent);
+                    after_turn(agent);
+                    let follow_ups = session.take_follow_up();
+                    if follow_ups.is_empty() {
+                        break;
+                    }
+                    for queued in follow_ups {
+                        agent.push_user(queued);
+                    }
                 }
             }
             // Answered by the approval hook while a turn is running.

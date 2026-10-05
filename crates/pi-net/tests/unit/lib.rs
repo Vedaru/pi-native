@@ -71,11 +71,14 @@ fn stream_sse_with_forwards_text_deltas() {
     let base = serve_once(COMPLETIONS_SSE);
     let params = completions_params();
     let mut deltas = Vec::new();
-    let result =
-        stream_sse_with::<OpenAiCompletionsProtocol>(&base, "test-key", &params, &mut |delta| {
-            deltas.push(delta)
-        })
-        .expect("streams");
+    let result = stream_sse_with::<OpenAiCompletionsProtocol>(
+        &base,
+        "test-key",
+        &params,
+        true,
+        &mut |delta| deltas.push(delta),
+    )
+    .expect("streams");
     assert_eq!(result.text, "Hello");
     assert_eq!(deltas, vec![StreamDelta::Text("Hello".into())]);
 }
@@ -146,4 +149,71 @@ fn retries_a_rate_limited_request() {
     let result =
         stream_openai_completions(&base, "test-key", &params).expect("streams after a 429 retry");
     assert_eq!(result.text, "Hello");
+}
+
+/// Serve every request with `status` (for the auto-retry-off test).
+fn serve_always(status: &'static str) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    std::thread::spawn(move || {
+        // Keep accepting so a retry loop would also have something to hit.
+        for _ in 0..8 {
+            let Ok((mut socket, _)) = listener.accept() else {
+                return;
+            };
+            let mut request = [0u8; 4096];
+            let _ = std::io::Read::read(&mut socket, &mut request);
+            let response =
+                format!("HTTP/1.1 {status}\r\ncontent-length: 0\r\nconnection: close\r\n\r\n");
+            let _ = socket.write_all(response.as_bytes());
+        }
+    });
+    format!("http://{addr}")
+}
+
+#[test]
+fn auto_retry_disabled_surfaces_a_429_instead_of_retrying() {
+    let base = serve_always("429 Too Many Requests");
+    let params = completions_params();
+    // With retries on, the transport burns its attempts and still fails.
+    assert!(stream_openai_completions(&base, "test-key", &params).is_err());
+
+    // With retries off, the first 429 is surfaced as an error.
+    let base = serve_always("429 Too Many Requests");
+    let error = stream_sse_with::<OpenAiCompletionsProtocol>(
+        &base,
+        "test-key",
+        &params,
+        false,
+        &mut |_| {},
+    )
+    .expect_err("429 must surface when auto-retry is off");
+    assert_eq!(error.to_string(), "http status 429");
+}
+
+#[test]
+fn auto_retry_disabled_surfaces_a_500() {
+    let base = serve_always("500 Internal Server Error");
+    let params = completions_params();
+    let error = stream_sse_with::<OpenAiCompletionsProtocol>(
+        &base,
+        "test-key",
+        &params,
+        false,
+        &mut |_| {},
+    )
+    .expect_err("500 must surface when auto-retry is off");
+    assert_eq!(error.to_string(), "http status 500");
+}
+
+#[test]
+fn post_json_retry_false_does_not_retry() {
+    let base = serve_always("503 Service Unavailable");
+    match post_json_retry(&base, &[], "{}", false) {
+        Err(error) => assert_eq!(error.to_string(), "http status 503"),
+        Ok(_) => panic!("expected the 503 to surface without retrying"),
+    }
+    // The happy path still works with retry off.
+    let ok = serve_once(COMPLETIONS_SSE);
+    assert!(post_json_retry(&ok, &[], "{}", false).is_ok());
 }

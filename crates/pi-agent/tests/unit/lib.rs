@@ -270,6 +270,94 @@ impl Summarizer for StubSummarizer {
     }
 }
 
+/// Build an agent that would compact (small window, large tool results) and
+/// return it with a scripted provider that keeps producing tool calls until
+/// `turns` is reached.
+fn compacting_agent(turns: usize) -> Agent {
+    let provider = FnProvider::new(move |index| {
+        if index < turns {
+            AssistantTurn {
+                tool_calls: vec![ToolCall {
+                    id: format!("c{index}"),
+                    name: "echo".into(),
+                    arguments: json!({ "text": "x".repeat(400) }),
+                }],
+                stop_reason: Some("tool_use".into()),
+                ..Default::default()
+            }
+        } else {
+            AssistantTurn {
+                text: "done".into(),
+                ..Default::default()
+            }
+        }
+    });
+    let mut agent = Agent::new(
+        Box::new(provider),
+        vec![Box::new(EchoTool)],
+        "s",
+        ToolContext::new(std::env::temp_dir()),
+    )
+    .with_compaction(2_000, 500)
+    .with_summarizer(std::sync::Arc::new(StubSummarizer));
+    agent.push_user("go");
+    agent
+}
+
+#[test]
+fn auto_compaction_off_suppresses_threshold_compaction() {
+    let mut agent = compacting_agent(30);
+    agent.set_auto_compaction(false);
+    assert!(!agent.auto_compaction());
+
+    let mut compactions = 0usize;
+    agent
+        .run_with(|event| {
+            if matches!(event, AgentEvent::Compacted { .. }) {
+                compactions += 1;
+            }
+        })
+        .expect("runs");
+
+    assert_eq!(compactions, 0, "compaction ran with auto_compaction off");
+    // Nothing was summarized: the first message is still the user prompt.
+    match &agent.messages()[0] {
+        TranscriptMessage::UserParts(_) => {}
+        other => panic!("expected the original prompt, got {other:?}"),
+    }
+}
+
+#[test]
+fn auto_compaction_on_still_compacts() {
+    let mut agent = compacting_agent(30);
+    assert!(agent.auto_compaction());
+
+    let mut compactions = 0usize;
+    agent
+        .run_with(|event| {
+            if matches!(event, AgentEvent::Compacted { .. }) {
+                compactions += 1;
+            }
+        })
+        .expect("runs");
+
+    assert!(
+        compactions > 0,
+        "compaction never ran with auto_compaction on"
+    );
+}
+
+#[test]
+fn manual_compaction_still_works_when_auto_is_off() {
+    let mut agent = compacting_agent(30);
+    agent.set_auto_compaction(false);
+    agent.run().expect("runs");
+    assert!(
+        agent.force_compact().is_some(),
+        "manual compaction must ignore the auto_compaction gate"
+    );
+}
+
 #[test]
 fn compaction_summarizes_older_messages() {
     let provider = FnProvider::new(|index| {

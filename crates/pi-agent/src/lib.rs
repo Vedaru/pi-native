@@ -197,6 +197,11 @@ pub trait ModelProvider: Send + Sync {
     /// that do not reason ignore it; the default is a no-op so opting in is a
     /// choice, not an obligation.
     fn set_thinking_level(&self, _level: &str) {}
+
+    /// Enable or disable the transport's retry loop for subsequent requests.
+    /// The default is a no-op for providers with no retry loop (faux/test
+    /// providers, and any transport that never retries).
+    fn set_auto_retry(&self, _enabled: bool) {}
 }
 
 /// Default tokens reserved for the prompt tail and the model's response, matching
@@ -254,6 +259,10 @@ pub struct Agent {
     retained_tokens: usize,
     compaction: Option<(usize, usize)>,
     summarizer: Option<Arc<dyn Summarizer>>,
+    /// Whether `enforce_context` may compact when the token threshold is
+    /// crossed. The RPC `set_auto_compaction` command writes it; `false`
+    /// suppresses automatic compaction (manual `force_compact` still works).
+    auto_compaction: bool,
     /// Slash commands registered by loaded extensions, in pi's
     /// `SlashCommandInfo` shape (returned by the RPC `get_commands`).
     commands: Vec<Value>,
@@ -278,6 +287,7 @@ impl Agent {
             retained_tokens: 0,
             compaction: None,
             summarizer: None,
+            auto_compaction: true,
             commands: Vec::new(),
         }
     }
@@ -298,6 +308,27 @@ impl Agent {
     /// so the level reaches the wire instead of being stored and ignored.
     pub fn set_thinking_level(&mut self, level: &str) {
         self.provider.set_thinking_level(level);
+    }
+
+    /// Enable or disable automatic (threshold-triggered) compaction.
+    ///
+    /// `false` makes `enforce_context` skip token-based compaction so the RPC
+    /// `set_auto_compaction { enabled: false }` flag is honoured rather than
+    /// recorded. Manual `force_compact` and the message/byte bounds are not
+    /// affected.
+    pub fn set_auto_compaction(&mut self, enabled: bool) {
+        self.auto_compaction = enabled;
+    }
+
+    /// Whether automatic compaction is enabled.
+    pub fn auto_compaction(&self) -> bool {
+        self.auto_compaction
+    }
+
+    /// Enable or disable the provider transport's retry loop for subsequent
+    /// requests (the RPC `set_auto_retry` flag).
+    pub fn set_auto_retry(&self, enabled: bool) {
+        self.provider.set_auto_retry(enabled);
     }
 
     /// Bound retained context to the most recent `max_messages` entries.
@@ -455,15 +486,18 @@ impl Agent {
     fn enforce_context(&mut self) -> Option<AgentEvent> {
         // Token-based compaction: compact when estimated tokens exceed
         // `context_window - reserve_tokens`; keep a recent tail worth `reserve`.
-        if let Some((window, reserve)) = self.compaction {
-            let threshold = window.saturating_sub(reserve);
-            // The kept tail must be strictly smaller than the threshold, or the
-            // next check compacts again immediately (pathological churn). Cap it
-            // at half the threshold.
-            let tail_budget = reserve.min(threshold / 2).max(1);
-            if self.total_tokens() > threshold {
-                if let Some(event) = self.compact_tail(tail_budget) {
-                    return Some(event);
+        // `auto_compaction = false` suppresses this automatic path entirely.
+        if self.auto_compaction {
+            if let Some((window, reserve)) = self.compaction {
+                let threshold = window.saturating_sub(reserve);
+                // The kept tail must be strictly smaller than the threshold, or
+                // the next check compacts again immediately (pathological
+                // churn). Cap it at half the threshold.
+                let tail_budget = reserve.min(threshold / 2).max(1);
+                if self.total_tokens() > threshold {
+                    if let Some(event) = self.compact_tail(tail_budget) {
+                        return Some(event);
+                    }
                 }
             }
         }
