@@ -216,3 +216,36 @@ fn triggers_fire_through_the_gateway() {
     assert!(gateway.tick_triggers(1_000_000).is_empty());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn reports_extension_commands() {
+    let dir = temp_dir("commands");
+    let cwd = dir.clone();
+    let host = Host::new(cwd.to_string_lossy().to_string(), move |unit_cwd: &str| {
+        Agent::new(
+            Box::new(FauxProvider::new(Vec::new())),
+            Vec::new(),
+            "system",
+            ToolContext::new(unit_cwd),
+        )
+        .with_commands(vec![json!({
+            "name": "demo",
+            "description": "Demo command",
+            "source": "extension",
+        })])
+    });
+    let server = bind(host).expect("bind");
+    let id = create_session(&server, &dir);
+
+    let (status, body) = request(
+        server.addr,
+        "GET",
+        &format!("/sessions/{id}/commands"),
+        None,
+    );
+    assert_eq!(status, 200, "{body}");
+    let data: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(data["commands"][0]["name"], json!("demo"));
+    assert_eq!(data["commands"][0]["source"], json!("extension"));
+    let _ = std::fs::remove_dir_all(&dir);
+}

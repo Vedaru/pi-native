@@ -487,7 +487,7 @@ fn apply_command(
         Request::GetCommands => Some(response(
             id,
             "get_commands",
-            serde_json::json!({ "commands": [] }),
+            serde_json::json!({ "commands": agent.commands() }),
         )),
     }
 }

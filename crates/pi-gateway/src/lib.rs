@@ -9,6 +9,7 @@
 //! | `GET` | `/sessions` | List running session ids |
 //! | `POST` | `/sessions` | Open/create a session (`{"sessionPath"?: "…", "cwd"?: "…"}`) |
 //! | `GET` | `/sessions/:id` | Resolve state (subscribe → `get_state` → `state`) |
+//! | `GET` | `/sessions/:id/commands` | Extension slash commands |
 //! | `GET` | `/sessions/:id/events` | SSE: replay + live (`?format=pi` for pi's shapes) |
 //! | `POST` | `/sessions/:id/commands` | Send a command (202 Accepted) |
 //! | `POST` | `/sessions/:id/ui_response` | Answer a `ui_request` |
@@ -231,6 +232,7 @@ fn handle_connection(mut stream: TcpStream, gateway: Arc<Gateway>) -> std::io::R
         }
         ("POST", ["sessions"]) => create_session(&mut stream, &gateway, &request),
         ("GET", ["sessions", id]) => session_state(&mut stream, &gateway, id),
+        ("GET", ["sessions", id, "commands"]) => session_commands(&mut stream, &gateway, id),
         ("GET", ["sessions", id, "events"]) => {
             stream_events(stream, &gateway, id, request.query.contains("format=pi"))?;
         }
@@ -303,18 +305,60 @@ fn session_state(stream: &mut TcpStream, gateway: &Gateway, id: &str) {
 
 /// Wait for the `state` event emitted in response to `get_state`.
 fn await_state(subscription: &Subscription) -> Value {
+    await_response(subscription, "state", |event| {
+        event.get("type").and_then(Value::as_str) == Some("state")
+    })
+}
+
+fn session_commands(stream: &mut TcpStream, gateway: &Gateway, id: &str) {
+    let subscription = match gateway.host().subscribe(id) {
+        Ok(subscription) => subscription,
+        Err(error) => {
+            write_json(
+                stream,
+                status_for(&error),
+                &json!({ "error": error.to_string() }),
+            );
+            return;
+        }
+    };
+    if let Err(error) = gateway.host().send(id, json!({ "type": "get_commands" })) {
+        write_json(
+            stream,
+            status_for(&error),
+            &json!({ "error": error.to_string() }),
+        );
+        return;
+    }
+    let data = await_response(&subscription, "get_commands", |event| {
+        event.get("type").and_then(Value::as_str) == Some("response")
+            && event.get("command").and_then(Value::as_str) == Some("get_commands")
+    });
+    write_json(stream, 200, &data);
+}
+
+/// Wait for the first event matching `predicate`, returning its data payload.
+fn await_response(
+    subscription: &Subscription,
+    label: &str,
+    predicate: impl Fn(&Value) -> bool,
+) -> Value {
     let deadline = std::time::Instant::now() + STATE_TIMEOUT;
     loop {
         let remaining = deadline.saturating_duration_since(std::time::Instant::now());
         if remaining.is_zero() {
-            return json!({ "error": "timed out waiting for state" });
+            return json!({ "error": format!("timed out waiting for {label}") });
         }
         match subscription.recv_timeout(remaining) {
-            Some(event) if event.get("type").and_then(Value::as_str) == Some("state") => {
-                return event
+            Some(event) if predicate(&event) => {
+                // A `state` event is the payload; a `response` carries it in `data`.
+                if event.get("type").and_then(Value::as_str) == Some("response") {
+                    return event.get("data").cloned().unwrap_or(Value::Null);
+                }
+                return event;
             }
             Some(_) => continue,
-            None => return json!({ "error": "unit closed before state arrived" }),
+            None => return json!({ "error": format!("unit closed before {label} arrived") }),
         }
     }
 }

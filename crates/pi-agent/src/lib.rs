@@ -279,6 +279,9 @@ pub struct Agent {
     retained_tokens: usize,
     compaction: Option<(usize, usize)>,
     summarizer: Option<Arc<dyn Summarizer>>,
+    /// Slash commands registered by loaded extensions, in pi's
+    /// `SlashCommandInfo` shape (returned by the RPC `get_commands`).
+    commands: Vec<Value>,
 }
 
 impl Agent {
@@ -302,7 +305,19 @@ impl Agent {
             retained_tokens: 0,
             compaction: None,
             summarizer: None,
+            commands: Vec::new(),
         }
+    }
+
+    /// Attach slash commands registered by extensions.
+    pub fn with_commands(mut self, commands: Vec<Value>) -> Self {
+        self.commands = commands;
+        self
+    }
+
+    /// Slash commands registered by extensions.
+    pub fn commands(&self) -> &[Value] {
+        &self.commands
     }
 
     pub fn with_max_iterations(mut self, max: usize) -> Self {

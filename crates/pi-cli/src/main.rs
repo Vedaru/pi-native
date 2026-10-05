@@ -710,12 +710,14 @@ fn resolve_agent(
         Rc::new(DenyAll)
     };
     let mut tools = default_tools();
-    tools.extend(load_extension_tools(extensions, extension_allow, cwd));
+    let (extension_tools, commands) = load_extension_tools(extensions, extension_allow, cwd);
+    tools.extend(extension_tools);
     // Tools are jailed to the working directory unless the caller explicitly
     // opted into unrestricted execution with `--yolo`.
     let tool_context = ToolContext::new(cwd).allow_outside(yolo);
-    let mut agent =
-        Agent::new(make_provider(config), tools, system, tool_context).with_approver(approver);
+    let mut agent = Agent::new(make_provider(config), tools, system, tool_context)
+        .with_approver(approver)
+        .with_commands(commands);
     if context_window > 0 {
         // Compaction summarizes dropped history with the model (pi's behavior).
         agent = agent
@@ -1148,7 +1150,7 @@ fn load_extension_tools(
     paths: &[PathBuf],
     allowed: &[String],
     cwd: &std::path::Path,
-) -> Vec<Box<dyn Tool>> {
+) -> (Vec<Box<dyn Tool>>, Vec<serde_json::Value>) {
     let mut policy = PluginPolicy::for_extension(cwd);
     for name in allowed {
         match name.trim().to_ascii_lowercase().as_str() {
@@ -1160,6 +1162,7 @@ fn load_extension_tools(
         }
     }
     let mut tools: Vec<Box<dyn Tool>> = Vec::new();
+    let mut commands: Vec<serde_json::Value> = Vec::new();
     for path in paths {
         match PluginInstance::from_file(policy.clone(), path) {
             Ok(instance) => {
@@ -1172,9 +1175,29 @@ fn load_extension_tools(
                         parameters: spec.parameters.clone(),
                     }));
                 }
+                // Extension commands become slash commands (pi's
+                // `SlashCommandInfo`: name, description, source).
+                for command in instance.commands() {
+                    let name = command
+                        .get("name")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("");
+                    if name.is_empty() {
+                        continue;
+                    }
+                    let description = command
+                        .get("spec")
+                        .and_then(|spec| spec.get("description"))
+                        .and_then(serde_json::Value::as_str);
+                    commands.push(serde_json::json!({
+                        "name": name,
+                        "description": description,
+                        "source": "extension",
+                    }));
+                }
             }
             Err(error) => eprintln!("pi-native: extension {}: {error}", path.display()),
         }
     }
-    tools
+    (tools, commands)
 }
