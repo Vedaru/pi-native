@@ -102,9 +102,9 @@ through the `read` tool (peak = `VmHWM`, "after" = RSS 3 s later; idle baseline
 
 | source -> target | peak RSS | RSS after | engine time |
 | --- | --- | --- | --- |
-| 2100x2100 PNG -> 2000x2000 | **41 MB** | 5.1 MB | 24 ms |
-| 7000x7000 PNG -> 2000x2000 | **62 MB** | 9.3 MB | 332 ms |
-| 7000x7000 JPEG -> 2000x2000 | **86 MB** | 9.3 MB | 244 ms |
+| 2100x2100 PNG -> 2000x2000 | **41 MB** | 4.8 MB | 24 ms |
+| 7000x7000 PNG -> 2000x2000 | **61 MB** | 9.3 MB | 332 ms |
+| 7000x7000 JPEG -> 2000x2000 | **80 MB** | 9.5 MB | 250 ms |
 
 "After" is baseline plus the retained base64 (4 MB for the 7000px images), so
 the transient is returned, not held; `malloc_trim` closes the rest (5.1 MB). The
@@ -112,10 +112,10 @@ read is header-first: dimensions come from the header before any pixels.
 
 How it decodes:
 
-- **JPEG** uses `jpeg-decoder`'s IDCT scaling (1/8, 1/4, 1/2): a 7000px JPEG is
-decoded at 1/2, never at full size. The steps are powers of two, so 1/2 is the
-smallest that still covers 2000; turbojpeg's 3/8 would save ~16 MB for a C
-dependency, so we skip it.
+- **JPEG** decodes with `libjpeg-turbo-rs` (pure Rust). It supports all 16
+scaled-IDCT factors (2/1 .. 1/8), so we pick the smallest whose output still
+covers the target: a 7000px JPEG decodes at 3/8 (2625) rather than 1/2 (3500).
+It also converts CMYK/YCCK to RGB itself.
 - **PNG** is decoded scanline by scanline and box-downsampled on the fly (a
 per-row accumulator, not a whole-image one), so a 7000px PNG never allocates
 more than the reduced bitmap.
@@ -160,8 +160,8 @@ peak RSS from `/proc/self/status`; Node's own baseline is 55.7 MB, ours ~3 MB:
 | fixture | pi peak | pi time | pipelets peak | pipelets time |
 | --- | --- | --- | --- | --- |
 | 2100x2100 PNG | 220 MB | 1066 ms | **41 MB** | **24 ms** |
-| 7000x7000 PNG | 900 MB | 2925 ms | **62 MB** | **332 ms** |
-| 7000x7000 JPEG | 922 MB | 3179 ms | **86 MB** | **244 ms** |
+| 7000x7000 PNG | 900 MB | 2925 ms | **61 MB** | **332 ms** |
+| 7000x7000 JPEG | 922 MB | 3179 ms | **80 MB** | **250 ms** |
 
 Net of each runtime's baseline that is ~4x / ~14x / ~10x less memory and 9-45x
 faster. Output MIME and dimensions are identical on every fixture, so the note

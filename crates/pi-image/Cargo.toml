@@ -11,8 +11,8 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
 base64 = "0.22"
 kamadak-exif = "0.6"
 fast_image_resize = { version = "6", features = ["image"] }
-jpeg-decoder = { version = "0.3", default-features = false }
 png = { version = "0.18", default-features = false }
+libjpeg-turbo-rs = "0.8"
 
 # `malloc_trim` after a decode returns the transient to the OS.
 [target.'cfg(all(unix, target_env = "gnu"))'.dependencies]

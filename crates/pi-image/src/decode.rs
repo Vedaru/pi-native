@@ -69,10 +69,9 @@ fn decode_full(input: &[u8]) -> Option<Decoded> {
 pub fn dimensions(input: &[u8]) -> Option<(u32, u32)> {
     match mime_type(input)? {
         "image/jpeg" => {
-            let mut decoder = jpeg_decoder::Decoder::new(Cursor::new(input));
-            decoder.read_info().ok()?;
-            let info = decoder.info()?;
-            Some((info.width as u32, info.height as u32))
+            let decoder = libjpeg_turbo_rs::Decoder::new(input).ok()?;
+            let header = decoder.header();
+            Some((header.width as u32, header.height as u32))
         }
         "image/png" => {
             let reader = png::Decoder::new(Cursor::new(input)).read_info().ok()?;
@@ -89,43 +88,41 @@ pub fn dimensions(input: &[u8]) -> Option<(u32, u32)> {
 }
 
 fn decode_jpeg(input: &[u8], target_w: u32, target_h: u32) -> Option<Decoded> {
-    use jpeg_decoder::PixelFormat;
-    let mut decoder = jpeg_decoder::Decoder::new(Cursor::new(input));
-    decoder.read_info().ok()?;
-    let info = decoder.info()?;
-    let (width, height) = (info.width as u32, info.height as u32);
-    // Pick the IDCT scale that still covers the target. `scale` returns the
-    // actual output size after choosing the largest reduction that fits.
-    let (sw, sh) = decoder
-        .scale(
-            target_w.min(u16::MAX as u32) as u16,
-            target_h.min(u16::MAX as u32) as u16,
-        )
-        .ok()?;
-    let pixels = decoder.decode().ok()?;
-    let image = match info.pixel_format {
-        PixelFormat::RGB24 => {
-            DynamicImage::ImageRgb8(RgbImage::from_raw(sw as u32, sh as u32, pixels)?)
+    use libjpeg_turbo_rs::{Decoder, PixelFormat, ScalingFactor};
+    // libjpeg-turbo supports all 16 scaled-IDCT factors (2/1 .. 1/8). Pick the
+    // smallest whose output still covers the target, so a 7000px JPEG decodes at
+    // 3/8 (2625) rather than 1/2 (3500): a smaller bitmap, and the final resize
+    // only downscales.
+    const FACTORS: &[(u32, u32)] = &[
+        (1, 8),
+        (1, 4),
+        (3, 8),
+        (1, 2),
+        (5, 8),
+        (3, 4),
+        (7, 8),
+        (1, 1),
+    ];
+    let mut decoder = Decoder::new(input).ok()?;
+    let header = decoder.header();
+    let (width, height) = (header.width as u32, header.height as u32);
+    // Ask for RGB; libjpeg-turbo converts CMYK/YCCK correctly itself.
+    decoder.set_output_format(PixelFormat::Rgb);
+    let mut scale = ScalingFactor::new(1, 1);
+    for (num, denom) in FACTORS {
+        let candidate = ScalingFactor::new(*num, *denom);
+        if candidate.scale_dim(width as usize) >= target_w as usize
+            && candidate.scale_dim(height as usize) >= target_h as usize
+        {
+            scale = candidate;
+            break;
         }
-        PixelFormat::L8 => {
-            DynamicImage::ImageLuma8(GrayImage::from_raw(sw as u32, sh as u32, pixels)?)
-        }
-        PixelFormat::CMYK32 => {
-            let mut rgb = Vec::with_capacity(pixels.len() / 4 * 3);
-            for px in pixels.chunks_exact(4) {
-                let (c, m, y, k) = (px[0] as u32, px[1] as u32, px[2] as u32, px[3] as u32);
-                // Standard CMYK -> RGB: R = (255-C)(255-K)/255.
-                rgb.push(((255 - c) * (255 - k) / 255) as u8);
-                rgb.push(((255 - m) * (255 - k) / 255) as u8);
-                rgb.push(((255 - y) * (255 - k) / 255) as u8);
-            }
-            DynamicImage::ImageRgb8(RgbImage::from_raw(sw as u32, sh as u32, rgb)?)
-        }
-        // L16 is unusual; fall back so we never lose the image.
-        PixelFormat::L16 => return decode_full(input),
-    };
+    }
+    decoder.set_scale(scale);
+    let decoded = decoder.decode_image().ok()?;
+    let rgb = RgbImage::from_raw(decoded.width as u32, decoded.height as u32, decoded.data)?;
     Some(Decoded {
-        image,
+        image: DynamicImage::ImageRgb8(rgb),
         width,
         height,
     })
