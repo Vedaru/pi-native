@@ -103,9 +103,24 @@ def main() -> int:
     baseline = index_results(load_json(root / "artifacts" / "mem_bench.json"))
 
     if args.from_json:
-        current_artifact = load_json(Path(args.from_json))
+        # A missing or malformed artifact is a hard error: silently treating it as
+        # "no targets" would let CI pass when the input file was never produced.
+        from_path = Path(args.from_json)
+        if not from_path.exists():
+            print(f"FAIL: --from-json file not found: {from_path}")
+            return 1
+        try:
+            current_artifact = json.loads(from_path.read_text())
+        except (OSError, json.JSONDecodeError) as exc:
+            print(f"FAIL: --from-json file is not valid JSON: {from_path}: {exc}")
+            return 1
     else:
         current_artifact = run_benchmark(root / "artifacts" / "mem_bench.current.json")
+        if current_artifact is None:
+            # The benchmark failed to run or produced an unreadable artifact;
+            # that is distinct from a valid artifact with no installed targets.
+            print("FAIL: memory benchmark did not produce a usable artifact.")
+            return 1
 
     current = index_results(current_artifact)
     if not current:

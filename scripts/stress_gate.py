@@ -15,6 +15,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import re
 import resource
 import subprocess
 import sys
@@ -47,6 +48,7 @@ def main() -> int:
             if args.session:
                 command.append("--stress-session")
             usage_before = resource.getrusage(resource.RUSAGE_CHILDREN)
+            rss_before_kb = usage_before.ru_maxrss
             proc = subprocess.run(
                 command,
                 capture_output=True,
@@ -54,6 +56,7 @@ def main() -> int:
                 timeout=args.timeout,
             )
             usage_after = resource.getrusage(resource.RUSAGE_CHILDREN)
+            rss_after_kb = usage_after.ru_maxrss
             cpu = (usage_after.ru_utime - usage_before.ru_utime) + (
                 usage_after.ru_stime - usage_before.ru_stime
             )
@@ -71,11 +74,22 @@ def main() -> int:
         line = proc.stdout.strip()
         peak_mb = None
         for text in line.splitlines():
-            if text.startswith("peak RSS:"):
-                peak_mb = float(text.split()[2])
+            if not text.startswith("peak RSS:"):
+                continue
+            # Parse defensively: a malformed line should fail only this tool, not
+            # abort the whole gate with a ValueError.
+            match = re.search(r"peak RSS:\s*([0-9]*\.?[0-9]+)", text)
+            if match is None:
+                print(f"WARN[{tool}]: malformed 'peak RSS:' line: {text!r}")
+                continue
+            peak_mb = float(match.group(1))
         if peak_mb is None:
-            # Fall back to the child high-water mark (monotonic across children).
-            peak_mb = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss / 1024
+            # RUSAGE_CHILDREN.ru_maxrss is a monotonic high-water mark across ALL
+            # previously reaped children, so using it directly lets a large earlier
+            # tool mask a later regression. Use this child's own delta instead: its
+            # contribution to the high-water mark (0 if it did not set a new mark).
+            print(f"WARN[{tool}]: no 'peak RSS:' reported; using per-child RSS delta.")
+            peak_mb = max(rss_after_kb - rss_before_kb, 0) / 1024
         print(
             f"{tool}: {line.splitlines()[0] if line else ''} | peak {peak_mb:.1f} MB | cpu {cpu:.2f}s"
         )
