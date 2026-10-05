@@ -27,6 +27,7 @@ jobs:
           python3 scripts/test_swarm_orchestrator.py
           python3 scripts/test_swarm_watchdog.py
           python3 scripts/test_swarm_columns.py
+          python3 scripts/test_swarm_dag.py
 
   package:
     runs-on: ubuntu-latest

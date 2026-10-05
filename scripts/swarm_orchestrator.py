@@ -255,6 +255,7 @@ class Orchestrator:
         route=None,
         session_for=None,
         read_only_roles=None,
+        blocked=None,
     ) -> list[Decision]:
         """One deterministic reconcile + dispatch pass.
 
@@ -264,9 +265,15 @@ class Orchestrator:
         ``is_busy(session_id)`` reports whether a unit is currently working.
         ``route(title)`` returns the role for an issue. ``session_for(role)``
         returns the role unit's session id.
+
+        ``blocked`` is an optional set of issue identifiers that must not be
+        dispatched yet (for example task-DAG dependencies that are not Done,
+        VED-378). Blocked issues are skipped for dispatch but keep any existing
+        claim, so finishing a dependency does not lose in-flight work.
         """
         is_busy = is_busy or (lambda _sid: False)
         read_only_roles = read_only_roles or set()
+        blocked = blocked or set()
         decisions: list[Decision] = []
 
         # 1. Reconcile: release claims whose card left an active state, and
@@ -329,6 +336,13 @@ class Orchestrator:
                 continue
             snapshot = board[issue]
             if snapshot.get("stateType") not in ACTIVE_STATE_TYPES:
+                continue
+            if issue in blocked:
+                # A task-DAG dependency has not finished (VED-378): do not
+                # dispatch, but leave any existing claim untouched.
+                decisions.append(
+                    Decision(action="skip", issue=issue, reason="blocked by task DAG")
+                )
                 continue
             claim = self.claim_for(issue)
             if claim.session_id and claim.session_id in self.running:

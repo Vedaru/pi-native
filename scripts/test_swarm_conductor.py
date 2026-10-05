@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import tempfile
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -280,6 +281,36 @@ class RetryTests(unittest.TestCase):
         record["terminal"] = True
         self.assertTrue(record["terminal"])
         self.assertIn(record["status"], conductor.TERMINAL_STATUSES)
+
+
+
+class DagGateTests(unittest.TestCase):
+    """VED-378: the conductor skips a card whose DAG deps are not Done."""
+
+    def setUp(self):
+        self._old = os.environ.get("SWARM_DAG_PATH")
+        self._tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".json")
+        self._tmp.close()
+        os.unlink(self._tmp.name)  # no cache yet
+        os.environ["SWARM_DAG_PATH"] = self._tmp.name
+
+    def tearDown(self):
+        if self._old is None:
+            os.environ.pop("SWARM_DAG_PATH", None)
+        else:
+            os.environ["SWARM_DAG_PATH"] = self._old
+        if os.path.exists(self._tmp.name):
+            os.unlink(self._tmp.name)
+
+    def test_no_cache_means_flat_loop(self):
+        # With no DAG cache the gate is a no-op, so the flat conductor is
+        # unchanged and cannot be broken by the DAG feature.
+        self.assertIsNone(conductor.dag_gate())
+
+    def test_broken_cache_does_not_raise(self):
+        with open(self._tmp.name, "w") as handle:
+            handle.write("{not json")
+        self.assertIsNone(conductor.dag_gate())
 
 
 if __name__ == "__main__":

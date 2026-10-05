@@ -404,6 +404,39 @@ def prompt_for(identifier: str, title: str, role: str) -> str:
     return assignment_prompt(identifier, title, role)
 
 
+def dag_gate() -> set[str] | None:
+    """Issue identifiers that are not ready yet, when a task DAG is cached.
+
+    When `$SWARM_DAG_PATH` holds a DAG (VED-378), the conductor dispatches in
+    dependency order: an issue whose `blocked-by` deps are not all `Done` is
+    skipped. Returns `None` when no DAG is present, so the flat loop is
+    unchanged. The DAG module is imported lazily so a missing/broken cache can
+    never stop the conductor.
+    """
+    try:
+        import importlib.util
+
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "swarm_dag.py")
+        spec = importlib.util.spec_from_file_location("swarm_dag", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        dag = module.load_dag()
+        if not dag:
+            return None
+        dag = module.rebuild_from_board(dag, module.load_board())
+        module.save_dag(dag)
+        ready = set(module.ready_ids(dag["nodes"]))
+        blocked = {
+            node["id"]
+            for key, node in dag["nodes"].items()
+            if key not in ready
+        }
+        return blocked
+    except Exception as error:  # never let the DAG stop the flat conductor
+        print(f"dag gate error: {error}", flush=True)
+        return None
+
+
 def main() -> None:
     """Conductor loop.
 
@@ -446,6 +479,7 @@ def main() -> None:
                 route=role_for,
                 session_for=lambda role: ROLE_UNITS[role],
                 read_only_roles=READ_ONLY_ROLES,
+                blocked=dag_gate(),
             )
             for decision in decisions:
                 if decision.action == "dispatch":
