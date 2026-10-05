@@ -17,15 +17,23 @@ audit/verify prompt that must not commit. A read-only dispatch is terminal by
 default (VED-360), but the reviewer may post a machine-readable verdict asking
 the conductor to route the issue to a write-capable unit; `tick()` honors that
 verdict by re-routing the claim instead of dropping it (VED-365).
+
+Before an editing card is dispatched it declares an **intent** — the files and
+symbols it expects to touch — and the conductor checks it against the other
+in-flight write intents. An overlapping intent is blocked and the collision is
+recorded on both cards, so parallel runs cannot silently race onto the same
+files (VED-375; detector in `scripts/swarm_collision.py`).
 """
 
 from __future__ import annotations
 
+import argparse
 import importlib.util
 import json
 import os
 import re
 import subprocess
+import sys
 import time
 import urllib.request
 
@@ -39,7 +47,16 @@ def _load_memory():
     return module
 
 
+def _load_collision():
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "swarm_collision.py")
+    spec = importlib.util.spec_from_file_location("swarm_collision", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 memory = _load_memory()
+collision = _load_collision()
 
 GATEWAY = os.environ.get("SWARM_GATEWAY", "http://127.0.0.1:30142")
 POLL_SECONDS = 20
@@ -84,6 +101,8 @@ READ_ONLY_ROLES = set(ROLE_UNITS) - EDITING_ROLES
 # A claim in one of these statuses is terminal: never re-dispatch it. A
 # read-only dispatch is terminal *unless* the reviewer posts a route verdict
 # (see `pending_route`), so it is checked separately from the hard terminals.
+# `collision_blocked` is deliberately absent: it is a *re-evaluable* hold,
+# not a verdict, so the card dispatches once its blocker clears (VED-375).
 TERMINAL_STATUSES = {"done", "declined", "blocked", "dispatching", "dispatched_readonly"}
 HARD_TERMINAL_STATUSES = TERMINAL_STATUSES - {"dispatched_readonly"}
 
@@ -577,6 +596,225 @@ def dag_gate() -> set[str] | None:
         return None
 
 
+# --- collision protocol (VED-375) -----------------------------------------
+
+# Title fragments that map to a repo scope, so the conductor can declare a
+# useful intent even before the unit has read the card. Conservative: anything
+# unmatched yields an empty scope, which the detector treats as fail-safe
+# (never silently disjoint).
+SCOPE_HINTS = (
+    (r"pi-gateway|gateway", "crates/pi-gateway"),
+    (r"pi-host|host::|Host::", "crates/pi-host"),
+    (r"pi-rpc|rpc\b", "crates/pi-rpc"),
+    (r"pi-agent", "crates/pi-agent"),
+    (r"pi-tui", "crates/pi-tui"),
+    (r"pi-cli", "crates/pi-cli"),
+    (r"pi-plugins|plugin", "crates/pi-plugins"),
+    (r"pi-providers|provider", "crates/pi-providers"),
+    (r"pi-session|session", "crates/pi-session"),
+    (r"pi-triggers|trigger", "crates/pi-triggers"),
+    (r"swarm_conductor|conductor", "scripts/swarm_conductor.py"),
+    (r"swarm_worktree|worktree", "scripts/swarm_worktree.py"),
+    (r"swarm_collision|collision|intent", "scripts/swarm_collision.py"),
+    (r"mem_gate", "scripts/mem_gate.py"),
+    (r"ONBOARDING|swarm guide|docs/swarm", "docs/swarm/README.md"),
+)
+
+# Read-only roles' operations never block (VED-375 AC6).
+OPERATION_FOR = {
+    "reviewer": "review",
+    "planner": "review",
+    "researcher": "review",
+    "coder": "edit",
+    "tester": "edit",
+    "synthesizer": "docs",
+}
+
+
+def scope_for(title: str) -> list[str]:
+    """Best-effort repo scope for a card from its title.
+
+    Empty when nothing matches; the detector treats an empty scope as unknown
+    and fails safe, so a wrong guess never silently permits a collision.
+    """
+    scope: list[str] = []
+    for pattern, path in SCOPE_HINTS:
+        if re.search(pattern, title, re.IGNORECASE) and path not in scope:
+            scope.append(path)
+    return scope
+
+
+def linear_comment(identifier: str, body: str) -> None:
+    """Post a signed comment on a card. Best-effort: never kills the loop."""
+    result = subprocess.run(
+        ["linear", "issue", "comment", "add", identifier, "--body", body],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "LINEAR_IGNORE_ENV_FILE": "1"},
+    )
+    if result.returncode != 0:
+        print(f"comment on {identifier} failed: {result.stderr.strip()}", flush=True)
+
+
+def record_collision(
+    issue_a: str, issue_b: str, decision: dict, role: str, forced: bool = False
+) -> None:
+    """Record a collision + its resolution on both cards (VED-375 AC10/AC13)."""
+    intersection = ", ".join(decision.get("intersection") or []) or "declared scope"
+    verb = "forced" if forced else decision.get("decision")
+    for self_id, other_id in ((issue_a, issue_b), (issue_b, issue_a)):
+        body = (
+            f"Collision protocol: intent for {self_id} "
+            f"{'overrides' if forced else 'overlaps'} {other_id} on {intersection} "
+            f"(kind={decision.get('kind')}). Resolution: {verb}. "
+            f"Reason: {decision.get('reason')}."
+        )
+        linear_comment(self_id, f"{body}\n\n- [{role}]")
+
+
+def declare_card_intent(
+    state: dict, identifier: str, title: str, role: str, session_id: str,
+    scope: list[str] | None = None, symbols: list[str] | None = None,
+    branch: str | None = None, worktree: str | None = None, now: float | None = None,
+) -> dict:
+    """Declare (or update) a card's intent in the durable state table.
+
+    Prefers an explicitly supplied scope; otherwise derives one from the title.
+    Idempotent for the same card (AC3) and refused for terminal cards.
+    """
+    intents = state.setdefault("intents", {})
+    record = {
+        "issue": identifier,
+        "role": role,
+        "session_id": session_id,
+        "operation": OPERATION_FOR.get(role, "edit"),
+        "scope": scope if scope is not None else scope_for(title),
+        "symbols": symbols or [],
+        "branch": branch or f"swarm/{identifier}",
+        "worktree": worktree,
+        "declared_at": now if now is not None else time.time(),
+    }
+    return collision.declare_intent(intents, record)
+
+
+def check_collisions(
+    state: dict, candidate: dict, terminal_issues: set[str] | None = None,
+    force: bool = False,
+) -> dict:
+    """Resolve a candidate intent against the in-flight table.
+
+    Returns the candidate's decision. On a blocking overlap the collision is
+    recorded on both cards; a `--force` candidate is allowed but the override
+    is still recorded (AC13).
+    """
+    intents = state.setdefault("intents", {})
+    order = list(intents.values()) + [candidate]
+    decisions = collision.resolve_collisions(
+        order,
+        terminal_issues=terminal_issues or set(),
+        force_issues={candidate["issue"]} if force else set(),
+    )
+    decision = decisions.get(
+        candidate["issue"],
+        {"decision": collision.DECISION_ALLOW, "reason": "no overlap", "intersection": [], "kind": None},
+    )
+    if decision.get("blocked_by"):
+        record_collision(
+            candidate["issue"], decision["blocked_by"], decision,
+            candidate.get("role", "coder"), forced=bool(decision.get("forced")),
+        )
+    return decision
+
+
+def release_terminal_intents(state: dict, terminal_issues: set[str]) -> int:
+    """Drop intents for cards that left the board (AC8/AC11)."""
+    intents = state.setdefault("intents", {})
+    released = 0
+    for identifier in list(intents):
+        if identifier in terminal_issues:
+            collision.release_intent(intents, identifier)
+            released += 1
+    return released
+
+
+# The conductor's in-flight intent table (VED-375) lives beside the
+# orchestrator's claim state so it survives a restart.
+INTENTS_PATH = os.environ.get("SWARM_INTENTS_PATH", "/tmp/swarm-intents.json")
+
+
+def load_intents() -> dict:
+    try:
+        with open(INTENTS_PATH) as handle:
+            data = json.load(handle)
+        if isinstance(data, dict):
+            return data
+    except (OSError, json.JSONDecodeError):
+        pass
+    return {}
+
+
+def save_intents(intents: dict) -> None:
+    try:
+        with open(INTENTS_PATH, "w") as handle:
+            json.dump(intents, handle)
+    except OSError as error:  # intent persistence must never stop dispatch
+        print(f"conductor intent save error: {error}", flush=True)
+
+
+def terminal_issues_from_board() -> set[str]:
+    """Card ids currently in a terminal Linear state."""
+    import swarm_orchestrator as orchestrator_module
+
+    result = subprocess.run(
+        [
+            "linear",
+            "issue",
+            "mine",
+            "--team",
+            orchestrator_module.TEAM,
+            "--project",
+            orchestrator_module.PROJECT,
+            "--all-states",
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "LINEAR_IGNORE_ENV_FILE": "1"},
+    )
+    try:
+        nodes = json.loads(result.stdout)["issues"]["nodes"]
+    except (json.JSONDecodeError, KeyError, TypeError):
+        return set()
+    return {
+        node["identifier"]
+        for node in nodes
+        if (node.get("state") or {}).get("name") in collision.TERMINAL_ISSUE_STATES
+    }
+
+
+def collision_gate(
+    intents: dict,
+    issue: str,
+    title: str,
+    role: str,
+    session_id: str,
+    now: float,
+    terminal_issues: set[str] | None = None,
+) -> dict | None:
+    """Declare an editing card's intent and resolve it against the table.
+
+    Returns the collision decision, or `None` for a read-only role (which never
+    blocks and never declares a write intent, VED-375 AC6). The caller must not
+    dispatch when the decision is BLOCK or WARN.
+    """
+    if role not in EDITING_ROLES:
+        return None
+    candidate = declare_card_intent(
+        intents, issue, title, role, session_id, now=now
+    )
+    return check_collisions(intents, candidate, terminal_issues=terminal_issues or set())
+
+
 def main() -> None:
     """Conductor loop.
 
@@ -592,7 +830,9 @@ def main() -> None:
     orchestrator = orchestrator_module.Orchestrator.load(
         orchestrator_module.STATE_PATH, config
     )
+    intents = load_intents()
     cleaned_up = False
+
     print("conductor started", flush=True)
     while True:
         try:
@@ -612,6 +852,13 @@ def main() -> None:
                 cleaned_up = True
             units = orchestrator_module.fetch_units()
             now = time.time()
+            units = orchestrator_module.fetch_units()
+            now = time.time()
+            # Cards that left the board release their intent so a finished card
+            # never blocks new work (VED-375 AC8/AC11).
+            terminal = terminal_issues_from_board()
+            if release_terminal_intents(intents, terminal):
+                save_intents(intents)
             decisions = orchestrator.tick(
                 board,
                 now=now,
@@ -625,6 +872,31 @@ def main() -> None:
             for decision in decisions:
                 if decision.action == "dispatch":
                     title = board.get(decision.issue, {}).get("title", "")
+                    # Before an editing card is dispatched it declares an intent
+                    # and checks it against the in-flight table (VED-375). An
+                    # overlapping write intent is blocked; the collision is
+                    # recorded on both cards and the dispatch is skipped.
+                    if decision.role in EDITING_ROLES:
+                        collision_decision = collision_gate(
+                            intents,
+                            decision.issue,
+                            title,
+                            decision.role,
+                            decision.session_id,
+                            now,
+                            terminal,
+                        )
+                        if collision_decision is not None and collision_decision["decision"] in (
+                            collision.DECISION_BLOCK,
+                            collision.DECISION_WARN,
+                        ):
+                            print(
+                                f"blocked {decision.issue}: {collision_decision['reason']} "
+                                f"(blocked_by={collision_decision.get('blocked_by')})",
+                                flush=True,
+                            )
+                            continue
+                        save_intents(intents)
                     # Fresh context per card: drop the unit's transcript before
                     # handing it the next task, so it never grows across cards
                     # (VED-373).
@@ -641,6 +913,8 @@ def main() -> None:
                         )
                 elif decision.action == "stop":
                     abort(decision.session_id)
+                    release_terminal_intents(intents, {decision.issue})
+                    save_intents(intents)
                 print(
                     f"{decision.action} {decision.issue} {decision.reason}", flush=True
                 )
@@ -651,4 +925,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

@@ -15,6 +15,7 @@ import importlib.util
 import os
 import tempfile
 import unittest
+import unittest.mock
 from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -464,6 +465,160 @@ class DagGateTests(unittest.TestCase):
         with open(self._tmp.name, "w") as handle:
             handle.write("{not json")
         self.assertIsNone(conductor.dag_gate())
+
+
+class CollisionIntegrationTests(unittest.TestCase):
+    def test_scope_for_maps_titles_to_crates(self):
+        self.assertEqual(conductor.scope_for("gateway never evicts idle units"), ["crates/pi-gateway"])
+        self.assertEqual(conductor.scope_for("pi-rpc: compaction_end shape"), ["crates/pi-rpc"])
+        self.assertEqual(conductor.scope_for("pi-host cap live units"), ["crates/pi-host"])
+
+    def test_scope_for_unmatched_title_is_empty_and_fails_safe(self):
+        # An unmatched title must not guess a scope; empty is "unknown" and the
+        # detector warns rather than treating it as disjoint (AC12).
+        self.assertEqual(conductor.scope_for("a vague card"), [])
+
+    def test_declare_card_intent_is_idempotent_and_records_scope(self):
+        state: dict = {}
+        conductor.declare_card_intent(state, "VED-1", "pi-rpc fix", "coder", "s1", now=1)
+        conductor.declare_card_intent(state, "VED-1", "pi-rpc fix", "coder", "s1", now=2)
+        self.assertEqual(len(state["intents"]), 1)
+        self.assertEqual(state["intents"]["VED-1"]["scope"], ["crates/pi-rpc"])
+        self.assertEqual(state["intents"]["VED-1"]["operation"], "edit")
+
+    def test_check_collisions_blocks_a_later_overlapping_edit(self):
+        state: dict = {}
+        conductor.declare_card_intent(
+            state, "VED-A", "pi-rpc", "coder", "sA", scope=["crates/pi-rpc"], now=1
+        )
+        candidate = conductor.declare_card_intent(
+            state, "VED-B", "pi-rpc", "coder", "sB", scope=["crates/pi-rpc"], now=2
+        )
+        with unittest.mock.patch.object(conductor, "linear_comment") as comment:
+            decision = conductor.check_collisions(state, candidate)
+        self.assertEqual(decision["decision"], conductor.collision.DECISION_BLOCK)
+        self.assertEqual(decision["blocked_by"], "VED-A")
+        self.assertCountEqual(
+            [call.args[0] for call in comment.call_args_list], ["VED-A", "VED-B"]
+        )
+
+    def test_release_terminal_intents_unblocks(self):
+        state: dict = {}
+        conductor.declare_card_intent(
+            state, "VED-A", "pi-rpc", "coder", "sA", scope=["crates/pi-rpc"], now=1
+        )
+        candidate = conductor.declare_card_intent(
+            state, "VED-B", "pi-rpc", "coder", "sB", scope=["crates/pi-rpc"], now=2
+        )
+        with unittest.mock.patch.object(conductor, "linear_comment"):
+            self.assertEqual(
+                conductor.check_collisions(state, candidate)["decision"],
+                conductor.collision.DECISION_BLOCK,
+            )
+            # A goes terminal -> its intent is released and B re-resolves allowed.
+            self.assertEqual(conductor.release_terminal_intents(state, {"VED-A"}), 1)
+            self.assertNotIn("VED-A", state["intents"])
+            self.assertEqual(
+                conductor.check_collisions(state, candidate)["decision"],
+                conductor.collision.DECISION_ALLOW,
+            )
+
+    def test_read_only_role_op_does_not_block(self):
+        state: dict = {}
+        conductor.declare_card_intent(
+            state, "VED-A", "pi-rpc", "coder", "sA", scope=["crates/pi-rpc"], now=1
+        )
+        candidate = conductor.declare_card_intent(
+            state, "VED-R", "pi-rpc audit", "reviewer", "sR", scope=["crates/pi-rpc"], now=2
+        )
+        decision = conductor.check_collisions(state, candidate)
+        self.assertEqual(decision["decision"], conductor.collision.DECISION_ALLOW)
+
+    def test_force_override_allows_but_marks_forced(self):
+        state: dict = {}
+        conductor.declare_card_intent(
+            state, "VED-A", "pi-rpc", "coder", "sA", scope=["crates/pi-rpc"], now=1
+        )
+        candidate = conductor.declare_card_intent(
+            state, "VED-B", "pi-rpc", "coder", "sB", scope=["crates/pi-rpc"], now=2
+        )
+        with unittest.mock.patch.object(conductor, "record_collision") as record:
+            decision = conductor.check_collisions(state, candidate, force=True)
+        self.assertEqual(decision["decision"], conductor.collision.DECISION_ALLOW)
+        self.assertTrue(decision.get("forced"))
+        record.assert_called_once()
+
+    def test_collision_blocked_status_is_not_terminal(self):
+        # AC11: a collision hold is re-evaluable, not a verdict.
+        self.assertNotIn("collision_blocked", conductor.TERMINAL_STATUSES)
+
+    def test_record_collision_comments_on_both_cards(self):
+        decision = {
+            "decision": "block",
+            "reason": "overlaps VED-A on crates/pi-rpc",
+            "intersection": ["crates/pi-rpc"],
+            "kind": "file",
+        }
+        with unittest.mock.patch.object(conductor, "linear_comment") as comment:
+            conductor.record_collision("VED-A", "VED-B", decision, "coder")
+        commented = [call.args[0] for call in comment.call_args_list]
+        self.assertCountEqual(commented, ["VED-A", "VED-B"])
+        for call in comment.call_args_list:
+            self.assertIn("[coder]", call.args[1])
+            self.assertIn("crates/pi-rpc", call.args[1])
+
+
+class DispatchOnceTests(unittest.TestCase):
+    def _state_with_intent(self, scope):
+        state: dict = {}
+        conductor.declare_card_intent(
+            state, "VED-A", "pi-rpc", "coder", "sA", scope=scope, now=1
+        )
+        return state
+
+    def test_overlapping_card_is_held_and_not_dispatched(self):
+        state = self._state_with_intent(["crates/pi-rpc"])
+        with unittest.mock.patch.object(conductor, "record_collision"):
+            decision = conductor.collision_gate(
+                state, "VED-B", "pi-rpc fix", "coder", "sB", now=2
+            )
+        self.assertEqual(decision["decision"], conductor.collision.DECISION_BLOCK)
+        self.assertEqual(decision["blocked_by"], "VED-A")
+
+    def test_allowed_card_is_dispatched(self):
+        state: dict = {}
+        decision = conductor.collision_gate(
+            state, "VED-B", "pi-rpc fix", "coder", "sB", now=2
+        )
+        self.assertEqual(decision["decision"], conductor.collision.DECISION_ALLOW)
+        self.assertIn("VED-B", state["intents"])
+
+    def test_collision_blocked_card_can_be_retried_later(self):
+        # Once the blocker leaves the board, the held card resolves allowed.
+        state = self._state_with_intent(["crates/pi-rpc"])
+        with unittest.mock.patch.object(conductor, "record_collision"):
+            self.assertEqual(
+                conductor.collision_gate(
+                    state, "VED-B", "pi-rpc fix", "coder", "sB", now=2
+                )["decision"],
+                conductor.collision.DECISION_BLOCK,
+            )
+        conductor.release_terminal_intents(state, {"VED-A"})
+        with unittest.mock.patch.object(conductor, "record_collision"):
+            self.assertEqual(
+                conductor.collision_gate(
+                    state, "VED-B", "pi-rpc fix", "coder", "sB", now=3
+                )["decision"],
+                conductor.collision.DECISION_ALLOW,
+            )
+
+    def test_read_only_card_bypasses_the_collision_check(self):
+        state: dict = {}
+        decision = conductor.collision_gate(
+            state, "VED-R", "Swarm audit: x", "reviewer", "sR", now=2
+        )
+        self.assertIsNone(decision)
+        self.assertEqual(state.get("intents", {}), {})
 
 
 if __name__ == "__main__":

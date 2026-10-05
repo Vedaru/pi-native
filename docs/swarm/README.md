@@ -45,6 +45,27 @@ with the reason instead of declining silently.
 - Scratch files: write to `/tmp` (an allowed write root); **never** leave temp
   files in the repo.
 
+## Collision protocol (declare intent before editing)
+
+Parallel runs must not silently edit the same files. Before writing, declare the
+files and symbols you expect to touch:
+
+```
+python3 scripts/swarm_conductor.py --declare VED-375 --role coder \
+    --session <sessionId> --scope crates/pi-rpc/src/lib.rs crates/pi-agent \
+    --symbols SessionState::switch
+```
+
+The conductor checks the declaration against the other in-flight write intents.
+An overlap blocks the **later** declaration, records the collision (and the
+resolved paths/symbols) on **both** cards, and re-evaluates on every reconcile
+pass: the card dispatches automatically once the blocker reaches Done/Canceled or
+releases its intent (`--release VED-375`). Read-only ops (`review`/`test`) never
+block. An unknown/empty scope is fail-safe: it warns and requires explicit
+resolution instead of passing as disjoint. `--force` overrides a block but the
+override is recorded on both cards — it is never silent. The pure rules live in
+`scripts/swarm_collision.py` (`scripts/test_swarm_collision.py`).
+
 ## Patterns
 
 `python3 scripts/swarm_run.py --pattern concurrent|sequential|moa --task "..."` runs
