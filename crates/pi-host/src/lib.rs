@@ -1208,4 +1208,5 @@ fn set_session_unit(path: &std::path::Path, unit: &str) -> Result<(), HostError>
 }
 
 #[cfg(test)]
+#[path = "../tests/unit/lib.rs"]
 mod tests;

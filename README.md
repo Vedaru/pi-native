@@ -9,7 +9,7 @@ the HTTP+SSE gateway; a conductor drives many of them at once.
 
 - **Bare core.** The agent loop, tools, session store, provider transport, and
   plugin host — and nothing else. No editor, no cloud, no per-user daemon.
-- **Low memory.** ~4.6 MB idle in `--rpc`, ~5.1 MB serving a unit; bounded I/O,
+- **Low memory.** ~4.4 MB idle in `--rpc`, ~5.0 MB serving a unit; bounded I/O,
   token-based compaction, and a windowed transcript keep long sessions flat.
 - **Low CPU.** Idle costs ~0.001 s of CPU per 3 s (no busy-wait); tools stream
   bounded buffers and a 20k-call tool run stays under a second of CPU.
@@ -27,9 +27,9 @@ Measured 2026-10-05 (release build, x86_64; see [performance](docs/performance.m
 
 | | pipelets | pi-node |
 | --- | --- | --- |
-| shipped runtime | one **11.9 MB** binary | Node + `node_modules` |
-| idle RSS (`--rpc`) | **4.6 MB** | 111.3 MB |
-| idle RSS (`--gateway`) | **5.1 MB** | — |
+| shipped runtime | one **12.1 MB** binary | Node + `node_modules` |
+| idle RSS (`--rpc`) | **4.4 MB** | 111.3 MB |
+| idle RSS (`--gateway`) | **5.0 MB** | — |
 | idle CPU | **~0.001 s / 3 s** | — |
 
 ## Non-negotiable constraint

@@ -291,26 +291,6 @@ pub trait Tool {
 
 /// The inline image types pi accepts, sniffed from the file header (pi's
 /// `detectSupportedImageMimeTypeFromFile`).
-fn image_mime_type(header: &[u8]) -> Option<&'static str> {
-    if header.starts_with(&[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]) {
-        return Some("image/png");
-    }
-    if header.starts_with(&[0xff, 0xd8, 0xff]) {
-        return Some("image/jpeg");
-    }
-    if header.starts_with(b"GIF87a") || header.starts_with(b"GIF89a") {
-        return Some("image/gif");
-    }
-    if header.len() >= 12 && &header[0..4] == b"RIFF" && &header[8..12] == b"WEBP" {
-        return Some("image/webp");
-    }
-    None
-}
-
-/// Read an image file and return pi's `read` text note plus the resized image.
-///
-/// Mirrors pi's `read` image branch: `Read image file [<mime>]` followed by the
-/// `[Image: original WxH, displayed at wxh...]` note when it was scaled.
 fn read_image(mime_type: &str, bytes: &[u8]) -> ToolResult {
     match pi_image::resize_image(bytes, &pi_image::ImageLimits::default()) {
         Some(resized) => {
@@ -373,7 +353,7 @@ impl Tool for ReadTool {
             let mut header = [0u8; 16];
             if let Ok(mut probe) = std::fs::File::open(&resolved) {
                 let read = probe.read(&mut header).unwrap_or(0);
-                if let Some(mime) = image_mime_type(&header[..read]) {
+                if let Some(mime) = pi_image::decode::mime_type(&header[..read]) {
                     return match std::fs::read(&resolved) {
                         Ok(bytes) => read_image(mime, &bytes),
                         Err(error) => ToolResult::error(format!("read: {path}: {error}")),

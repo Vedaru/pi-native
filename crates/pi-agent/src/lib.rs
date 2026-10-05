@@ -473,6 +473,29 @@ impl Agent {
         &self.messages
     }
 
+    /// Total base64 bytes of image parts retained in the transcript. A real
+    /// session keeps these until compaction, so this is the per-session image
+    /// cost a unit carries.
+    pub fn retained_image_bytes(&self) -> usize {
+        fn images(parts: &[ContentPart]) -> usize {
+            parts
+                .iter()
+                .filter_map(|part| match part {
+                    ContentPart::Image { data, .. } => Some(data.len()),
+                    _ => None,
+                })
+                .sum()
+        }
+        self.messages
+            .iter()
+            .map(|message| match message {
+                TranscriptMessage::UserParts(parts)
+                | TranscriptMessage::ToolResult { content: parts, .. } => images(parts),
+                _ => 0,
+            })
+            .sum()
+    }
+
     /// The system prompt this agent was built with.
     pub fn system(&self) -> &str {
         &self.system

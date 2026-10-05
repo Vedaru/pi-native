@@ -21,13 +21,13 @@ python3 scripts/swarm_stress.py --units 32 --mode idle
 
 | | pipelets | pi-node |
 | --- | --- | --- |
-| shipped runtime | one **11.9 MB** binary (4.6 MB tarball) | Node + `node_modules` |
-| cold-idle RSS (`--rpc`) | **4.6 MB** | 111.3 MB |
-| cold-idle RSS (`--gateway`) | **5.1 MB** | — |
+| shipped runtime | one **12.1 MB** binary (4.6 MB tarball) | Node + `node_modules` |
+| cold-idle RSS (`--rpc`) | **4.4 MB** | 111.3 MB |
+| cold-idle RSS (`--gateway`) | **5.0 MB** | — |
 | ratio | — | **0.04×** (≈25× smaller) |
 | idle CPU (3 s) | **0.001 s** (no busy-wait) | — |
 
-A bare Rust `fn main` reports ~2.3 MB, mostly shared libc, so ~4.6 MB is close
+A bare Rust `fn main` reports ~2.3 MB, mostly shared libc, so ~4.4 MB is close
 to the floor for a process that has loaded the agent loop, tools, RPC, and the
 plugin host. A static build idles lower (~3.3 MB) but stops sharing libc pages
 across a swarm, so the dynamic build is kept.
@@ -94,22 +94,58 @@ per-unit sum suggests. An idle unit is ~4.4 MB, so a 32-agent swarm fits in
 
 ## Images (`read` attachments)
 
-An image read decodes and resizes it with `fast_image_resize` (SIMD,
-row-streamed), so peak memory is independent of the source size, then encodes
-PNG/JPEG under the inline limit. `--stress-tool image` decodes and resizes a
-2100x2100 PNG per call:
+An image read is **decoded at a reduction that covers the target**, so the
+full-size source bitmap is never materialised, then resized with
+`fast_image_resize` and encoded under the inline limit. `--stress-tool image`
+decodes and resizes a 2100x2100 screenshot-like PNG per call:
 
 | | Value |
 | --- | --- |
-| 50 resizes | 1.15 s, **43 MB** peak, 1.15 s CPU |
+| 50 resizes | 5.9 s, **50 MB** peak, 5.9 s CPU |
 | one 2100x2100 -> 2000x2000 | ~23 ms |
-| one 9000x9000 -> 2000x2000 | ~190 ms, still **43 MB** peak |
 
-The engine replaced `image`'s own Lanczos3, which built a full
-`source_width x target_height` RGBA-f32 transient (288 MB for a 9000x9000
-input): 50 resizes went from **6.15 s / 94 MB to 1.15 s / 43 MB**. There is no
-size refusal — like pi, a huge image is resized, and the working set stays flat.
-CI gates it with `stress_gate.py --tools image --max-mb 80 --max-cpu 5`.
+For a **7000x7000** source (target 2000x2000):
+
+| | PNG | JPEG |
+| --- | --- | --- |
+| decode stage | 2333x2333, **20 MB** | 3500x3500, **70 MB** |
+| full read | **77 MB** | **138 MB** |
+| old full-decode path | ~370 MB | ~370 MB |
+
+How it decodes:
+
+- **JPEG** uses `jpeg-decoder`'s IDCT scaling (1/8, 1/4, 1/2): a 7000px JPEG is
+decoded at 1/2, never at full size. The scale steps are powers of two, so 1/2
+is the smallest that still covers 2000; turbojpeg's finer factors would shrink
+this further at the cost of a C dependency.
+- **PNG** is decoded scanline by scanline and box-downsampled on the fly, so a
+7000px PNG never allocates more than the reduced bitmap.
+- GIF/WebP fall back to `image`'s full decode (small in practice), and the read
+is header-first so the dimensions are known before any pixels are touched.
+
+### Retained cost in a session
+
+The encoded image stays in the transcript until compaction, so the per-session
+cost is the base64 payload, not the transient. `--stress-session --stress-tool
+image` keeps results, and reports the retained bytes:
+
+| images retained | retained | peak RSS |
+| --- | --- | --- |
+| 10 | 13.4 MB | 64 MB |
+| 20 | 26.7 MB (~1.3 MB each) | 76 MB |
+
+A real screenshot can encode to ~2.4 MB, so ten of them hold ~24 MB until
+compaction. CI gates both the transient (`--max-mb 80`) and the retained run
+(`--max-mb 120`).
+
+### Concurrency
+
+The gateway hosts many units in one process, so image decodes are capped by a
+process-global gate (default 2, `PIPELETS_IMAGE_CONCURRENCY`), bounding
+aggregate image memory. After a decode, `malloc_trim(0)` returns what glibc
+would otherwise keep (a 2100x2100 read: 12 MB -> 4.7 MB). The freed transient
+sits below the retained base64, so the unit can still rest at ~12 MB after an
+image read; that residue is allocator-held free, not a leak.
 
 ## Session store
 

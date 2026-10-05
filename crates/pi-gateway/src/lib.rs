@@ -1083,5 +1083,5 @@ fn translate(adapter: &mut PiEventAdapter, value: &Value) -> Vec<Value> {
 }
 
 #[cfg(test)]
-#[path = "tests.rs"]
+#[path = "../tests/unit/lib.rs"]
 mod tests;

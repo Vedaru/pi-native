@@ -1190,5 +1190,5 @@ impl Field {
 }
 
 #[cfg(test)]
-#[path = "tests.rs"]
+#[path = "../tests/unit/lib.rs"]
 mod tests;

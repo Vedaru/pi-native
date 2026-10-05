@@ -384,7 +384,7 @@ fn stress_workspace(tool: &str) -> std::path::PathBuf {
     }
     if tool == "image" {
         // Larger than the inline limit, so every call decodes and resizes.
-        let _ = std::fs::write(dir.join("image.png"), pi_image::solid_png(2100, 2100));
+        let _ = std::fs::write(dir.join("image.png"), pi_image::screenshot_png(2100, 2100));
     }
     dir
 }
@@ -456,14 +456,22 @@ fn run_stress_tool(turns: usize, tool: &str) {
 fn run_stress_session(turns: usize, tool: &str, byte_limit_mb: usize, context_tokens: usize) {
     let dir = stress_workspace(tool);
 
-    let tool_name = tool.to_string();
+    // `image` exercises the `read` tool's image path; results are retained in
+    // the transcript until compaction, like a real session. The arguments still
+    // come from the `image` fixture (`image.png`) while the call names `read`.
+    let args_tool = tool.to_string();
+    let call_name = if tool == "image" {
+        "read".to_string()
+    } else {
+        tool.to_string()
+    };
     let provider = FnProvider::new(move |index| {
         if index < turns {
             AssistantTurn {
                 tool_calls: vec![ToolCall {
                     id: format!("stress-{index}"),
-                    name: tool_name.clone(),
-                    arguments: stress_args(&tool_name, index),
+                    name: call_name.clone(),
+                    arguments: stress_args(&args_tool, index),
                 }],
                 stop_reason: Some("tool_use".to_string()),
                 ..Default::default()
@@ -510,6 +518,11 @@ fn run_stress_session(turns: usize, tool: &str, byte_limit_mb: usize, context_to
             println!(
                 "session-stress[{tool}]: {turns} turns, {} messages, {tool_results} tool results, {tool_errors} errors, {compactions} compactions",
                 agent.messages().len()
+            );
+            println!(
+                "retained images: {} bytes ({} KB/image over {tool_results} results)",
+                agent.retained_image_bytes(),
+                agent.retained_image_bytes() / tool_results.max(1) / 1024
             );
             if let Some((user, sys)) = match (cpu_before, cpu_times()) {
                 (Some((ub, sb)), Some((ua, sa))) => Some((ua - ub, sa - sb)),

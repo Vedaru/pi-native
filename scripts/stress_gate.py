@@ -29,6 +29,7 @@ def main() -> int:
     parser.add_argument("--turns", type=int, default=50000)
     parser.add_argument("--tools", nargs="+", default=["ls"])
     parser.add_argument("--session", action="store_true", help="run the agent session loop (compaction) instead of direct tool calls")
+    parser.add_argument("--context-tokens", type=int, default=None, help="--stress-context-tokens for --session (large = no compaction, so retained results grow)")
     parser.add_argument("--max-mb", type=float, default=150.0)
     parser.add_argument("--timeout", type=float, default=60.0)
     parser.add_argument("--max-cpu", type=float, default=5.0, help="max CPU seconds per tool run")
@@ -47,6 +48,8 @@ def main() -> int:
             command = [str(binary), "--stress", str(args.turns), "--stress-tool", tool]
             if args.session:
                 command.append("--stress-session")
+            if args.context_tokens:
+                command += ["--stress-context-tokens", str(args.context_tokens)]
             usage_before = resource.getrusage(resource.RUSAGE_CHILDREN)
             rss_before_kb = usage_before.ru_maxrss
             proc = subprocess.run(
