@@ -52,7 +52,7 @@ crates/pi-providers/   request builders with pi's cache placement
 crates/pi-tools/       core tools (read, bash, edit, write, …)
 crates/pi-plugins/     embedded QuickJS + pi extension API bridge
 docs/                  guides and ADRs
-scripts/               benchmark, stress, parity, and swarm harnesses
+scripts/               benchmark, stress, parity, and memory gates
 ```
 
 ## Build, test, package
@@ -116,19 +116,11 @@ pipelets --serve --extension ./my.ts --extension-allow read
 [plugin-conformance.md](docs/plugin-conformance.md) records how many of pi's own
 example extensions load through the host (84/87).
 
-## Swarm layer
-
-The core ships the primitives a swarm needs (unit host, gateway, triggers,
-mailbox); the orchestration is a thin Python layer in `scripts/swarm_*.py`.
-Role units coordinate through a Linear board — see
-[docs/swarm/README.md](docs/swarm/README.md) and
-[docs/swarm-status.md](docs/swarm-status.md).
-
 ## Docs
 
 | Doc | Contents |
 | --- | --- |
-| [performance.md](docs/performance.md) | memory/CPU figures, stress and swarm gates |
+| [performance.md](docs/performance.md) | memory/CPU figures, stress and memory gates |
 | [gateway.md](docs/gateway.md) | HTTP/SSE routes, triggers, budgets |
 | [providers.md](docs/providers.md) | provider flags, prompt cache, wire parity |
 | [session-store.md](docs/session-store.md) | JSONL format, context building, compaction |

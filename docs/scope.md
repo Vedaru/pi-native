@@ -6,10 +6,10 @@ of the reference Rust project's extended feature set. pi describes itself as "a
 minimal, extensible agent harness"; this document is the canonical in/out list
 and the guard for new work.
 
-The binary is the **bare core** a single unit needs. The **swarm layer** is a
-thin set of scripts (`scripts/swarm_*.py`) on top of the core's unit-host,
-gateway, and trigger primitives; it is deliberately not part of the shipped
-binary, so an idle unit stays at ~4–5 MB.
+The binary is the **bare core** a single unit needs. Swarm orchestration — a
+conductor, role units, a Linear board — lives in a separate repo
+(`pipelets-swarm`), driving the core over the gateway. It is never part of the
+shipped binary, so an idle unit stays at ~4–5 MB.
 
 The reference port (`Dicklesworthstone/pi_agent_rust`) is used for
 **architecture** (QuickJS + Rust-backed Node shims, crate choices), never for
@@ -30,7 +30,7 @@ scope.
 | JSON revision diffing | `pi-delta` |
 | Prompt-cache primitives | `pi-cache` |
 
-Core primitives the swarm layer stands on:
+Core primitives a swarm host drives:
 
 | Surface | Notes |
 | --- | --- |
@@ -42,8 +42,8 @@ Core primitives the swarm layer stands on:
 ## Out of scope (reference-port bloat)
 
 beads, LSP, browser, computer, sub-agents, plan mode, memory bank, worktrees,
-and any other feature pi's core does not ship. The swarm orchestration scripts
-are not part of the shipped binary.
+and any other feature pi's core does not ship. Swarm orchestration (the
+conductor, DAGs, dashboards, Linear) is a separate repo, never in the unit.
 
 ## Hard constraints
 
