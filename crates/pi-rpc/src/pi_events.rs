@@ -10,6 +10,8 @@
 //! adapter (VED-342) both drive it.
 
 use crate::Event;
+use pi_agent::message_value;
+use pi_providers::{ContentPart, TranscriptMessage};
 use serde_json::{json, Value};
 
 /// Stateful translator; one per attached session stream.
@@ -224,15 +226,23 @@ impl PiEventAdapter {
                 is_error,
                 content,
             } => {
-                // Buffer the result for this turn's `turn_end`, but keep the
-                // `tool_execution_end` envelope unchanged.
-                self.tool_results.push(json!({
-                    "toolCallId": tool_call_id,
-                    "toolName": name,
-                    "isError": is_error,
-                    "content": [{ "type": "text", "text": content }],
-                    "details": {},
-                }));
+                // Buffer the result for this turn's `turn_end`. pi identifies
+                // tool results by `role`, so serialize through the canonical
+                // `TranscriptMessage::ToolResult` -> `message_value` path
+                // (which supplies `role` and `timestamp`), then add the empty
+                // `details` the turn_end elements carry.
+                let mut result = message_value(&TranscriptMessage::ToolResult {
+                    tool_call_id: tool_call_id.clone(),
+                    tool_name: name.clone(),
+                    content: vec![ContentPart::Text {
+                        text: content.clone(),
+                    }],
+                    is_error: *is_error,
+                });
+                if let Some(object) = result.as_object_mut() {
+                    object.insert("details".to_string(), json!({}));
+                }
+                self.tool_results.push(result);
                 out.push(json!({
                     "type": "tool_execution_end",
                     "toolCallId": tool_call_id,
@@ -507,8 +517,20 @@ mod tests {
             .expect("turn_end");
         let results = turn_end["toolResults"].as_array().expect("toolResults");
         assert_eq!(results.len(), 1, "{events:?}");
+        // Each element must be a pi `ToolResultMessage`: `role` identifies it
+        // (pi's `_findPersistedMessageEntryId` looks results up by role) and
+        // `timestamp` is part of the shape.
+        assert_eq!(results[0]["role"], json!("toolResult"), "{events:?}");
+        assert!(
+            results[0]["timestamp"].as_u64().is_some(),
+            "timestamp missing: {events:?}"
+        );
         assert_eq!(results[0]["toolCallId"], json!("call-1"));
+        assert_eq!(results[0]["toolName"], json!("bash"));
+        assert_eq!(results[0]["isError"], json!(false));
+        assert_eq!(results[0]["content"][0]["type"], json!("text"));
         assert_eq!(results[0]["content"][0]["text"], json!("ok"));
+        assert!(results[0].get("details").is_some());
     }
 
     #[test]

@@ -1166,6 +1166,7 @@ name = "pi-rpc"
 version = "0.0.1"
 dependencies = [
  "pi-agent",
+ "pi-providers",
  "pi-session",
  "pi-tools",
  "serde",
