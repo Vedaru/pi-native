@@ -575,6 +575,52 @@ fn a_sent_message_is_observable_by_the_recipient() {
 }
 
 #[test]
+fn the_mailbox_cursor_is_its_own_stream() {
+    // VED-408: the mailbox cursor is dense and independent of the SSE event id.
+    // The `swarm_message` event body carries the mailbox cursor, so a client
+    // that reads it from the stream resumes the mailbox exactly.
+    let (dir, host, _a, b) = two_units("mail-seq");
+    // Subscribe before sending so the announcements arrive on the live stream.
+    let subscription = host.subscribe(&b).expect("subscribe");
+    let first = host
+        .send_message("coder", &b, MessageKind::Request, None, None, "one", 1)
+        .expect("send one");
+    let second = host
+        .send_message("coder", &b, MessageKind::Request, None, None, "two", 2)
+        .expect("send two");
+    // Dense: one id per message, not one per message plus one per event.
+    assert_eq!(first.seq, 1);
+    assert_eq!(second.seq, 2);
+
+    // A unit replays its `ready` event first; scan for the message event.
+    let deadline = Instant::now() + Duration::from_secs(1);
+    let mut announced = None;
+    while Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match subscription.recv_timeout(remaining) {
+            Ok(event)
+                if event.get("type").and_then(Value::as_str) == Some("swarm_message")
+                    && event["message"]["seq"].as_u64() == Some(1) =>
+            {
+                announced = Some(event);
+                break;
+            }
+            Ok(_) => continue,
+            Err(_) => break,
+        }
+    }
+    let event = announced.expect("a swarm_message for the first message");
+    // The event body carries the mailbox cursor of the message it announces.
+    assert_eq!(event["message"]["seq"].as_u64(), Some(1));
+
+    let (tail, next) = host.poll_messages(&b, first.seq).expect("resume");
+    assert_eq!(tail.len(), 1);
+    assert_eq!(tail[0].id, second.id);
+    assert_eq!(next, second.seq);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn an_ack_is_visible_to_the_sender() {
     // M2/AC2: the recipient acks; the sender observes an ack envelope.
     let (dir, host, _a, b) = two_units("mail-ack");

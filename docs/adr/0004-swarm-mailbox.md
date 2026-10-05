@@ -39,9 +39,12 @@ escrow block, so a message is the same object at every hop:
   "ownerBefore": null, "ownerAfter": null, "seq": 3 }
 ```
 
-- **Ordering.** The recipient's mailbox is stamped with the unit's existing
-  monotonic `Shared.seq`, so `after=<seq>` is an exact resume cursor and a live
-  SSE subscriber and a polling client observe the same order.
+- **Ordering.** The recipient's mailbox is stamped with its own monotonic
+  `mailbox_seq` (VED-408), so `after=<seq>` is an exact, dense resume cursor and
+  a live SSE subscriber and a polling client observe the same order. The mailbox
+  cursor and the SSE `id:` are separate streams: the `swarm_message` event body
+  carries the mailbox cursor, while the SSE `id:` is the event id used for
+  `Last-Event-ID`.
 - **Ack.** `ack_message` marks the original `acked` (with `ackedAt`), frees a
   mailbox slot, and delivers an `ack` envelope (`corrId` = the original id) to
   the sender's mailbox. The sender observes delivery rather than scraping.

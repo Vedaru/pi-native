@@ -178,6 +178,11 @@ struct Shared {
     /// Used by the gateway to emit SSE `id:` lines and resume with
     /// `Last-Event-ID` (ADR 0003).
     seq: AtomicU64,
+    /// Monotonic cursor for this unit's direct-message mailbox (VED-408).
+    /// Independent of `seq`: `Envelope.seq` is a dense mailbox cursor, while
+    /// the SSE `id:` is the event stream's id. The two are separate streams and
+    /// are never conflated.
+    mailbox_seq: AtomicU64,
     /// Most recent event type and its unix-seconds timestamp, for the swarm view.
     last_event: Mutex<Option<String>>,
     last_event_at: Mutex<i64>,
@@ -329,8 +334,10 @@ impl Shared {
             mailbox.messages.push_back(message.clone());
             unacked + 1
         };
-        // Fan out under the same seq as channel events: a polling client and an
-        // SSE client observe the same order.
+        // The event body carries the mailbox cursor (`message.seq`), while the
+        // SSE `id:` is the event stream's own id. A polling client and an SSE
+        // client observe the same order, but their resume cursors are separate
+        // streams (VED-408), so neither is derived from the other.
         let event = serde_json::json!({
             "type": "swarm_message",
             "seq": message.seq,
@@ -1057,7 +1064,7 @@ impl Host {
             .units
             .get(to)
             .ok_or_else(|| HostError::UnknownSession(to.to_string()))?;
-        let seq = recipient.shared.seq.fetch_add(1, Ordering::SeqCst) + 1;
+        let seq = recipient.shared.mailbox_seq.fetch_add(1, Ordering::SeqCst) + 1;
         let envelope = Envelope {
             id: format!("{from}-{seq}"),
             from: from.to_string(),
@@ -1108,7 +1115,7 @@ impl Host {
         // Deliver the ack to the original sender's mailbox, if it is a live
         // unit. A sender that has gone away does not fail the ack.
         if let Some(sender) = self.units.get(&original.from) {
-            let seq = sender.shared.seq.fetch_add(1, Ordering::SeqCst) + 1;
+            let seq = sender.shared.mailbox_seq.fetch_add(1, Ordering::SeqCst) + 1;
             ack.seq = seq;
             let _ = sender.shared.enqueue_message(ack.clone());
         }
