@@ -539,7 +539,16 @@ fn session_state(stream: &mut TcpStream, gateway: &Gateway, id: &str) {
     if !send_or_error(stream, gateway, id, json!({ "type": "get_state" })) {
         return;
     }
-    write_json(stream, 200, &await_state(&subscription));
+    let mut state = await_state(&subscription);
+    // Carry the live in-flight signal on the state payload too, so a client
+    // does not have to cross-reference `/swarm` (and does not mistake a
+    // mid-turn unit for an idle one). VED-387.
+    if let Ok(in_flight) = gateway.host().in_flight(id) {
+        if let Some(object) = state.as_object_mut() {
+            object.insert("inFlight".to_string(), json!(in_flight));
+        }
+    }
+    write_json(stream, 200, &state);
 }
 
 /// Forget a unit entirely. The session file on disk is untouched, so the same

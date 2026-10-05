@@ -279,3 +279,112 @@ fn open_refuses_new_units_at_the_cap() {
     assert_eq!(again, first);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A gate the test opens to let a blocked provider continue.
+type Gate = std::sync::Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>;
+
+/// A provider whose first call blocks until the gate opens, so the unit stays
+/// mid-turn with no intervening events (the long-silent-step case).
+struct BlockingProvider {
+    gate: Gate,
+    blocked: std::sync::atomic::AtomicBool,
+}
+
+impl pi_agent::ModelProvider for BlockingProvider {
+    fn complete(
+        &self,
+        _request: &pi_agent::CompletionRequest<'_>,
+    ) -> Result<AssistantTurn, pi_agent::AgentError> {
+        if !self.blocked.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            let (lock, cv) = &*self.gate;
+            let mut released = lock.lock().expect("gate lock");
+            while !*released {
+                released = cv.wait(released).expect("gate wait");
+            }
+        }
+        Ok(AssistantTurn {
+            text: "released".to_string(),
+            stop_reason: Some("end_turn".to_string()),
+            ..Default::default()
+        })
+    }
+}
+
+fn blocking_host(cwd: &std::path::Path) -> (Host, Gate) {
+    let gate = std::sync::Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+    let provider_gate = gate.clone();
+    let cwd = cwd.to_path_buf();
+    let host = Host::new(cwd.to_string_lossy().to_string(), move |unit_cwd: &str| {
+        Agent::new(
+            Box::new(BlockingProvider {
+                gate: provider_gate.clone(),
+                blocked: std::sync::atomic::AtomicBool::new(false),
+            }),
+            Vec::new(),
+            "system",
+            ToolContext::new(unit_cwd),
+        )
+    });
+    (host, gate)
+}
+
+/// A unit inside a long, silent step reports `in_flight`; once the run settles
+/// it reports idle (VED-387).
+#[test]
+fn in_flight_is_true_during_a_silent_turn_and_false_after() {
+    let dir = temp_dir("in-flight");
+    let (mut host, gate) = blocking_host(&dir);
+    let id = host.open(dir.join("s.jsonl")).expect("open");
+
+    // Idle before any work.
+    assert!(!host.in_flight(&id).expect("known session"));
+    assert!(!host.swarm()[0].in_flight);
+
+    let subscription = host.subscribe(&id).expect("subscribe");
+    host.send(&id, json!({ "type": "prompt", "text": "go" }))
+        .expect("send");
+
+    // `agent_start` opens the run; the provider then blocks with no further
+    // events, so the old event-timestamp heuristic would go stale here.
+    wait_for(&subscription, "agent_start", Duration::from_secs(2)).expect("agent_start");
+    // Give any race a moment, then assert the explicit flag is set.
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !host.in_flight(&id).expect("known session") && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(
+        host.in_flight(&id).expect("known session"),
+        "mid-turn unit must be in flight"
+    );
+    assert!(
+        host.swarm()[0].in_flight,
+        "swarm snapshot must carry the flag"
+    );
+
+    // Open the gate: the turn finishes and the run settles.
+    {
+        let (lock, cv) = &*gate;
+        *lock.lock().expect("gate lock") = true;
+        cv.notify_all();
+    }
+    wait_for(&subscription, "agent_settled", Duration::from_secs(2)).expect("agent_settled");
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while host.in_flight(&id).expect("known session") && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(
+        !host.in_flight(&id).expect("known session"),
+        "settled unit must be idle"
+    );
+    assert!(!host.swarm()[0].in_flight);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn in_flight_is_an_error_for_an_unknown_session() {
+    let dir = temp_dir("in-flight-unknown");
+    let host = one_turn_host(&dir, "hello");
+    assert!(host.in_flight("missing").is_err());
+    let _ = std::fs::remove_dir_all(&dir);
+}

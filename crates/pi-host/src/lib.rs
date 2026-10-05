@@ -17,7 +17,7 @@ use serde_json::Value;
 use std::collections::{HashMap, VecDeque};
 use std::io::{BufReader, Read, Write};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -72,6 +72,11 @@ struct Shared {
     name_cache: Mutex<Option<(u64, Option<String>)>>,
     /// Unix-seconds of the last command or event, used by the idle reaper.
     last_activity: AtomicI64,
+    /// Whether the agent is currently inside a run (`agent_start`/`turn_start`
+    /// seen, no `agent_settled` yet). Unlike the event-type heuristic this
+    /// stays true across a long silent step — a multi-minute tool call or a
+    /// slow provider — so a working unit never reads as idle (VED-387).
+    in_flight: AtomicBool,
 }
 
 impl Shared {
@@ -108,6 +113,17 @@ impl Shared {
                         .map(|duration| duration.as_secs() as i64)
                         .unwrap_or(0);
                 }
+            }
+            // Track the run lifecycle explicitly. `turn_end` is not the end of
+            // the run (`run_with` loops); `agent_settled` is.
+            match kind {
+                "agent_start" | "turn_start" => {
+                    self.in_flight.store(true, Ordering::SeqCst);
+                }
+                "agent_settled" | "done" | "error" => {
+                    self.in_flight.store(false, Ordering::SeqCst);
+                }
+                _ => {}
             }
         }
         // Hold both locks so a subscribe either sees the event in its replay or
@@ -157,6 +173,10 @@ impl Shared {
 
     fn last_event_at(&self) -> i64 {
         self.last_event_at.lock().map(|at| *at).unwrap_or(0)
+    }
+
+    fn in_flight(&self) -> bool {
+        self.in_flight.load(Ordering::SeqCst)
     }
 
     fn subscriber_count(&self) -> usize {
@@ -413,6 +433,10 @@ impl Unit {
         // entire gateway - for as long as the unit's current command takes (a
         // full `cargo build` can be minutes long).
         self.commands = None;
+        // The agent is being released, so it is no longer inside a run: clear
+        // the in-flight flag rather than leave a suspended unit reading as
+        // working (VED-387).
+        self.shared.in_flight.store(false, Ordering::SeqCst);
         if let Some(thread) = self.thread.take() {
             std::thread::spawn(move || {
                 let _ = thread.join();
@@ -447,6 +471,10 @@ pub struct UnitInfo {
     pub cwd: String,
     pub session_path: String,
     pub running: bool,
+    /// The agent is inside a run right now (see `Shared::in_flight`). `running`
+    /// only says the unit is not suspended; this distinguishes working from
+    /// idle.
+    pub in_flight: bool,
     pub last_event: Option<String>,
     pub last_event_at: i64,
     pub subscribers: usize,
@@ -568,6 +596,15 @@ impl Host {
             .unwrap_or(false)
     }
 
+    /// Whether the unit's agent is inside a run right now. `Ok(false)` for an
+    /// idle unit, `Err` for an unknown session.
+    pub fn in_flight(&self, session_id: &str) -> Result<bool, HostError> {
+        self.units
+            .get(session_id)
+            .map(|unit| unit.shared.in_flight())
+            .ok_or_else(|| HostError::UnknownSession(session_id.to_string()))
+    }
+
     /// Suspend every running unit that has been idle for at least `idle`.
     ///
     /// A unit is idle when it has no live subscribers and no command or event
@@ -607,6 +644,7 @@ impl Host {
                 cwd: unit.cwd.clone(),
                 session_path: unit.session_path.to_string_lossy().into_owned(),
                 running: unit.is_running(),
+                in_flight: unit.shared.in_flight(),
                 last_event: unit.shared.last_event(),
                 last_event_at: unit.shared.last_event_at(),
                 subscribers: unit.shared.subscriber_count(),

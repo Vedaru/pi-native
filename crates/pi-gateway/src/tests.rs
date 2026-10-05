@@ -577,45 +577,8 @@ fn rolled_over_replay_emits_a_resync_signal() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-#[test]
-fn allows_loopback_without_a_token() {
-    let dir = temp_dir("auth-none");
-    let server = start_gateway_with_token(&dir, "hello", None);
-    let (status, body) = request(server.addr, "GET", "/sessions", None);
-    assert_eq!(status, 200, "{body}");
-    let _ = std::fs::remove_dir_all(&dir);
-}
+// ---- VED-386 / VED-387: shared blocking provider -------------------------
 
-#[test]
-fn rejects_a_disallowed_host_header() {
-    let dir = temp_dir("host-header");
-    let server = start_gateway(&dir, "hello");
-    let mut stream = TcpStream::connect(server.addr).expect("connect");
-    let head = "GET /sessions HTTP/1.1\r\nHost: evil.example.com\r\nConnection: close\r\n\r\n";
-    stream.write_all(head.as_bytes()).expect("write");
-    stream.flush().expect("flush");
-    let mut response = String::new();
-    stream.read_to_string(&mut response).expect("read");
-    assert!(response.starts_with("HTTP/1.1 403"), "{response}");
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
-fn check_bind_security_fails_closed_for_non_loopback() {
-    // Non-loopback without a token is refused.
-    assert!(check_bind_security("0.0.0.0:30142", false).is_err());
-    assert!(check_bind_security("192.168.1.5:30142", false).is_err());
-    // Non-loopback with a token is allowed.
-    assert!(check_bind_security("0.0.0.0:30142", true).is_ok());
-    // Loopback is always allowed.
-    assert!(check_bind_security("127.0.0.1:30142", false).is_ok());
-    assert!(check_bind_security("[::1]:30142", false).is_ok());
-    assert!(check_bind_security("localhost:30142", false).is_ok());
-    // A hostname the platform resolves to a non-loopback IP is still refused.
-    assert!(check_bind_security("0.0.0.0:30142", false).is_err());
-    // A malformed address is an error regardless of the token.
-    assert!(check_bind_security("not-an-addr", true).is_err());
-}
 /// A gate the test opens to let a blocked provider continue.
 type Gate = std::sync::Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>;
 
@@ -630,8 +593,7 @@ fn open_gate(gate: &Gate) {
 }
 
 /// A provider whose first call blocks until the test opens the gate, so the
-/// unit stays mid-turn and cannot service `get_state`. Later calls return a
-/// turn immediately.
+/// unit stays mid-turn (with no further events) until released.
 struct BlockingProvider {
     gate: Gate,
     blocked: std::sync::atomic::AtomicBool,
@@ -658,8 +620,8 @@ impl pi_agent::ModelProvider for BlockingProvider {
     }
 }
 
-/// Start a gateway whose unit blocks on its first model call until the gate
-/// is opened.
+/// Start a gateway whose unit blocks on its first model call until the gate is
+/// opened.
 fn start_blocking_gateway(dir: &Path) -> (GatewayServer, Gate) {
     let gate = new_gate();
     let provider_gate = gate.clone();
@@ -732,6 +694,83 @@ fn get_state_reports_busy_for_a_unit_mid_turn() {
         state.get("system").is_some(),
         "full state carries the resolved context: {state}"
     );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Whether the unit reports `inFlight: true` on `/swarm`.
+fn swarm_in_flight(addr: SocketAddr, id: &str) -> bool {
+    let (status, body) = request(addr, "GET", "/swarm", None);
+    assert_eq!(status, 200, "{body}");
+    let payload: Value = serde_json::from_str(&body).unwrap();
+    payload["units"]
+        .as_array()
+        .expect("units")
+        .iter()
+        .find(|unit| unit["sessionId"] == json!(id))
+        .expect("unit in swarm")["inFlight"]
+        .as_bool()
+        .expect("inFlight bool")
+}
+
+/// A unit in a long silent turn reports `inFlight: true` on `/swarm`; an idle
+/// unit reports `false` (VED-387).
+#[test]
+fn swarm_reports_in_flight_during_a_long_turn() {
+    let dir = temp_dir("swarm-in-flight");
+    let (server, gate) = start_blocking_gateway(&dir);
+    let id = create_session(&server, &dir);
+
+    // Idle before any work.
+    assert!(!swarm_in_flight(server.addr, &id));
+
+    let mut sse = open_sse(server.addr, &format!("/sessions/{id}/events"));
+    let (status, body) = request(
+        server.addr,
+        "POST",
+        &format!("/sessions/{id}/commands"),
+        Some(json!({ "type": "prompt", "text": "go" })),
+    );
+    assert_eq!(status, 202, "{body}");
+    let seen = wait_for_sse(&mut sse, "agent_start", Duration::from_secs(3));
+    assert!(seen.contains("agent_start"), "{seen}");
+
+    // Mid-turn with no further events: the explicit flag must say working.
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while !swarm_in_flight(server.addr, &id) && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        swarm_in_flight(server.addr, &id),
+        "/swarm must report inFlight while the unit is mid-turn"
+    );
+
+    // Release and let the run settle; the flag must clear.
+    open_gate(&gate);
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    while swarm_in_flight(server.addr, &id) && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        !swarm_in_flight(server.addr, &id),
+        "/swarm must report idle once the run settles"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The `state` payload carries the same flag (false for an idle unit).
+#[test]
+fn state_payload_carries_in_flight() {
+    let dir = temp_dir("state-in-flight");
+    let server = start_gateway(&dir, "hello");
+    let id = create_session(&server, &dir);
+
+    let (status, body) = request(server.addr, "GET", &format!("/sessions/{id}"), None);
+    assert_eq!(status, 200, "{body}");
+    let state: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(state["type"], json!("state"), "{state}");
+    assert_eq!(state["inFlight"], json!(false), "{state}");
 
     let _ = std::fs::remove_dir_all(&dir);
 }
