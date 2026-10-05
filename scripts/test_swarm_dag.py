@@ -104,11 +104,22 @@ class ValidationTests(unittest.TestCase):
         self.assertIn("cycle", str(caught.exception).lower())
 
     def test_role_defaults_from_title(self):
-        # role is recomputed with the conductor's role_for (single source of truth).
-        g = dag.validate_goal(goal([{"key": "r", "title": "audit the gateway"}]))
+        # role is recomputed with the conductor's role_for (single source of
+        # truth). Only an explicit review/verify title is read-only; a bare
+        # "audit …" title is write work (VED-365: the VED project titles its
+        # fix issues "Swarm audit: <fix list>").
+        g = dag.validate_goal(goal([{"key": "r", "title": "review the gateway"}]))
         self.assertIsNone(g["nodes"][0]["role"])
         role = dag.conductor.role_for(g["nodes"][0]["title"])
         self.assertEqual(role, "reviewer")
+        self.assertIn(role, dag.conductor.READ_ONLY_ROLES)
+
+    def test_audit_title_defaults_to_a_writer(self):
+        # Regression for VED-365, which the DAG must agree with: "audit the
+        # gateway" is implementation work and routes to a write-capable unit.
+        role = dag.conductor.role_for("audit the gateway")
+        self.assertEqual(role, "coder")
+        self.assertIn(role, dag.conductor.EDITING_ROLES)
 
 
 class WaveTests(unittest.TestCase):
