@@ -1,0 +1,5 @@
+# The build context is the repo root; without this the container build copies
+# the whole 20+ GB target/ tree before it even starts compiling.
+target
+.git
+.pipelets
