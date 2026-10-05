@@ -63,7 +63,37 @@ def _load_collision():
 memory = _load_memory()
 collision = _load_collision()
 
+
+def _load_orchestrator():
+    """Load the sibling orchestrator for the shared project/state config.
+
+    `swarm_orchestrator` (VED-368) is the single source of truth for the Linear
+    project identity and the durable claim-state path; the conductor re-exports
+    them so consumers (`swarm_columns`, `swarm_watchdog`) keep one definition.
+    Registered in `sys.modules` before exec so dataclass field resolution works
+    on Python 3.14.
+    """
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "swarm_orchestrator.py")
+    spec = importlib.util.spec_from_file_location("swarm_orchestrator", path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["swarm_orchestrator"] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+orchestrator = _load_orchestrator()
+
 GATEWAY = os.environ.get("SWARM_GATEWAY", "http://127.0.0.1:30142")
+# Project identity and the durable state path come from the orchestrator (the
+# single source of truth); re-exported here so modules that load the conductor
+# for config keep resolving them (VED-391).
+PROJECT = orchestrator.PROJECT
+TEAM = orchestrator.TEAM
+STATE_PATH = orchestrator.STATE_PATH
+# Linear state *names* considered open. The orchestrator tracks state *types*
+# (`ACTIVE_STATE_TYPES`); the board and watchdog compare display names, so the
+# mapping lives here once. Terminal states are `Done`/`Canceled`/`Cancelled`.
+OPEN_STATES = {"Todo", "In Progress", "In Review"}
 POLL_SECONDS = 20
 
 # Events that mean a unit is actively working, mirroring `swarm_orchestrator`
