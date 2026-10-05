@@ -199,15 +199,15 @@ fn decode_png(input: &[u8], target_w: u32, target_h: u32) -> Option<Decoded> {
         1 => DynamicImage::ImageLuma8(GrayImage::from_raw(out_w, out_h, pixels)?),
         2 => {
             let mut rgb = Vec::with_capacity(out_w as usize * out_h as usize * 3);
-            for px in pixels.chunks_exact(2) {
-                rgb.extend_from_slice(&[px[0], px[0], px[0]]);
+            for &[gray, _alpha] in pixels.as_chunks::<2>().0 {
+                rgb.extend_from_slice(&[gray, gray, gray]);
             }
             DynamicImage::ImageRgb8(RgbImage::from_raw(out_w, out_h, rgb)?)
         }
         3 => DynamicImage::ImageRgb8(RgbImage::from_raw(out_w, out_h, pixels)?),
         _ => {
             let mut rgb = Vec::with_capacity(out_w as usize * out_h as usize * 3);
-            for px in pixels.chunks_exact(4) {
+            for px in pixels.as_chunks::<4>().0 {
                 rgb.extend_from_slice(&px[0..3]);
             }
             DynamicImage::ImageRgb8(RgbImage::from_raw(out_w, out_h, rgb)?)
