@@ -21,7 +21,7 @@ python3 scripts/swarm_stress.py --units 32 --mode idle
 
 | | pipelets | pi-node |
 | --- | --- | --- |
-| shipped runtime | one **12.4 MB** binary (4.6 MB tarball) | Node + `node_modules` |
+| shipped runtime | one **9.5 MB** binary (4.0 MB tarball) | Node + `node_modules` |
 | cold-idle RSS (`--rpc`) | **4.4 MB** | 111.3 MB |
 | cold-idle RSS (`--gateway`) | **5.0 MB** | — |
 | ratio | — | **0.04×** (≈25× smaller) |
@@ -178,6 +178,13 @@ panic = "abort"
 strip = true
 ```
 
-Fat LTO + `opt-level=2` measured smaller and not slower than thin/3 (binary
-~8.4 MB, idle 4.3 MB). CI's `memory-gate` job installs pi-node and the reference
-Rust port and re-runs `scripts/mem_gate.py` on every change.
+Binary size comes from the dependency set, not the profile. We dropped
+`fast_image_resize` (the image path now uses `image`'s box `thumbnail`, ~2.8 MB)
+and `image`'s JPEG feature (JPEG encode uses `libjpeg-turbo-rs`), taking the
+binary from ~12.4 MB to ~9.5 MB.
+
+`opt-level` is a deliberate trade: `"s"`/`"z"` shrink the binary further
+(~7.6/7.0 MB) but raise idle RSS by ~0.6/1.6 MB, which is wrong for a swarm
+(32 units x 1.6 MB). We keep `opt-level = 2` (~4.5 MB idle). CI's `memory-gate`
+job installs pi-node and the reference Rust port and re-runs
+`scripts/mem_gate.py` on every change.

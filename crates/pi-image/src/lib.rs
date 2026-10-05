@@ -9,8 +9,6 @@
 //! EXIF orientation is read and applied before resizing, as pi does.
 
 use base64::Engine as _;
-use fast_image_resize::{FilterType, ResizeAlg, ResizeOptions, Resizer};
-use image::codecs::jpeg::JpegEncoder;
 use image::{DynamicImage, ImageFormat};
 use std::io::Cursor;
 
@@ -157,11 +155,16 @@ fn encode_png(img: &DynamicImage) -> Option<Vec<u8>> {
 }
 
 fn encode_jpeg(rgb: &image::RgbImage, quality: u8) -> Option<Vec<u8>> {
-    let mut buffer = Vec::new();
-    JpegEncoder::new_with_quality(&mut buffer, quality)
-        .encode_image(rgb)
-        .ok()?;
-    Some(buffer)
+    let (width, height) = rgb.dimensions();
+    libjpeg_turbo_rs::Encoder::new(
+        rgb.as_raw(),
+        width as usize,
+        height as usize,
+        libjpeg_turbo_rs::PixelFormat::Rgb,
+    )
+    .quality(quality)
+    .encode()
+    .ok()
 }
 
 struct Candidate {
@@ -273,40 +276,16 @@ pub fn read_orientation(bytes: &[u8]) -> Option<u16> {
         .map(|value| value as u16)
 }
 
-/// An empty `DynamicImage` with the same pixel layout as `img`.
-fn empty_like(img: &DynamicImage, width: u32, height: u32) -> DynamicImage {
-    match img {
-        DynamicImage::ImageLuma8(_) => DynamicImage::new_luma8(width, height),
-        DynamicImage::ImageLumaA8(_) => DynamicImage::new_luma_a8(width, height),
-        DynamicImage::ImageRgb8(_) => DynamicImage::new_rgb8(width, height),
-        DynamicImage::ImageRgba8(_) => DynamicImage::new_rgba8(width, height),
-        DynamicImage::ImageLuma16(_) => DynamicImage::new_luma16(width, height),
-        DynamicImage::ImageLumaA16(_) => DynamicImage::new_luma_a16(width, height),
-        DynamicImage::ImageRgb16(_) => DynamicImage::new_rgb16(width, height),
-        DynamicImage::ImageRgba16(_) => DynamicImage::new_rgba16(width, height),
-        DynamicImage::ImageRgb32F(_) => DynamicImage::new_rgb32f(width, height),
-        DynamicImage::ImageRgba32F(_) => DynamicImage::new_rgba32f(width, height),
-        _ => DynamicImage::new_rgba8(width, height),
-    }
-}
-
-/// Resize `img` to `(tw, th)` with `fast_image_resize`.
+/// Resize `img` to `(tw, th)` with a box/area filter.
 ///
-/// `fast_image_resize` is SIMD-accelerated and row-streamed: it allocates only
-/// the destination plus a small convolution buffer, so peak memory is
-/// independent of the source size. (`image`'s own Lanczos3 builds a full
-/// `source_width x target_height` RGBA-f32 transient — 288 MB for a 9000x9000
-/// image — which is what made large images expensive.)
-///
-/// Falls back to the `image` crate for pixel types the resizer rejects.
+/// The decoders already reduce the source near the target, so a box downscale
+/// anti-aliases correctly and allocates only the output — no separate SIMD
+/// resize engine (and its code size) is needed.
 fn resample(img: &DynamicImage, tw: u32, th: u32) -> DynamicImage {
-    let mut dst = empty_like(img, tw, th);
-    let options = ResizeOptions::new().resize_alg(ResizeAlg::Convolution(FilterType::Lanczos3));
-    let mut resizer = Resizer::new();
-    match resizer.resize(img, &mut dst, &options) {
-        Ok(()) => dst,
-        Err(_) => img.resize_exact(tw, th, image::imageops::FilterType::Lanczos3),
-    }
+    // Box/area downscale: memory-light (allocates only the output) and correct
+    // anti-aliasing for the downscales a decoder already reduced to. `image`
+    // already provides it, so no separate resize engine is needed.
+    img.thumbnail_exact(tw, th)
 }
 
 /// Scale dimensions to fit the limits, preserving aspect ratio.

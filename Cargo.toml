@@ -14,8 +14,10 @@ serde_json = { version = "1", features = ["preserve_order"] }
 clap = { version = "4", features = ["derive"] }
 
 [profile.release]
-# Size and speed: fat LTO plus opt-level 2 measured smaller, lighter, and no
-# slower than thin/3 (binary ~7.7 MB vs ~8.7 MB; serve idle ~5.0 MB vs ~5.8 MB).
+# Fat LTO, single codegen unit, stripped, abort on panic. Keep opt-level 2:
+# "s"/"z" shrink the binary (~7.6/7.0 MB vs ~9.5 MB) but raise idle RSS by
+# ~0.6/1.6 MB, which is a bad trade for a swarm (32 units). Size comes from the
+# dependency set instead.
 lto = "fat"
 opt-level = 2
 strip = true

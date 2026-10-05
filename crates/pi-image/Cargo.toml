@@ -4,13 +4,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Native image decode/resize/encode for `read` attachments (fast_image_resize)"
+description = "Native image decode/resize/encode for `read` attachments"
 
 [dependencies]
-image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
+image = { version = "0.25", default-features = false, features = ["png", "gif", "webp"] }
 base64 = "0.22"
 kamadak-exif = "0.6"
-fast_image_resize = { version = "6", features = ["image"] }
 png = { version = "0.18", default-features = false }
 libjpeg-turbo-rs = "0.8"
 

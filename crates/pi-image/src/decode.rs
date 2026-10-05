@@ -11,8 +11,8 @@
 //!   only the reduced bitmap is allocated.
 //! - other formats fall back to `image`'s full decode (small in practice).
 //!
-//! The reduced bitmap is then handed to `fast_image_resize` for the final
-//! quality resize, which is cheap at that size.
+//! The reduced bitmap is then box-downscaled to the target, which is cheap at
+//! that size and needs no separate resize engine.
 
 use image::{DynamicImage, GrayImage, RgbImage};
 use std::io::Cursor;
