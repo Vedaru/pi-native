@@ -26,7 +26,7 @@ use pi_rpc::{Event, PiEventAdapter};
 use pi_triggers::{Episode, RunStore, Runner};
 use serde_json::{json, Value};
 use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
@@ -42,6 +42,14 @@ const MAX_BODY: usize = 1 << 20;
 pub struct Gateway {
     host: Mutex<Host>,
     triggers: Option<Mutex<TriggerRuntime>>,
+    /// When set, every request must present a matching bearer token. `None`
+    /// means the gateway is only safe on a loopback bind (the CLI enforces
+    /// this); it is never safe to expose an unauthenticated gateway publicly.
+    token: Option<String>,
+    /// Hosts accepted in the `Host` header. Requests whose `Host` names
+    /// anything else are rejected to blunt DNS-rebinding attacks. Loopback
+    /// names are always accepted.
+    allowed_hosts: Vec<String>,
 }
 
 struct TriggerRuntime {
@@ -54,6 +62,8 @@ impl Gateway {
         Self {
             host: Mutex::new(host),
             triggers: None,
+            token: None,
+            allowed_hosts: Vec::new(),
         }
     }
 
@@ -63,7 +73,65 @@ impl Gateway {
         Self {
             host: Mutex::new(host),
             triggers: Some(Mutex::new(TriggerRuntime { runner, store })),
+            token: None,
+            allowed_hosts: Vec::new(),
         }
+    }
+
+    /// Require `token` on every request (as `Authorization: Bearer <token>` or
+    /// `X-Pi-Token: <token>`). An empty token is ignored, so a blank
+    /// `--gateway-token`/env var cannot silently disable the check.
+    pub fn with_token(mut self, token: Option<String>) -> Self {
+        self.token = token.filter(|token| !token.is_empty());
+        self
+    }
+
+    /// Trust `hosts` in the `Host` header in addition to loopback names.
+    pub fn with_allowed_hosts<I, S>(mut self, hosts: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.allowed_hosts = hosts.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Enforce authentication and the `Host` allowlist for `request`; on
+    /// failure, write the error response and return `false`.
+    fn authorize(&self, stream: &mut TcpStream, request: &Request) -> bool {
+        if !self.host_allowed(request) {
+            write_json(
+                stream,
+                403,
+                &json!({ "error": "host not allowed; set the correct address" }),
+            );
+            return false;
+        }
+        if let Some(expected) = &self.token {
+            let presented = request.bearer_token();
+            let ok = presented
+                .map(|presented| constant_time_eq(presented.as_bytes(), expected.as_bytes()))
+                .unwrap_or(false);
+            if !ok {
+                write_json(stream, 401, &json!({ "error": "unauthorized" }));
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Whether the request's `Host` header names an accepted host. A missing
+    /// `Host` header is rejected (HTTP/1.1 requires one).
+    fn host_allowed(&self, request: &Request) -> bool {
+        let Some(host) = request.header("host") else {
+            return false;
+        };
+        let host = host_hostname(host);
+        is_loopback_host(host)
+            || self
+                .allowed_hosts
+                .iter()
+                .any(|allowed| allowed.eq_ignore_ascii_case(host))
     }
 
     /// Fire every due trigger at `now` (unix seconds); returns the episodes.
@@ -117,6 +185,68 @@ pub fn bind(host: Host) -> std::io::Result<GatewayServer> {
     Ok(GatewayServer { addr })
 }
 
+/// Whether `addr` is safe to serve without a token: every address it resolves
+/// to is loopback. Returns a resolved socket address on success, or a
+/// human-readable reason the bind must be refused.
+pub fn check_bind_security(addr: &str, has_token: bool) -> Result<SocketAddr, String> {
+    use std::net::ToSocketAddrs;
+
+    // Accept both `ip:port` literals and `host:port` names.
+    let mut resolved = addr
+        .to_socket_addrs()
+        .map_err(|error| format!("invalid --gateway-addr {addr:?}: {error}"))?;
+    let parsed = resolved
+        .next()
+        .ok_or_else(|| format!("--gateway-addr {addr:?} did not resolve to any address"))?;
+    // Fail closed when no token is set: every resolved address must be
+    // loopback, so `localhost` resolving to a non-loopback IP is still refused.
+    if !has_token {
+        let mut all = vec![parsed];
+        all.extend(resolved);
+        if all.iter().any(|addr| !addr.ip().is_loopback()) {
+            return Err(format!(
+                "refusing to bind non-loopback address {addr}: set --gateway-token or \
+                 PI_NATIVE_GATEWAY_TOKEN (or bind a loopback address)"
+            ));
+        }
+    }
+    Ok(parsed)
+}
+
+/// Constant-time byte comparison, so token checks do not leak length/prefix
+/// information through timing.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (left, right) in a.iter().zip(b.iter()) {
+        diff |= left ^ right;
+    }
+    diff == 0
+}
+
+/// Strip an optional `:port` from a `Host` header value, handling bracketed
+/// IPv6 literals (`[::1]:30142`).
+fn host_hostname(host: &str) -> &str {
+    let host = host.trim();
+    if let Some(rest) = host.strip_prefix('[') {
+        return rest.split(']').next().unwrap_or(rest);
+    }
+    host.split(':').next().unwrap_or(host)
+}
+
+/// Whether a bare hostname (no port) is a loopback name.
+fn is_loopback_host(host: &str) -> bool {
+    let host = host.trim_matches(|c| c == '[' || c == ']');
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    host.parse::<IpAddr>()
+        .map(|ip| ip.is_loopback())
+        .unwrap_or(false)
+}
+
 /// Accept loop. Each connection is handled on its own thread so a long SSE
 /// stream never blocks other requests.
 pub fn serve(listener: TcpListener, gateway: Arc<Gateway>) {
@@ -137,6 +267,8 @@ struct Request {
     query: String,
     /// The `Last-Event-ID` header, parsed as a sequence id, for SSE resume.
     last_event_id: Option<u64>,
+    /// The raw request headers, used for bearer-token authorization.
+    headers: Vec<(String, String)>,
     body: Vec<u8>,
 }
 
@@ -152,6 +284,29 @@ enum ReadOutcome {
 impl Request {
     fn json(&self) -> Option<Value> {
         serde_json::from_slice(&self.body).ok()
+    }
+
+    /// The first value for `name`, case-insensitively.
+    fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_str())
+    }
+
+    /// The bearer token from `Authorization: Bearer …` or `X-Pi-Token`.
+    fn bearer_token(&self) -> Option<String> {
+        if let Some(value) = self.header("authorization") {
+            let value = value.trim();
+            if let Some(token) = value
+                .strip_prefix("Bearer ")
+                .or_else(|| value.strip_prefix("bearer "))
+            {
+                return Some(token.trim().to_string());
+            }
+        }
+        self.header("x-pi-token")
+            .map(|value| value.trim().to_string())
     }
 }
 
@@ -187,13 +342,17 @@ fn read_request(stream: &mut TcpStream) -> std::io::Result<ReadOutcome> {
     };
     let mut content_length = 0usize;
     let mut last_event_id = None;
+    let mut headers = Vec::new();
     for line in lines {
         if let Some((key, value)) = line.split_once(':') {
+            let key = key.trim().to_string();
+            let value = value.trim().to_string();
             if key.eq_ignore_ascii_case("content-length") {
                 content_length = value.trim().parse().unwrap_or(0);
             } else if key.eq_ignore_ascii_case("last-event-id") {
                 last_event_id = value.trim().parse().ok();
             }
+            headers.push((key, value));
         }
     }
     if content_length > MAX_BODY {
@@ -213,6 +372,7 @@ fn read_request(stream: &mut TcpStream) -> std::io::Result<ReadOutcome> {
         path,
         query,
         last_event_id,
+        headers,
         body,
     }))
 }
@@ -223,6 +383,8 @@ fn write_headers(stream: &mut TcpStream, status: u16, content_type: &str, length
         201 => "Created",
         202 => "Accepted",
         400 => "Bad Request",
+        401 => "Unauthorized",
+        403 => "Forbidden",
         404 => "Not Found",
         413 => "Payload Too Large",
         _ => "Error",
@@ -261,6 +423,9 @@ fn handle_connection(mut stream: TcpStream, gateway: Arc<Gateway>) -> std::io::R
             return Ok(());
         }
     };
+    if !gateway.authorize(&mut stream, &request) {
+        return Ok(());
+    }
     let segments: Vec<&str> = request.path.trim_matches('/').split('/').collect();
     match (request.method.as_str(), segments.as_slice()) {
         ("GET", ["sessions"]) => {

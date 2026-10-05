@@ -55,6 +55,10 @@ struct Cli {
     /// Bind address for `--gateway`.
     #[arg(long, default_value = "127.0.0.1:30142")]
     gateway_addr: String,
+    /// Bearer token required on every gateway request (or PI_NATIVE_GATEWAY_TOKEN).
+    /// Required when `--gateway-addr` is not a loopback address.
+    #[arg(long)]
+    gateway_token: Option<String>,
     /// Load trigger definitions from a JSON array file (requires `--gateway`).
     #[arg(long)]
     triggers: Option<PathBuf>,
@@ -224,6 +228,7 @@ fn main() {
             &cli.extensions,
             &cli.extension_allow,
             &cli.gateway_addr,
+            cli.gateway_token.clone(),
             cli.triggers.as_deref(),
             cli.trigger_runs.as_deref(),
             cli.trigger_interval,
@@ -796,13 +801,24 @@ fn run_gateway(
     extensions: &[PathBuf],
     extension_allow: &[String],
     addr: &str,
+    token: Option<String>,
     triggers: Option<&std::path::Path>,
     trigger_runs: Option<&std::path::Path>,
     trigger_interval: u64,
     idle_timeout: u64,
     max_units: usize,
 ) {
+    // Fail closed: never serve an unauthenticated control plane off-loopback.
+    let bind_addr = match pi_gateway::check_bind_security(addr, token.is_some()) {
+        Ok(bind_addr) => bind_addr,
+        Err(error) => {
+            eprintln!("pi-native: {error}");
+            std::process::exit(1);
+        }
+    };
     let cwd = std::env::current_dir().unwrap_or_default();
+    // `--gateway-token` wins; otherwise fall back to the environment.
+    let token = token.or_else(|| std::env::var("PI_NATIVE_GATEWAY_TOKEN").ok());
     let extensions = extensions.to_vec();
     let extension_allow = extension_allow.to_vec();
     let factory = move |unit_cwd: &str| {
@@ -820,10 +836,10 @@ fn run_gateway(
     };
     let host =
         pi_host::Host::new(cwd.to_string_lossy().to_string(), factory).with_max_units(max_units);
-    let listener = match std::net::TcpListener::bind(addr) {
+    let listener = match std::net::TcpListener::bind(bind_addr) {
         Ok(listener) => listener,
         Err(error) => {
-            eprintln!("pi-native: cannot bind {addr}: {error}");
+            eprintln!("pi-native: cannot bind {bind_addr}: {error}");
             std::process::exit(1);
         }
     };
@@ -842,14 +858,17 @@ fn run_gateway(
             });
             let sessions = cwd.join(".pi-native").join("trigger-sessions");
             let runner = pi_triggers::Runner::new(triggers, sessions);
-            Arc::new(pi_gateway::Gateway::with_triggers(
-                host,
-                runner,
-                Box::new(store),
-            ))
+            pi_gateway::Gateway::with_triggers(host, runner, Box::new(store))
         }
-        None => Arc::new(pi_gateway::Gateway::new(host)),
+        None => pi_gateway::Gateway::new(host),
     };
+    // Allow the header host the operator actually bound, plus loopback.
+    let mut allowed_hosts = vec!["localhost".to_string()];
+    let bound_host = bind_addr.ip().to_string();
+    if !bound_host.is_empty() {
+        allowed_hosts.push(bound_host);
+    }
+    let gateway = Arc::new(gateway.with_token(token).with_allowed_hosts(allowed_hosts));
     if triggers.is_some() {
         gateway.spawn_trigger_loop(std::time::Duration::from_secs(trigger_interval.max(1)));
     }
@@ -859,7 +878,7 @@ fn run_gateway(
             std::time::Duration::from_secs(idle_timeout),
         );
     }
-    eprintln!("pi-native gateway listening on http://{addr}");
+    eprintln!("pi-native gateway listening on http://{bind_addr}");
     pi_gateway::serve(listener, gateway);
 }
 

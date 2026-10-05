@@ -19,6 +19,42 @@ PI_NATIVE_GATEWAY=http://127.0.0.1:30142 npm run dev
 
 When `PI_NATIVE_GATEWAY` is unset the fork behaves exactly as upstream.
 
+## Authentication (threat model)
+
+The gateway fronts a fully-capable agent: any peer that can reach the port can
+run `bash`/`edit`/`write` with the gateway process's privileges, read full
+transcripts, and approve `ui_request` prompts. Treat the port as remote code
+execution and never expose it untrusted.
+
+- **Loopback only by default.** `--gateway-addr` defaults to `127.0.0.1:30142`.
+  Binding a non-loopback address without a token is refused at startup
+  (fail closed).
+- **Token auth.** Set `--gateway-token <token>` or
+  `PI_NATIVE_GATEWAY_TOKEN=<token>`. Every route (including `GET /sessions`,
+  the SSE stream, and the POST control plane) then requires
+  `Authorization: Bearer <token>` (or `X-Pi-Token: <token>`) and answers `401`
+  otherwise. The token is compared in constant time and never logged.
+- **Host allowlist.** Requests whose `Host` header names anything other than a
+  loopback name or the bound address are rejected with `403`, blunting
+  DNS-rebinding attacks.
+
+When using a token, export it to both processes:
+
+```bash
+# 1. gateway
+PI_NATIVE_GATEWAY_TOKEN=$(openssl rand -hex 24) \
+  pi-native --gateway --gateway-addr 0.0.0.0:30142 \
+  --provider openai-completions --base-url … --model … --api-key …
+
+# 2. pi-web fork (same token)
+PI_NATIVE_GATEWAY=http://127.0.0.1:30142 \
+PI_NATIVE_GATEWAY_TOKEN=<same token> \
+  npm run dev
+```
+
+pi-web must attach the token to every request; without it the gateway returns
+`401` on the session list, streams, and commands.
+
 ## Approach
 
 pi-web embeds pi's SDK in-process, so the integration is deliberately

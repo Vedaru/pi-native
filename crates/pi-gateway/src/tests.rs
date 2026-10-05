@@ -13,6 +13,10 @@ fn temp_dir(name: &str) -> PathBuf {
 }
 
 fn start_gateway(dir: &Path, text: &str) -> GatewayServer {
+    start_gateway_with_token(dir, text, None)
+}
+
+fn start_gateway_with_token(dir: &Path, text: &str, token: Option<&str>) -> GatewayServer {
     let turns = vec![AssistantTurn {
         text: text.to_string(),
         stop_reason: Some("end_turn".to_string()),
@@ -27,17 +31,35 @@ fn start_gateway(dir: &Path, text: &str) -> GatewayServer {
             ToolContext::new(unit_cwd),
         )
     });
-    bind(host).expect("bind")
+    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let gateway = Arc::new(Gateway::new(host).with_token(token.map(str::to_string)));
+    std::thread::spawn(move || serve(listener, gateway));
+    GatewayServer { addr }
 }
 
 /// A blocking one-shot HTTP request (the server closes the connection).
 fn request(addr: SocketAddr, method: &str, path: &str, body: Option<Value>) -> (u16, String) {
+    request_with_auth(addr, method, path, body, None)
+}
+
+/// Like [`request`], but attaching `Authorization: Bearer <token>` when set.
+fn request_with_auth(
+    addr: SocketAddr,
+    method: &str,
+    path: &str,
+    body: Option<Value>,
+    token: Option<&str>,
+) -> (u16, String) {
     let mut stream = TcpStream::connect(addr).expect("connect");
     let body = body
         .map(|value| serde_json::to_vec(&value).unwrap())
         .unwrap_or_default();
+    let auth = token
+        .map(|token| format!("Authorization: Bearer {token}\r\n"))
+        .unwrap_or_default();
     let head = format!(
-        "{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "{method} {path} HTTP/1.1\r\nHost: localhost\r\n{auth}Content-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
     );
     stream.write_all(head.as_bytes()).expect("write head");
@@ -392,6 +414,68 @@ fn sse_frames_carry_increasing_ids() {
 }
 
 #[test]
+fn rejects_unauthenticated_requests_when_token_is_set() {
+    let dir = temp_dir("auth-missing");
+    let server = start_gateway_with_token(&dir, "hello", Some("secret"));
+
+    // Every route is gated, including GETs and the POST control plane.
+    for (method, path) in [
+        ("GET", "/sessions"),
+        ("GET", "/swarm"),
+        ("GET", "/sessions/missing"),
+        ("GET", "/sessions/missing/events"),
+        ("POST", "/sessions"),
+        ("DELETE", "/sessions/missing"),
+        ("POST", "/sessions/missing/commands"),
+        ("POST", "/sessions/missing/ui_response"),
+    ] {
+        let (status, body) = request(server.addr, method, path, Some(json!({})));
+        assert_eq!(status, 401, "{method} {path} -> {status}: {body}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn rejects_a_wrong_token() {
+    let dir = temp_dir("auth-wrong");
+    let server = start_gateway_with_token(&dir, "hello", Some("secret"));
+
+    let (status, body) = request_with_auth(server.addr, "GET", "/sessions", None, Some("wrong"));
+    assert_eq!(status, 401, "{body}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn accepts_the_correct_token_on_every_transport() {
+    let dir = temp_dir("auth-ok");
+    let server = start_gateway_with_token(&dir, "hello", Some("secret"));
+
+    let (status, body) = request_with_auth(server.addr, "GET", "/sessions", None, Some("secret"));
+    assert_eq!(status, 200, "{body}");
+    let data: Value = serde_json::from_str(&body).unwrap();
+    assert!(data["sessions"].is_array(), "{data}");
+
+    // `X-Pi-Token` works too.
+    let mut stream = TcpStream::connect(server.addr).expect("connect");
+    let head = "GET /sessions HTTP/1.1\r\nHost: localhost\r\nX-Pi-Token: secret\r\nConnection: close\r\n\r\n";
+    stream.write_all(head.as_bytes()).expect("write");
+    stream.flush().expect("flush");
+    let mut response = String::new();
+    stream.read_to_string(&mut response).expect("read");
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+
+    // The control plane works end to end with the token.
+    let (status, body) = request_with_auth(
+        server.addr,
+        "POST",
+        "/sessions",
+        Some(json!({ "sessionPath": dir.join("s.jsonl").to_string_lossy() })),
+        Some("secret"),
+    );
+    assert_eq!(status, 201, "{body}");    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn last_event_id_replays_only_newer_events() {
     let dir = temp_dir("sse-resume");
     let server = start_gateway(&dir, "hello");
@@ -491,4 +575,44 @@ fn rolled_over_replay_emits_a_resync_signal() {
         "resync frame should explain the gap: {gap_text}"
     );
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn allows_loopback_without_a_token() {
+    let dir = temp_dir("auth-none");
+    let server = start_gateway_with_token(&dir, "hello", None);
+    let (status, body) = request(server.addr, "GET", "/sessions", None);
+    assert_eq!(status, 200, "{body}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn rejects_a_disallowed_host_header() {
+    let dir = temp_dir("host-header");
+    let server = start_gateway(&dir, "hello");
+    let mut stream = TcpStream::connect(server.addr).expect("connect");
+    let head = "GET /sessions HTTP/1.1\r\nHost: evil.example.com\r\nConnection: close\r\n\r\n";
+    stream.write_all(head.as_bytes()).expect("write");
+    stream.flush().expect("flush");
+    let mut response = String::new();
+    stream.read_to_string(&mut response).expect("read");
+    assert!(response.starts_with("HTTP/1.1 403"), "{response}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn check_bind_security_fails_closed_for_non_loopback() {
+    // Non-loopback without a token is refused.
+    assert!(check_bind_security("0.0.0.0:30142", false).is_err());
+    assert!(check_bind_security("192.168.1.5:30142", false).is_err());
+    // Non-loopback with a token is allowed.
+    assert!(check_bind_security("0.0.0.0:30142", true).is_ok());
+    // Loopback is always allowed.
+    assert!(check_bind_security("127.0.0.1:30142", false).is_ok());
+    assert!(check_bind_security("[::1]:30142", false).is_ok());
+    assert!(check_bind_security("localhost:30142", false).is_ok());
+    // A hostname the platform resolves to a non-loopback IP is still refused.
+    assert!(check_bind_security("0.0.0.0:30142", false).is_err());
+    // A malformed address is an error regardless of the token.
+    assert!(check_bind_security("not-an-addr", true).is_err());
 }
