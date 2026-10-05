@@ -616,3 +616,122 @@ fn check_bind_security_fails_closed_for_non_loopback() {
     // A malformed address is an error regardless of the token.
     assert!(check_bind_security("not-an-addr", true).is_err());
 }
+/// A gate the test opens to let a blocked provider continue.
+type Gate = std::sync::Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>;
+
+fn new_gate() -> Gate {
+    std::sync::Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()))
+}
+
+fn open_gate(gate: &Gate) {
+    let (lock, cv) = &**gate;
+    *lock.lock().expect("gate lock") = true;
+    cv.notify_all();
+}
+
+/// A provider whose first call blocks until the test opens the gate, so the
+/// unit stays mid-turn and cannot service `get_state`. Later calls return a
+/// turn immediately.
+struct BlockingProvider {
+    gate: Gate,
+    blocked: std::sync::atomic::AtomicBool,
+    text: String,
+}
+
+impl pi_agent::ModelProvider for BlockingProvider {
+    fn complete(
+        &self,
+        _request: &pi_agent::CompletionRequest<'_>,
+    ) -> Result<AssistantTurn, pi_agent::AgentError> {
+        if !self.blocked.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            let (lock, cv) = &*self.gate;
+            let mut released = lock.lock().expect("gate lock");
+            while !*released {
+                released = cv.wait(released).expect("gate wait");
+            }
+        }
+        Ok(AssistantTurn {
+            text: self.text.clone(),
+            stop_reason: Some("end_turn".to_string()),
+            ..Default::default()
+        })
+    }
+}
+
+/// Start a gateway whose unit blocks on its first model call until the gate
+/// is opened.
+fn start_blocking_gateway(dir: &Path) -> (GatewayServer, Gate) {
+    let gate = new_gate();
+    let provider_gate = gate.clone();
+    let cwd = dir.to_path_buf();
+    let host = Host::new(cwd.to_string_lossy().to_string(), move |unit_cwd: &str| {
+        Agent::new(
+            Box::new(BlockingProvider {
+                gate: provider_gate.clone(),
+                blocked: std::sync::atomic::AtomicBool::new(false),
+                text: "released".to_string(),
+            }),
+            Vec::new(),
+            "system",
+            ToolContext::new(unit_cwd),
+        )
+    });
+    (bind(host).expect("bind"), gate)
+}
+
+/// A unit mid-turn is busy, not broken: `GET /sessions/:id` must report
+/// `busy: true`, not `error: timed out` (VED-386).
+#[test]
+fn get_state_reports_busy_for_a_unit_mid_turn() {
+    let dir = temp_dir("busy");
+    let (server, release) = start_blocking_gateway(&dir);
+    let id = create_session(&server, &dir);
+
+    // Start a turn and wait until the unit is actually inside the model call:
+    // the `agent_start` event is published before `complete` blocks.
+    let mut sse = open_sse(server.addr, &format!("/sessions/{id}/events"));
+    let (status, body) = request(
+        server.addr,
+        "POST",
+        &format!("/sessions/{id}/commands"),
+        Some(json!({ "type": "prompt", "text": "go" })),
+    );
+    assert_eq!(status, 202, "{body}");
+    let seen = wait_for_sse(&mut sse, "agent_start", Duration::from_secs(3));
+    assert!(seen.contains("agent_start"), "{seen}");
+
+    // The bounded state wait expires because the unit is mid-turn. That is a
+    // `busy` marker, not an error response.
+    let (status, body) = request(server.addr, "GET", &format!("/sessions/{id}"), None);
+    assert_eq!(status, 200, "{body}");
+    let state: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(state["type"], json!("state"), "{state}");
+    assert_eq!(state["busy"], json!(true), "{state}");
+    assert!(
+        state.get("error").is_none(),
+        "must not be an error: {state}"
+    );
+
+    // Release the turn; the unit finishes and a later poll returns full state.
+    open_gate(&release);
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let mut resolved = None;
+    while std::time::Instant::now() < deadline {
+        let (status, body) = request(server.addr, "GET", &format!("/sessions/{id}"), None);
+        assert_eq!(status, 200, "{body}");
+        let state: Value = serde_json::from_str(&body).unwrap();
+        if state["busy"] != json!(true) {
+            resolved = Some(state);
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let state = resolved.expect("unit never returned to a full state response");
+    assert_eq!(state["type"], json!("state"), "{state}");
+    assert!(
+        state.get("system").is_some(),
+        "full state carries the resolved context: {state}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -556,11 +556,31 @@ fn remove_session(stream: &mut TcpStream, gateway: &Gateway, id: &str) {
     }
 }
 
+/// Why an [`await_response`] wait did not produce the awaited event.
+enum AwaitError {
+    /// The bounded wait elapsed without the event. The unit is still alive.
+    TimedOut,
+    /// The unit was suspended or dropped this subscriber.
+    Disconnected,
+}
+
 /// Wait for the `state` event emitted in response to `get_state`.
+///
+/// A unit that is mid-turn processes commands serially, so it cannot service
+/// `get_state` until the current turn ends and the bounded wait expires. That
+/// is `busy`, not broken: report it as a normal state response with
+/// `busy: true` so a caller (or the conductor) can tell "busy" from "wedged"
+/// instead of reading a false timeout error (VED-386).
 fn await_state(subscription: &Subscription) -> Value {
-    await_response(subscription, "state", |event| {
+    match await_response(subscription, |event| {
         event.get("type").and_then(Value::as_str) == Some("state")
-    })
+    }) {
+        Ok(event) => event,
+        Err(AwaitError::TimedOut) => json!({ "type": "state", "busy": true }),
+        Err(AwaitError::Disconnected) => {
+            json!({ "error": "unit closed before state arrived" })
+        }
+    }
 }
 
 fn session_commands(stream: &mut TcpStream, gateway: &Gateway, id: &str) {
@@ -570,10 +590,11 @@ fn session_commands(stream: &mut TcpStream, gateway: &Gateway, id: &str) {
     if !send_or_error(stream, gateway, id, json!({ "type": "get_commands" })) {
         return;
     }
-    let data = await_response(&subscription, "get_commands", |event| {
+    let data = await_response(&subscription, |event| {
         event.get("type").and_then(Value::as_str) == Some("response")
             && event.get("command").and_then(Value::as_str) == Some("get_commands")
-    });
+    })
+    .unwrap_or_else(|error| await_error(error, "get_commands"));
     write_json(stream, 200, &data);
 }
 
@@ -585,40 +606,46 @@ fn session_title(stream: &mut TcpStream, gateway: &Gateway, id: &str) {
     if !send_or_error(stream, gateway, id, json!({ "type": "generate_title" })) {
         return;
     }
-    let data = await_response(&subscription, "generate_title", |event| {
+    let data = await_response(&subscription, |event| {
         event.get("type").and_then(Value::as_str) == Some("response")
             && event.get("command").and_then(Value::as_str) == Some("generate_title")
-    });
+    })
+    .unwrap_or_else(|error| await_error(error, "generate_title"));
     write_json(stream, 200, &data);
+}
+
+/// The error body for a wait that did not complete.
+fn await_error(error: AwaitError, label: &str) -> Value {
+    match error {
+        AwaitError::TimedOut => json!({ "error": format!("timed out waiting for {label}") }),
+        AwaitError::Disconnected => {
+            json!({ "error": format!("unit closed before {label} arrived") })
+        }
+    }
 }
 
 /// Wait for the first event matching `predicate`, returning its data payload.
 fn await_response(
     subscription: &Subscription,
-    label: &str,
     predicate: impl Fn(&Value) -> bool,
-) -> Value {
+) -> Result<Value, AwaitError> {
     let deadline = std::time::Instant::now() + STATE_TIMEOUT;
     loop {
         let remaining = deadline.saturating_duration_since(std::time::Instant::now());
         if remaining.is_zero() {
-            return json!({ "error": format!("timed out waiting for {label}") });
+            return Err(AwaitError::TimedOut);
         }
         match subscription.recv_timeout(remaining) {
             Ok(event) if predicate(&event) => {
                 // A `state` event is the payload; a `response` carries it in `data`.
                 if event.get("type").and_then(Value::as_str) == Some("response") {
-                    return event.get("data").cloned().unwrap_or(Value::Null);
+                    return Ok(event.get("data").cloned().unwrap_or(Value::Null));
                 }
-                return event;
+                return Ok(event);
             }
             Ok(_) => continue,
-            Err(RecvError::Timeout) => {
-                return json!({ "error": format!("timed out waiting for {label}") })
-            }
-            Err(RecvError::Disconnected) => {
-                return json!({ "error": format!("unit closed before {label} arrived") })
-            }
+            Err(RecvError::Timeout) => return Err(AwaitError::TimedOut),
+            Err(RecvError::Disconnected) => return Err(AwaitError::Disconnected),
         }
     }
 }
