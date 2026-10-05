@@ -23,6 +23,12 @@ symbols it expects to touch — and the conductor checks it against the other
 in-flight write intents. An overlapping intent is blocked and the collision is
 recorded on both cards, so parallel runs cannot silently race onto the same
 files (VED-375; detector in `scripts/swarm_collision.py`).
+
+Code-editing cards are dispatched into a **per-card worktree** so they never
+touch the shared main tree (VED-388). Before dispatch the conductor calls
+`swarm_worktree.py create <ID>`, starts (or reuses) a worker session whose cwd
+is that path, and tells the unit to commit on `swarm/<ID>`. When a card reaches
+a terminal state the worktree is removed with `--branch`.
 """
 
 from __future__ import annotations
@@ -69,6 +75,21 @@ merge_queue = _load_merge_queue()
 
 GATEWAY = os.environ.get("SWARM_GATEWAY", "http://127.0.0.1:30142")
 POLL_SECONDS = 20
+
+# Events that mean a unit is actively working, mirroring `swarm_orchestrator`
+# (the single source of truth for liveness). `state`/`response` poll replies are
+# never active; a busy unit emitted an active event inside the window.
+ACTIVE_EVENTS = {
+    "agent_start",
+    "turn_start",
+    "message_start",
+    "message_update",
+    "assistant_delta",
+    "thinking_delta",
+    "tool_start",
+    "tool_end",
+}
+BUSY_WINDOW_SECONDS = 90
 
 # Long-lived units bloat and drift: a role unit that kept every card's
 # transcript would send a growing, irrelevant context to the provider. By
@@ -130,6 +151,42 @@ VERIFY_FAIL = "fail"
 # A verification dispatch is in flight; the owner must not be re-dispatched while
 # a card is awaiting a verdict.
 AWAITING_VERIFICATION = "awaiting_verification"
+
+# The worktree helper (VED-370) that maps a card id to an isolated checkout.
+WORKTREE_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "swarm_worktree.py")
+# The repo this conductor lives in: <repo>/scripts/swarm_conductor.py.
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def repo_root() -> str:
+    """The main repo root, even when the conductor runs from a linked worktree.
+
+    `--git-common-dir` points at the main checkout's `.git` from any worktree,
+    so its parent is the main repo (VED-388 acceptance keys off that path).
+    """
+    result = subprocess.run(
+        ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode == 0 and result.stdout.strip():
+        return os.path.dirname(result.stdout.strip())
+    return REPO_ROOT
+
+
+def worktree_root() -> str:
+    """Where `swarm_worktree.py` keeps per-card checkouts, matching its default
+    (`<repo-parent>/<repo-name>-ws`). Read at call time so tests can override."""
+    configured = os.environ.get("SWARM_WORKTREE_ROOT")
+    if configured:
+        return configured
+    main = repo_root()
+    return os.path.join(os.path.dirname(main), f"{os.path.basename(main)}-ws")
+
+# Card states that mean the work is over: the worktree (and its branch) can be
+# removed. `Canceled` is Linear's spelling.
+TERMINAL_ISSUE_STATES = {"Done", "Canceled", "Cancelled"}
 
 
 # Titles that ask for review-only work route to a read-only unit. Matched only
@@ -368,6 +425,33 @@ REOPEN_PROMPT = (
 )
 
 
+def all_issue_states() -> dict[str, str]:
+    """Every card's identifier -> Linear state name, for the reconcile pass."""
+    result = subprocess.run(
+        ["linear", "issue", "mine", "--team", TEAM, "--project", PROJECT, "--all-states", "--json"],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "LINEAR_IGNORE_ENV_FILE": "1"},
+    )
+    nodes = json.loads(result.stdout)["issues"]["nodes"]
+    return {
+        node["identifier"]: (node.get("state") or {}).get("name") or ""
+        for node in nodes
+    }
+
+
+def swarm() -> dict[str, dict]:
+    with urllib.request.urlopen(f"{GATEWAY}/swarm", timeout=5) as response:
+        payload = json.load(response)
+    return {unit["sessionId"]: unit for unit in payload["units"]}
+
+
+def is_busy(unit: dict, now: float) -> bool:
+    if unit.get("lastEvent") not in ACTIVE_EVENTS:
+        return False
+    return now - float(unit.get("lastEventAt") or 0) < BUSY_WINDOW_SECONDS
+
+
 def dispatch(session_id: str, text: str) -> None:
     body = json.dumps({"type": "prompt", "text": text}).encode()
     request = urllib.request.Request(
@@ -396,6 +480,120 @@ def abort(session_id: str) -> None:
             pass
     except OSError:
         pass
+
+
+def worktree_path_for(identifier: str) -> str:
+    """Where `swarm_worktree.py create <ID>` puts a card's checkout."""
+    return os.path.join(worktree_root(), identifier)
+
+
+def worktree_create(identifier: str) -> str | None:
+    """Create (or reuse) the card's worktree; return its path, or None on error.
+
+    The helper is idempotent: an existing path is printed unchanged. We do not
+    pass `--force`, so a retry after a failure reuses the on-disk tree rather
+    than silently resetting uncommitted work.
+    """
+    result = subprocess.run(
+        ["python3", WORKTREE_SCRIPT, "create", identifier],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        print(f"worktree create failed for {identifier}: {result.stderr.strip()}", flush=True)
+        return None
+    return result.stdout.strip() or worktree_path_for(identifier)
+
+
+def worktree_remove(identifier: str) -> bool:
+    """Remove the card's worktree and delete its branch. Idempotent enough for
+    a reconcile loop: a missing worktree is reported by the helper, not fatal."""
+    result = subprocess.run(
+        ["python3", WORKTREE_SCRIPT, "remove", identifier, "--force", "--branch"],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        print(f"worktree remove failed for {identifier}: {result.stderr.strip()}", flush=True)
+        return False
+    return True
+
+
+def reusable_worker(units: dict[str, dict], path: str, role: str) -> str | None:
+    """An idle worker already rooted in `path` and owned by `role`, if any.
+
+    Reusing it avoids spawning a second agent for a card that is being retried,
+    and keeps the one-worker-per-card budget (VED-388).
+    """
+    for session_id, unit in units.items():
+        if unit.get("cwd") != path:
+            continue
+        if unit.get("unit") not in (role, None):
+            continue
+        if is_busy(unit, time.time()) or unit.get("inFlight"):
+            continue
+        return session_id
+    return None
+
+
+def spawn_worker(path: str, role: str) -> str | None:
+    """Start a worker session whose cwd is `path`; return its session id.
+
+    `POST /sessions` with a `cwd` creates a fresh session file under the agent
+    directory and jails the unit's tools to that cwd, so a dispatched code card
+    can only edit its own worktree.
+    """
+    body = json.dumps({"cwd": path, "unit": role}).encode()
+    request = urllib.request.Request(
+        f"{GATEWAY}/sessions",
+        data=body,
+        headers={"content-type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            payload = json.load(response)
+    except Exception as error:
+        print(f"worker spawn failed at {path}: {error}", flush=True)
+        return None
+    return payload.get("sessionId")
+
+
+def ensure_worker(identifier: str, role: str, units: dict[str, dict]) -> tuple[str | None, str | None]:
+    """Create the worktree then reuse-or-spawn exactly one worker for the card.
+
+    Returns `(session_id, path)`; both are `None` if the worktree or the worker
+    could not be prepared, so the caller can leave the claim open for a retry.
+    """
+    path = worktree_create(identifier)
+    if path is None:
+        return None, None
+    session_id = reusable_worker(units, path, role) or spawn_worker(path, role)
+    return session_id, path
+
+
+def reconcile_worktrees(state: dict, terminal_ids: set[str]) -> int:
+    """Remove worktrees for cards that have reached a terminal Linear state.
+
+    `terminal_ids` is the set of identifiers currently in a terminal state; a
+    claim that was dispatched into a worktree and is now terminal is unlinked,
+    the branch deleted, and the record dropped from the claim table. Returns how
+    many were removed.
+    """
+    removed = 0
+    for identifier in list(state):
+        if identifier not in terminal_ids:
+            continue
+        record = state.get(identifier) or {}
+        if record.get("worktree"):
+            if not worktree_remove(identifier):
+                # Keep the record so the next pass retries the removal rather
+                # than leaking the worktree and branch.
+                continue
+            removed += 1
+        state.pop(identifier, None)
+    return removed
+
 
 
 def reset_context(session_id: str) -> None:
@@ -429,24 +627,47 @@ def memory_context() -> str:
         return ""
 
 
-def assignment_prompt(identifier: str, title: str, role: str) -> str:
+def branch_for(identifier: str) -> str:
+    """The dedicated branch for a card's worktree."""
+    return f"swarm/{identifier}"
+
+
+def assignment_prompt(
+    identifier: str, title: str, role: str, worktree: str | None = None
+) -> str:
     """Prompt for a write-capable unit: implement, gate, report for verification.
 
     The owner never sets the card Done (VED-369): it moves the card to
     `In Review` so the conductor can dispatch a fresh verifier. Only a verifier
     pass promotes it to Done.
+
+    When a `worktree` is given the unit is told to work there and commit on
+    `swarm/<ID>`, so the dispatch never edits the shared main tree (VED-388).
     """
-    prompt = (
-        f"Conductor assignment: work Linear issue {identifier}.\n"
-        f"Title: {title}\n"
+    lines = [
+        f"Conductor assignment: work Linear issue {identifier}.",
+        f"Title: {title}",
+    ]
+    if worktree:
+        lines.append(
+            f"Work ONLY inside the isolated worktree {worktree} (branch {branch_for(identifier)}). "
+            f"Your cwd is already that path. Do NOT touch the main tree."
+        )
+    lines.append(
         f"Read it with `linear issue view {identifier}`. Set it In Progress, implement the fix, "
         f"then run `cargo fmt --all`, `cargo clippy --workspace --all-targets -- -D warnings`, "
         f"and `cargo test --workspace`. Commit only the files you changed with a message that "
-        f"references {identifier}; do NOT push. Comment the result on {identifier}, then move it "
+        f"references {identifier}; do NOT push."
+    )
+    if worktree:
+        lines.append(f"Commit on branch {branch_for(identifier)} inside the worktree.")
+    lines.append(
+        f"Comment the result on {identifier}, then move it "
         f"to In Review — do NOT set it Done: an independent verifier must re-run the acceptance "
         f"check first. Report the exact test count from `cargo test --workspace` in your comment. "
         f"Sign — [{role}]."
     )
+    prompt = "\n".join(lines)
     context = memory_context()
     if context:
         prompt += (
@@ -564,12 +785,12 @@ def pending_route(identifier: str) -> str | None:
         return None
 
 
-def prompt_for(identifier: str, title: str, role: str) -> str:
+def prompt_for(identifier: str, title: str, role: str, worktree: str | None = None) -> str:
     if role == VERIFIER_ROLE:
         return verifier_prompt(identifier, title)
     if role in READ_ONLY_ROLES:
         return review_prompt(identifier, title, role)
-    return assignment_prompt(identifier, title, role)
+    return assignment_prompt(identifier, title, role, worktree)
 
 
 def dag_gate() -> set[str] | None:
@@ -770,6 +991,31 @@ def save_intents(intents: dict) -> None:
         print(f"conductor intent save error: {error}", flush=True)
 
 
+# The per-card worktree map (VED-388) records which cards were dispatched into
+# an isolated checkout, so the reconcile pass can remove the tree and branch
+# once the card is terminal. Persisted beside the claim/intent state.
+WORKTREES_PATH = os.environ.get("SWARM_WORKTREES_PATH", "/tmp/swarm-worktrees.json")
+
+
+def load_worktrees() -> dict:
+    try:
+        with open(WORKTREES_PATH) as handle:
+            data = json.load(handle)
+        if isinstance(data, dict):
+            return data
+    except (OSError, json.JSONDecodeError):
+        pass
+    return {}
+
+
+def save_worktrees(worktrees: dict) -> None:
+    try:
+        with open(WORKTREES_PATH, "w") as handle:
+            json.dump(worktrees, handle)
+    except OSError as error:  # worktree persistence must never stop dispatch
+        print(f"conductor worktree save error: {error}", flush=True)
+
+
 def terminal_issues_from_board() -> set[str]:
     """Card ids currently in a terminal Linear state."""
     import swarm_orchestrator as orchestrator_module
@@ -881,6 +1127,7 @@ def main() -> None:
         orchestrator_module.STATE_PATH, config
     )
     intents = load_intents()
+    worktrees = load_worktrees()
     cleaned_up = False
 
     print("conductor started", flush=True)
@@ -913,6 +1160,10 @@ def main() -> None:
             terminal = terminal_issues_from_board()
             if release_terminal_intents(intents, terminal):
                 save_intents(intents)
+            # Terminal cards release their per-card worktree and branch, then
+            # drop out of the worktree map (VED-388).
+            if reconcile_worktrees(worktrees, terminal):
+                save_worktrees(worktrees)
             decisions = orchestrator.tick(
                 board,
                 now=now,
@@ -951,15 +1202,38 @@ def main() -> None:
                             )
                             continue
                         save_intents(intents)
+                    # Code cards run in an isolated per-card worktree with a
+                    # dedicated worker, never the shared main tree (VED-388).
+                    worktree = None
+                    session_id = decision.session_id
+                    if decision.role in EDITING_ROLES:
+                        session_id, worktree = ensure_worker(
+                            decision.issue, decision.role, units
+                        )
+                        if session_id is None:
+                            # The worktree/worker could not be prepared; record a
+                            # failure so the orchestrator backs off and retries.
+                            orchestrator.record_failure(
+                                decision.issue,
+                                time.time(),
+                                "worktree/worker unavailable",
+                            )
+                            print(
+                                f"policy {decision.issue} worktree/worker unavailable",
+                                flush=True,
+                            )
+                            continue
+                        worktrees[decision.issue] = {"worktree": worktree}
+                        save_worktrees(worktrees)
                     # Fresh context per card: drop the unit's transcript before
                     # handing it the next task, so it never grows across cards
                     # (VED-373).
                     if FRESH_CONTEXT:
-                        reset_context(decision.session_id)
+                        reset_context(session_id)
                     try:
                         dispatch(
-                            decision.session_id,
-                            prompt_for(decision.issue, title, decision.role),
+                            session_id,
+                            prompt_for(decision.issue, title, decision.role, worktree),
                         )
                     except OSError as error:
                         orchestrator.record_failure(
