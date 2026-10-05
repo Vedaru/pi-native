@@ -60,10 +60,16 @@ fn cached_glob(pattern: &str) -> Result<globset::GlobMatcher, globset::Error> {
 
 /// Human-readable byte size, matching pi's `formatSize`.
 fn format_size(bytes: usize) -> String {
+    // Round to the nearest unit so, e.g., 1,048,575 bytes reports "1MB"
+    // rather than the truncated "1023KB".
     if bytes >= 1024 * 1024 {
-        format!("{}MB", bytes / (1024 * 1024))
+        let mb = (bytes + 512 * 1024) / (1024 * 1024);
+        format!("{}MB", mb)
+    } else if bytes >= 1024 {
+        let kb = (bytes + 512) / 1024;
+        format!("{}KB", kb)
     } else {
-        format!("{}KB", bytes / 1024)
+        "0KB".to_string()
     }
 }
 
@@ -787,28 +793,53 @@ impl Tool for GrepTool {
                     }
                 }
             } else {
-                let text = std::fs::read_to_string(path).unwrap_or_default();
-                let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
-                let lines: Vec<&str> = normalized.split('\n').collect();
-                for (index, line) in lines.iter().enumerate() {
-                    if !regex.is_match(line) {
-                        continue;
+                // Stream with a bounded ring buffer instead of loading the
+                // whole file. `before` holds the trailing context lines not yet
+                // emitted; `after` counts lines still to emit after a match.
+                let mut reader = std::io::BufReader::new(file);
+                let mut buffer: Vec<u8> = Vec::new();
+                let mut line_number = 0usize;
+                let mut before: std::collections::VecDeque<(usize, String)> =
+                    std::collections::VecDeque::with_capacity(context + 1);
+                let mut after = 0usize;
+                let mut last_emitted = 0usize;
+                loop {
+                    match io::read_line_capped(&mut reader, &mut buffer, GREP_MAX_LINE_BYTES) {
+                        Ok(false) | Err(_) => break,
+                        Ok(true) => {}
                     }
-                    let number = index + 1;
-                    let start = number.saturating_sub(context).max(1);
-                    let end = (number + context).min(lines.len());
-                    for current in start..=end {
-                        let text = lines.get(current - 1).copied().unwrap_or("");
-                        let shown = &text[..text.len().min(GREP_MAX_LINE_LENGTH)];
-                        if current == number {
-                            output.push(format!("{display}:{current}: {shown}"));
-                        } else {
-                            output.push(format!("{display}-{current}- {shown}"));
+                    line_number += 1;
+                    let raw = String::from_utf8_lossy(&buffer);
+                    let line = raw.trim_end_matches(['\n', '\r']).to_string();
+                    let is_match = regex.is_match(&line);
+                    if is_match {
+                        // Flush any preceding context lines not already shown.
+                        while let Some((number, text)) = before.pop_front() {
+                            if number <= last_emitted {
+                                continue;
+                            }
+                            let shown = &text[..text.len().min(GREP_MAX_LINE_LENGTH)];
+                            output.push(format!("{display}-{number}- {shown}"));
+                            last_emitted = number;
                         }
-                    }
-                    matches += 1;
-                    if matches >= limit {
-                        break 'files;
+                        let shown = &line[..line.len().min(GREP_MAX_LINE_LENGTH)];
+                        output.push(format!("{display}:{line_number}: {shown}"));
+                        last_emitted = line_number;
+                        after = context;
+                        matches += 1;
+                        if matches >= limit {
+                            break 'files;
+                        }
+                    } else if after > 0 {
+                        let shown = &line[..line.len().min(GREP_MAX_LINE_LENGTH)];
+                        output.push(format!("{display}-{line_number}- {shown}"));
+                        last_emitted = line_number;
+                        after -= 1;
+                    } else {
+                        before.push_back((line_number, line));
+                        while before.len() > context {
+                            before.pop_front();
+                        }
                     }
                 }
             }

@@ -5,8 +5,10 @@
 //!
 //! * stdout/stderr are read concurrently so a full pipe cannot deadlock;
 //! * only a tail of `max_bytes` per stream is kept in memory;
-//! * once the combined output grows past that cap it is spooled to a temp
-//!   file, so a truncated result can still point at the full output;
+//! * once the combined output grows past a separate spool threshold it is
+//!   written to a temp file, so a truncated result can still point at the
+//!   full output without duplicating the in-memory tail;
+//! * the process is bounded by a wall-clock deadline.
 //! * a deadline kills the whole process group, not just the direct child.
 //!
 //! The returned tail is capped by [`truncate_tail`] exactly like pi's tool.
@@ -24,6 +26,11 @@ use crate::truncate::{truncate_tail, DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES};
 /// pi has no default timeout; a bounded unit must, or a wedged command pins the
 /// process forever. Ten minutes is long enough for real builds.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// Bytes of prefix buffered before output is spooled to disk. Kept
+/// deliberately larger than [`DEFAULT_MAX_BYTES`] so the spool's in-memory
+/// `head` does not merely duplicate the tail we already retain.
+const SPOOL_THRESHOLD_BYTES: usize = 256 * 1024;
 
 /// The result of a bounded shell run.
 #[derive(Debug, Clone)]
@@ -84,7 +91,11 @@ pub fn run_shell_with(
 
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
-    let spool = Arc::new(Mutex::new(Spool::new(max_bytes)));
+    // Decouple the spool threshold from the tail cap: the tail keeps the last
+    // `max_bytes`, while the spool buffers a separate (larger) prefix before
+    // hitting disk. Scaling by `max_bytes` keeps small test caps small.
+    let spool_threshold = max_bytes.max(SPOOL_THRESHOLD_BYTES);
+    let spool = Arc::new(Mutex::new(Spool::new(spool_threshold)));
 
     let cap = max_bytes;
     let out_spool = spool.clone();
