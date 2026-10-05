@@ -563,7 +563,7 @@ impl PluginHost {
             "readFileSync",
             Function::new(
                 ctx.clone(),
-                move |path: String, _encoding: Option<String>| -> String {
+                move |path: String, _encoding: Option<String>| -> rquickjs::Result<String> {
                     match gate_path(
                         &policy,
                         &calls,
@@ -572,8 +572,14 @@ impl PluginHost {
                         "fs.readFileSync",
                         &path,
                     ) {
-                        Some(resolved) => std::fs::read_to_string(&resolved).unwrap_or_default(),
-                        None => String::new(),
+                        Some(resolved) => std::fs::read_to_string(&resolved).map_err(|e| {
+                            rquickjs::Error::new_from_js_message(
+                                "fs",
+                                "readFileSync",
+                                e.to_string(),
+                            )
+                        }),
+                        None => Ok(String::new()),
                     }
                 },
             ),
@@ -858,7 +864,7 @@ impl PluginHost {
         crypto.set(
             "randomBytes",
             Function::new(ctx.clone(), |len: u32| -> Vec<u8> {
-                crate::crypto::random_bytes(len as usize)
+                crate::crypto::random_bytes((len as usize).min(16 * 1024 * 1024))
             }),
         )?;
         crypto.set(

@@ -91,7 +91,8 @@ pub const PRELUDE: &str = r#"
       if (fill !== undefined) {
         if (typeof fill === "number") buf.fill(fill);
         else if (typeof fill === "string") {
-          const bytes = toArray(fill, "utf8");
+          let bytes = toArray(fill, "utf8");
+          if (bytes.length === 0) bytes = [0];
           for (let i = 0; i < buf.length; i++) buf[i] = bytes[i % bytes.length];
         }
       }
