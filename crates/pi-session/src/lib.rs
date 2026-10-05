@@ -9,6 +9,7 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 pub mod context;
@@ -162,6 +163,22 @@ fn take_string(map: &mut Map<String, Value>, key: &str) -> Option<String> {
         .and_then(|value| value.as_str().map(str::to_string))
 }
 
+/// A unique sibling path used as the staging file for an atomic [`SessionFile::write`].
+fn temp_sibling(path: &Path) -> PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let sequence = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let tmp_name = format!(".{name}.{}.{sequence}.tmp", std::process::id());
+    match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.join(tmp_name),
+        _ => PathBuf::from(tmp_name),
+    }
+}
+
 /// A parsed session file.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SessionFile {
@@ -216,8 +233,29 @@ impl SessionFile {
         Self::parse_reader(std::io::BufReader::new(file))
     }
 
+    /// Serialize and replace the file atomically.
+    ///
+    /// Writing straight to `path` leaves a window where a crash or a concurrent
+    /// reader observes a truncated file. Write the full JSONL to a sibling temp
+    /// file, flush it, then `rename` over the target so readers only ever see a
+    /// complete file (the rename is atomic on the same filesystem).
     pub fn write(&self, path: &std::path::Path) -> Result<(), SessionError> {
-        std::fs::write(path, self.to_jsonl()?)?;
+        let jsonl = self.to_jsonl()?;
+        let tmp = temp_sibling(path);
+        {
+            let mut file = std::fs::File::create(&tmp)?;
+            if let Err(error) = file
+                .write_all(jsonl.as_bytes())
+                .and_then(|()| file.sync_all())
+            {
+                let _ = std::fs::remove_file(&tmp);
+                return Err(error.into());
+            }
+        }
+        if let Err(error) = std::fs::rename(&tmp, path) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(error.into());
+        }
         Ok(())
     }
 
