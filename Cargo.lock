@@ -1024,6 +1024,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "pi-gate"
+version = "0.0.1"
+dependencies = [
+ "clap",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "pi-gateway"
 version = "0.0.1"
 dependencies = [

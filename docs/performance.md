@@ -9,12 +9,13 @@ Reproduce:
 
 ```bash
 cargo build --release
+cargo build --release -p pi-gate
 export PIPELETS_BIN="$PWD/target/release/pipelets"
 
-python3 scripts/mem_bench.py --target pipelets          # idle RSS vs pi-node
-python3 scripts/stress_gate.py --tools ls grep find edit read
-python3 scripts/stress_gate.py --session --tools read --turns 20000
-python3 scripts/swarm_stress.py --units 32 --mode idle
+./target/release/pi-gate mem-bench --target pipelets     # idle RSS vs pi-node
+./target/release/pi-gate stress-gate --tools ls grep find edit read
+./target/release/pi-gate stress-gate --session --tools read --turns 20000
+./target/release/pi-gate swarm-stress --units 32 --mode idle
 ```
 
 ## Binary and idle
@@ -32,7 +33,7 @@ to the floor for a process that has loaded the agent loop, tools, RPC, and the
 plugin host. A static build idles lower (~3.3 MB) but stops sharing libc pages
 across a swarm, so the dynamic build is kept.
 
-The committed baseline is `artifacts/mem_bench.json`; `scripts/mem_gate.py`
+The committed baseline is `artifacts/mem_bench.json`; `pi-gate mem-gate`
 fails CI when an absolute figure regresses or when a native target exceeds 60%
 of pi-node's RSS.
 
@@ -79,7 +80,7 @@ Two fixes came out of pressure testing:
 
 ## Swarm cost
 
-`scripts/swarm_stress.py` runs N units at once and reports aggregate and
+`pi-gate swarm-stress` runs N units at once and reports aggregate and
 per-unit RSS (release build):
 
 | Swarm | Per unit | Total |
@@ -186,5 +187,5 @@ binary from ~12.4 MB to ~9.5 MB.
 `opt-level` is a deliberate trade: `"s"`/`"z"` shrink the binary further
 (~7.6/7.0 MB) but raise idle RSS by ~0.6/1.6 MB, which is wrong for a swarm
 (32 units x 1.6 MB). We keep `opt-level = 2` (~4.5 MB idle). CI's `memory-gate`
-job installs pi-node and the reference Rust port and re-runs
-`scripts/mem_gate.py` on every change.
+job installs pi-node and the reference Rust port and re-runs `pi-gate mem-gate`
+on every change.

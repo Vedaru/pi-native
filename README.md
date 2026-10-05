@@ -52,8 +52,9 @@ crates/pi-providers/   request builders with pi's cache placement
 crates/pi-tools/       core tools (read, bash, edit, write, …)
 crates/pi-plugins/     embedded QuickJS + pi extension API bridge
 crates/pi-image/       native image decode/resize/encode for `read` attachments
+crates/pi-gate/        CI/dev measurement gates (memory, stress, swarm, headless, package)
 docs/                  guides and ADRs
-scripts/               benchmark, stress, parity, and memory gates
+scripts/               provider parity harness (Node capture) and its fixtures
 ```
 
 ## Build, test, package
@@ -63,8 +64,8 @@ cargo build --workspace
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 
-scripts/package.sh                              # dist/pipelets-<version>-<target>.tar.gz
-scripts/package.sh x86_64-unknown-linux-musl    # static build (needs musl-tools)
+cargo run --release -p pi-gate -- package                     # dist/pipelets-<version>-<target>.tar.gz
+cargo run --release -p pi-gate -- package --target x86_64-unknown-linux-musl  # static build (needs musl-tools)
 ```
 
 `pipelets --version` reports the version, git revision, and target triple.

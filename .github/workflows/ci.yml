@@ -20,9 +20,7 @@ jobs:
       - name: Test
         run: cargo test --workspace
       - name: Headless worker gate
-        run: python3 scripts/headless_gate.py
-      - name: Memory gate unit tests
-        run: python3 scripts/test_mem_gate.py
+        run: cargo run --release -p pi-gate -- headless
 
   package:
     runs-on: ubuntu-latest
@@ -30,7 +28,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - name: Package
-        run: scripts/package.sh
+        run: cargo run --release -p pi-gate -- package
       - name: Smoke-test the artifact
         run: |
           mkdir -p /tmp/pkg
@@ -63,19 +61,22 @@ jobs:
         run: |
           cargo build --release -p pipelets
           echo "PIPELETS_BIN=$PWD/target/release/pipelets" >> "$GITHUB_ENV"
-      # Absolute baseline is a dev-machine measurement, so CI uses the
-      # environment-independent ratio check (native <= 60% of Node).
+      - name: Build the gate binary
+        run: cargo build --release -p pi-gate
       - name: Memory regression gate
-        run: python3 scripts/mem_gate.py --no-absolute --ratio-threshold 0.6 --max-native-mb 25
+        run: |
+          # Absolute baseline is a dev-machine measurement, so CI uses the
+          # environment-independent ratio check (native <= 60% of Node).
+          ./target/release/pi-gate mem-gate --no-absolute --ratio-threshold 0.6 --max-native-mb 25
       - name: Pressure gate (tools)
-        run: python3 scripts/stress_gate.py --binary target/release/pipelets --turns 20000 --tools ls grep find edit read --max-mb 100 --max-cpu 5
+        run: ./target/release/pi-gate stress-gate --binary target/release/pipelets --turns 20000 --tools ls grep find edit read --max-mb 100 --max-cpu 5
       - name: Pressure gate (session/compaction)
-        run: python3 scripts/stress_gate.py --binary target/release/pipelets --turns 20000 --tools read --max-mb 100 --max-cpu 5 --session
+        run: ./target/release/pi-gate stress-gate --binary target/release/pipelets --turns 20000 --tools read --max-mb 100 --max-cpu 5 --session
       - name: Pressure gate (image decode/resize)
-        run: python3 scripts/stress_gate.py --binary target/release/pipelets --turns 50 --tools image --max-mb 60 --max-cpu 5 --skip-idle
+        run: ./target/release/pi-gate stress-gate --binary target/release/pipelets --turns 50 --tools image --max-mb 60 --max-cpu 5 --skip-idle
       - name: Pressure gate (image retained in a session)
-        run: python3 scripts/stress_gate.py --binary target/release/pipelets --turns 20 --tools image --max-mb 60 --max-cpu 10 --skip-idle --session --context-tokens 100000000
+        run: ./target/release/pi-gate stress-gate --binary target/release/pipelets --turns 20 --tools image --max-mb 60 --max-cpu 10 --skip-idle --session --context-tokens 100000000
       - name: Swarm gate
         run: |
-          python3 scripts/swarm_stress.py --binary target/release/pipelets --units 8 --mode idle --max-total-mb 100
-          python3 scripts/swarm_stress.py --binary target/release/pipelets --units 8 --mode busy --turns 200000 --max-total-mb 200
+          ./target/release/pi-gate swarm-stress --binary target/release/pipelets --units 8 --mode idle --max-total-mb 100
+          ./target/release/pi-gate swarm-stress --binary target/release/pipelets --units 8 --mode busy --turns 200000 --max-total-mb 200
