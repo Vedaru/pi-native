@@ -50,10 +50,24 @@ impl std::error::Error for HostError {}
 struct Shared {
     subscribers: Mutex<Vec<Sender<Value>>>,
     replay: Mutex<VecDeque<Value>>,
+    /// Most recent event type and its unix-seconds timestamp, for the swarm view.
+    last_event: Mutex<Option<String>>,
+    last_event_at: Mutex<i64>,
 }
 
 impl Shared {
     fn publish(&self, event: Value) {
+        if let Some(kind) = event.get("type").and_then(Value::as_str) {
+            if let Ok(mut last) = self.last_event.lock() {
+                *last = Some(kind.to_string());
+            }
+            if let Ok(mut at) = self.last_event_at.lock() {
+                *at = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|duration| duration.as_secs() as i64)
+                    .unwrap_or(0);
+            }
+        }
         // Hold both locks so a subscribe either sees the event in its replay or
         // receives it live, never both and never neither.
         let mut replay = self
@@ -83,6 +97,18 @@ impl Shared {
         let (tx, rx) = mpsc::channel();
         subscribers.push(tx);
         (replay.iter().cloned().collect(), rx)
+    }
+
+    fn last_event(&self) -> Option<String> {
+        self.last_event.lock().ok().and_then(|last| last.clone())
+    }
+
+    fn last_event_at(&self) -> i64 {
+        self.last_event_at.lock().map(|at| *at).unwrap_or(0)
+    }
+
+    fn subscriber_count(&self) -> usize {
+        self.subscribers.lock().map(|subs| subs.len()).unwrap_or(0)
     }
 }
 
@@ -275,6 +301,19 @@ impl Unit {
     }
 }
 
+/// A snapshot of one live unit, for the swarm view.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnitInfo {
+    pub session_id: String,
+    pub cwd: String,
+    pub session_path: String,
+    pub running: bool,
+    pub last_event: Option<String>,
+    pub last_event_at: i64,
+    pub subscribers: usize,
+}
+
 /// Owns a set of units keyed by session id.
 pub struct Host {
     cwd: String,
@@ -353,6 +392,25 @@ impl Host {
 
     pub fn session_ids(&self) -> Vec<String> {
         self.units.keys().cloned().collect()
+    }
+
+    /// A status snapshot of every unit this host knows about.
+    pub fn swarm(&self) -> Vec<UnitInfo> {
+        let mut units: Vec<UnitInfo> = self
+            .units
+            .iter()
+            .map(|(session_id, unit)| UnitInfo {
+                session_id: session_id.clone(),
+                cwd: unit.cwd.clone(),
+                session_path: unit.session_path.to_string_lossy().into_owned(),
+                running: unit.is_running(),
+                last_event: unit.shared.last_event(),
+                last_event_at: unit.shared.last_event_at(),
+                subscribers: unit.shared.subscriber_count(),
+            })
+            .collect();
+        units.sort_by(|a, b| a.session_id.cmp(&b.session_id));
+        units
     }
 
     pub fn cwd(&self) -> &str {

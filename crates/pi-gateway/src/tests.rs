@@ -249,3 +249,20 @@ fn reports_extension_commands() {
     assert_eq!(data["commands"][0]["source"], json!("extension"));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn swarm_lists_units_with_status() {
+    let dir = temp_dir("swarm");
+    let server = start_gateway(&dir, "hello");
+    let id = create_session(&server, &dir);
+
+    let (status, body) = request(server.addr, "GET", "/swarm", None);
+    assert_eq!(status, 200, "{body}");
+    let data: Value = serde_json::from_str(&body).unwrap();
+    let units = data["units"].as_array().expect("units");
+    assert_eq!(units.len(), 1, "{data}");
+    assert_eq!(units[0]["sessionId"], json!(id));
+    assert_eq!(units[0]["running"], json!(true));
+    assert!(units[0]["lastEventAt"].as_i64().unwrap_or(0) > 0);
+    let _ = std::fs::remove_dir_all(&dir);
+}

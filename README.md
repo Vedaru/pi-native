@@ -140,6 +140,7 @@ pi-native --gateway --gateway-addr 127.0.0.1:30142 \
 | Method | Path | Meaning |
 | --- | --- | --- |
 | `GET` | `/sessions` | List session ids |
+| `GET` | `/swarm` | Status snapshot of every unit (for a multi-agent dashboard) |
 | `POST` | `/sessions` | Open/create a session (`{"sessionPath"?: …, "cwd"?: …}`) |
 | `GET` | `/sessions/:id` | Resolved state |
 | `GET` | `/sessions/:id/commands` | Extension slash commands |

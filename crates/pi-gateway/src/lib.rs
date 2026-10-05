@@ -7,6 +7,7 @@
 //! | Method | Path | Meaning |
 //! | --- | --- | --- |
 //! | `GET` | `/sessions` | List running session ids |
+//! | `GET` | `/swarm` | Status snapshot of every unit |
 //! | `POST` | `/sessions` | Open/create a session (`{"sessionPath"?: "…", "cwd"?: "…"}`) |
 //! | `GET` | `/sessions/:id` | Resolve state (subscribe → `get_state` → `state`) |
 //! | `GET` | `/sessions/:id/commands` | Extension slash commands |
@@ -229,6 +230,10 @@ fn handle_connection(mut stream: TcpStream, gateway: Arc<Gateway>) -> std::io::R
         ("GET", ["sessions"]) => {
             let ids = gateway.host().session_ids();
             write_json(&mut stream, 200, &json!({ "sessions": ids }));
+        }
+        ("GET", ["swarm"]) => {
+            let units = gateway.host().swarm();
+            write_json(&mut stream, 200, &json!({ "units": units }));
         }
         ("POST", ["sessions"]) => create_session(&mut stream, &gateway, &request),
         ("GET", ["sessions", id]) => session_state(&mut stream, &gateway, id),
