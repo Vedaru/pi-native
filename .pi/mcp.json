@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "swarm-memory": {
+      "command": "python3",
+      "args": ["scripts/swarm_memory.py", "mcp"],
+      "description": "Project-scoped swarm memory: record and list decisions, constraints, lessons, and gotchas shared across units (VED-371)."
+    }
+  }
+}

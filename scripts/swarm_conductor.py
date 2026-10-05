@@ -19,12 +19,25 @@ after one attempt so it cannot be retried forever (VED-360).
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import re
 import subprocess
 import time
 import urllib.request
+
+
+def _load_memory():
+    """Load the sibling swarm memory module (VED-371) without a package."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "swarm_memory.py")
+    spec = importlib.util.spec_from_file_location("swarm_memory", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+memory = _load_memory()
 
 GATEWAY = os.environ.get("SWARM_GATEWAY", "http://127.0.0.1:30142")
 POLL_SECONDS = 20
@@ -355,6 +368,19 @@ def reset_context(session_id: str) -> None:
         pass
 
 
+def memory_context() -> str:
+    """The shared project memory block, or an empty string when there is none.
+
+    Injected into every dispatch so a decision recorded by one unit is visible
+    to every later unit and to the conductor's prompts (VED-371).
+    """
+    try:
+        return memory.context_block()
+    except Exception as error:  # memory must never block dispatch
+        print(f"conductor memory error: {error}", flush=True)
+        return ""
+
+
 def assignment_prompt(identifier: str, title: str, role: str) -> str:
     """Prompt for a write-capable unit: implement, gate, report for verification.
 
@@ -362,7 +388,7 @@ def assignment_prompt(identifier: str, title: str, role: str) -> str:
     `In Review` so the conductor can dispatch a fresh verifier. Only a verifier
     pass promotes it to Done.
     """
-    return (
+    prompt = (
         f"Conductor assignment: work Linear issue {identifier}.\n"
         f"Title: {title}\n"
         f"Read it with `linear issue view {identifier}`. Set it In Progress, implement the fix, "
@@ -373,6 +399,17 @@ def assignment_prompt(identifier: str, title: str, role: str) -> str:
         f"check first. Report the exact test count from `cargo test --workspace` in your comment. "
         f"Sign — [{role}]."
     )
+    context = memory_context()
+    if context:
+        prompt += (
+            "\n\n"
+            + context
+            + "\nRecord anything a later unit must know with "
+            "`python3 scripts/swarm_memory.py record --kind <kind> --text \"...\" --issue "
+            + identifier
+            + "`."
+        )
+    return prompt
 
 
 def verifier_prompt(identifier: str, title: str) -> str:
@@ -401,6 +438,17 @@ def verifier_prompt(identifier: str, title: str) -> str:
         f"you ran, your refutation attempt and its result, and any residual gaps. A net "
         f"test reduction is a fail. Sign — [verifier]."
     )
+    context = memory_context()
+    if context:
+        prompt += (
+            "\n\n"
+            + context
+            + "\nRecord anything a later unit must know with "
+            "`python3 scripts/swarm_memory.py record --kind <kind> --text \"...\" --issue "
+            + identifier
+            + "`."
+        )
+    return prompt
 
 
 def review_prompt(identifier: str, title: str, role: str) -> str:
@@ -410,7 +458,7 @@ def review_prompt(identifier: str, title: str, role: str) -> str:
     issue needs code changes it says so and the conductor routes it to a
     write-capable unit instead of retrying this read-only one.
     """
-    return (
+    prompt = (
         f"Conductor assignment: audit Linear issue {identifier}.\n"
         f"Title: {title}\n"
         f"Read it with `linear issue view {identifier}`. You are the read-only {role} unit: "
@@ -419,6 +467,10 @@ def review_prompt(identifier: str, title: str, role: str) -> str:
         f"If a code change is required, say explicitly that it is out of your scope so the "
         f"conductor can route it to a write-capable unit. Sign — [{role}]."
     )
+    context = memory_context()
+    if context:
+        prompt += "\n\n" + context
+    return prompt
 
 
 def prompt_for(identifier: str, title: str, role: str) -> str:

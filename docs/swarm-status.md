@@ -50,6 +50,27 @@ Coordination is Linear-only; there is no shared chat. Scopes are disjoint.
 | **tester** | tests and gates | `crates/*/tests/*`, `scripts/*.py` | no |
 | **synthesizer** | status, docs | `docs/*.md` only | no |
 
+## Shared project memory (VED-371)
+
+Units previously re-derived (or contradicted) decisions, constraints, and
+lessons each run. `scripts/swarm_memory.py` is now the shared, project-scoped
+store for them: an append-only JSONL file at `.pi/swarm-memory.jsonl` (runtime
+data, git-ignored) with short typed entries — `decision`, `constraint`,
+`lesson`, `gotcha` — each timestamped and attributed to an author and issue.
+
+- Record from any unit:
+  `python3 scripts/swarm_memory.py record --kind decision --text "…" --author coder --issue VED-371`.
+- Read it back: `python3 scripts/swarm_memory.py list` (newest first) or
+  `context` (the prompt-ready `<shared_memory>` block).
+- The conductor injects the memory block into every assignment and audit prompt,
+  so a decision recorded by one unit is visible to the next unit and to the
+  conductor's prompts. Injection is best-effort: a memory error never blocks a
+  dispatch.
+- Over MCP: `.pi/mcp.json` registers `swarm-memory`, exposing `memory_record`
+  and `memory_list` to any harness. Run the stdio server directly with
+  `python3 scripts/swarm_memory.py mcp`.
+- Tests: `python3 scripts/test_swarm_memory.py`.
+
 ## Commits landed since the last snapshot
 
 - `e6326f0` — feat(agent): wire the session thinking level to the request and

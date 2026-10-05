@@ -6,3 +6,9 @@ __pycache__/
 artifacts/mem_bench.current.json
 artifacts/mem_bench.last.json
 dist/
+
+# swarm project memory is runtime data, not source (VED-371)
+.pi/swarm-memory.jsonl
+
+# runtime trigger state (VED-372), not source
+.pi-native/
