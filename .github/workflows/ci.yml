@@ -19,6 +19,8 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Test
         run: cargo test --workspace
+      - name: Headless worker gate
+        run: python3 scripts/headless_gate.py
 
   package:
     runs-on: ubuntu-latest
