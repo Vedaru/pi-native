@@ -229,46 +229,6 @@ fn unknown_session_is_404() {
 }
 
 #[test]
-fn triggers_fire_through_the_gateway() {
-    let dir = temp_dir("triggers");
-    let turns = vec![AssistantTurn {
-        text: "ok".to_string(),
-        stop_reason: Some("end_turn".to_string()),
-        ..Default::default()
-    }];
-    let cwd = dir.clone();
-    let host = Host::new(cwd.to_string_lossy().to_string(), move |unit_cwd: &str| {
-        Agent::new(
-            Box::new(FauxProvider::new(turns.clone())),
-            Vec::new(),
-            "system",
-            ToolContext::new(unit_cwd),
-        )
-    });
-    let runner = pi_triggers::Runner::new(
-        vec![pi_triggers::Trigger::interval(
-            "t",
-            Duration::from_secs(60),
-            "go",
-        )],
-        dir.join("sessions"),
-    );
-    let gateway =
-        Gateway::with_triggers(host, runner, Box::new(pi_triggers::InMemoryRuns::default()));
-    let episodes = gateway.tick_triggers(1_000_000);
-    assert_eq!(episodes.len(), 1);
-    assert!(episodes[0].session_path.exists());
-    // The run left an inspectable receipt on the card.
-    let receipts = gateway.receipts();
-    assert_eq!(receipts.len(), 1);
-    assert_eq!(receipts[0].trigger_id, "t");
-    assert_eq!(receipts[0].outcome, pi_triggers::ReceiptOutcome::Completed);
-    // Same minute/interval: not due again.
-    assert!(gateway.tick_triggers(1_000_000).is_empty());
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
 fn reports_extension_commands() {
     let dir = temp_dir("commands");
     let cwd = dir.clone();

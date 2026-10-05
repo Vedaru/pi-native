@@ -34,7 +34,6 @@ Core primitives a swarm host drives:
 | --- | --- |
 | Unit host: addressable agents, attach/detach, event fan-out, idle suspend | `pi-host` |
 | HTTP + SSE gateway | `pi-gateway` |
-| Trigger engine: schedules, episodes, budgets, durable run records | `pi-triggers` |
 | Direct unit-to-unit mailbox (ack, ownership) | `pi-host` |
 
 ## Out of scope (reference-port bloat)
@@ -75,6 +74,6 @@ conductor, DAGs, dashboards, Linear) is a separate repo, never in the unit.
 | VED-312 | interim lazy imports in pi (not part of the native runtime) |
 | VED-313/314/315 | provider parity and the release gate |
 | VED-318 | this scope definition |
-| VED-337–343 | web/host/trigger infra |
+| VED-337–343 | web/host infra |
 | VED-379 | direct unit-to-unit mailbox |
-| VED-389 | release the host lock while a trigger runs |
+| VED-419 | drop the trigger engine; rig owns scheduling |

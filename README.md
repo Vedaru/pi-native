@@ -46,7 +46,6 @@ crates/pi-cli/         the `pipelets` binary
 crates/pi-agent/       agent loop: turns, tool calls, events
 crates/pi-host/        unit host: addressable agents, fan-out, idle suspend
 crates/pi-gateway/     HTTP + SSE gateway
-crates/pi-triggers/    schedules, episodes, budgets, run receipts
 crates/pi-session/     pi JSONL session store
 crates/pi-providers/   request builders with pi's cache placement
 crates/pi-tools/       core tools (read, bash, edit, write, …)
@@ -89,13 +88,12 @@ Sessions persist in pi's layout so pi and pi-web can list and resume them
 directory by default; `--yolo` is the explicit opt-out, and tools run without
 approval, matching pi.
 
-## Gateway and triggers
+## Gateway
 
 `--gateway` serves the unit host over HTTP + SSE so a web UI or remote client can
-attach to long-lived agents; `--triggers` fires scheduled prompts into sessions
-with per-run and cumulative budgets. Routes, the SSE `?format=pi` stream, the
-trigger schema, and the host-lock contract are in
-[gateway and triggers](docs/gateway.md).
+attach to long-lived agents. Scheduling is owned by rig, not the unit. Routes,
+the SSE `?format=pi` stream, and the host-lock contract are in
+[the gateway guide](docs/gateway.md).
 
 ```bash
 pipelets --gateway --gateway-addr 127.0.0.1:30142 \
@@ -123,7 +121,7 @@ example extensions load through the host (84/87).
 | Doc | Contents |
 | --- | --- |
 | [performance.md](docs/performance.md) | memory/CPU figures, stress and memory gates |
-| [gateway.md](docs/gateway.md) | HTTP/SSE routes, triggers, budgets |
+| [gateway.md](docs/gateway.md) | HTTP/SSE routes |
 | [providers.md](docs/providers.md) | provider flags, prompt cache, wire parity |
 | [session-store.md](docs/session-store.md) | JSONL format, context building, compaction |
 | [images.md](docs/images.md) | native image pipeline (read attachments) |

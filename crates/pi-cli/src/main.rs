@@ -55,19 +55,6 @@ struct Cli {
     /// Required when `--gateway-addr` is not a loopback address.
     #[arg(long)]
     gateway_token: Option<String>,
-    /// Load trigger definitions from a JSON array file (requires `--gateway`).
-    #[arg(long)]
-    triggers: Option<PathBuf>,
-    /// Durable trigger run records for `--triggers`.
-    #[arg(long)]
-    trigger_runs: Option<PathBuf>,
-    /// How often the trigger loop wakes, in seconds.
-    #[arg(long, default_value_t = 1)]
-    trigger_interval: u64,
-    /// Trigger run pricing as `input,output,cache_read,cache_write`, in
-    /// micro-units per million tokens, used to enforce spend budgets.
-    #[arg(long, value_parser = parse_price)]
-    run_price: Option<pi_triggers::Price>,
     /// Suspend a gateway unit after this many idle seconds; 0 disables (default 900).
     #[arg(long, default_value_t = 900)]
     idle_timeout: u64,
@@ -217,12 +204,8 @@ fn main() {
             &cli.extension_allow,
             &cli.gateway_addr,
             cli.gateway_token.clone(),
-            cli.triggers.as_deref(),
-            cli.trigger_runs.as_deref(),
-            cli.trigger_interval,
             cli.idle_timeout,
             cli.max_units,
-            cli.run_price.clone(),
         );
         return;
     }
@@ -632,27 +615,6 @@ fn missing(what: &str) -> ! {
     std::process::exit(2);
 }
 
-/// Parse `--run-price input,output,cache_read,cache_write` (micros/million).
-fn parse_price(value: &str) -> Result<pi_triggers::Price, String> {
-    let parts: Vec<i64> = value
-        .split(',')
-        .map(|part| {
-            part.trim()
-                .parse::<i64>()
-                .map_err(|_| format!("invalid price component `{part}`"))
-        })
-        .collect::<Result<_, _>>()?;
-    if parts.len() != 4 {
-        return Err("price needs 4 comma-separated values".to_string());
-    }
-    Ok(pi_triggers::Price {
-        input_micros_per_million: parts[0],
-        output_micros_per_million: parts[1],
-        cache_read_micros_per_million: parts[2],
-        cache_write_micros_per_million: parts[3],
-    })
-}
-
 impl Cli {
     fn provider_config(&self) -> ProviderConfig {
         let provider = self
@@ -822,8 +784,7 @@ fn run_serve(
 }
 
 /// Serve the HTTP + SSE gateway. Each session is an independent unit and any
-/// number of clients can attach to it. With `--triggers`, a background loop
-/// fires scheduled prompts into their long-lived sessions.
+/// number of clients can attach to it.
 #[allow(clippy::too_many_arguments)]
 fn run_gateway(
     config: ProviderConfig,
@@ -832,12 +793,8 @@ fn run_gateway(
     extension_allow: &[String],
     addr: &str,
     token: Option<String>,
-    triggers: Option<&std::path::Path>,
-    trigger_runs: Option<&std::path::Path>,
-    trigger_interval: u64,
     idle_timeout: u64,
     max_units: usize,
-    run_price: Option<pi_triggers::Price>,
 ) {
     // Fail closed: never serve an unauthenticated control plane off-loopback.
     let bind_addr = match pi_gateway::check_bind_security(addr, token.is_some()) {
@@ -874,28 +831,7 @@ fn run_gateway(
             std::process::exit(1);
         }
     };
-    // Cron is always available so a unit can schedule its own tick at runtime
-    // via `POST /cron`; `--triggers` only seeds the initial set.
-    let initial = match triggers {
-        Some(path) => pi_triggers::load_triggers(path).unwrap_or_else(|error| {
-            eprintln!("pipelets: {error}");
-            std::process::exit(1);
-        }),
-        None => Vec::new(),
-    };
-    let runs = trigger_runs
-        .map(PathBuf::from)
-        .unwrap_or_else(|| cwd.join(".pipelets").join("trigger-runs.jsonl"));
-    let store = pi_triggers::JsonlRuns::open(&runs).unwrap_or_else(|error| {
-        eprintln!("pipelets: cannot open {}: {error}", runs.display());
-        std::process::exit(1);
-    });
-    let sessions = cwd.join(".pipelets").join("trigger-sessions");
-    let mut runner = pi_triggers::Runner::new(initial, sessions).with_workspace(cwd.clone());
-    if let Some(price) = run_price {
-        runner = runner.with_price(price);
-    }
-    let gateway = pi_gateway::Gateway::with_triggers(host, runner, Box::new(store));
+    let gateway = pi_gateway::Gateway::new(host);
     // Allow the header host the operator actually bound, plus loopback.
     let mut allowed_hosts = vec!["localhost".to_string()];
     let bound_host = bind_addr.ip().to_string();
@@ -903,7 +839,6 @@ fn run_gateway(
         allowed_hosts.push(bound_host);
     }
     let gateway = Arc::new(gateway.with_token(token).with_allowed_hosts(allowed_hosts));
-    gateway.spawn_trigger_loop(std::time::Duration::from_secs(trigger_interval.max(1)));
     if idle_timeout > 0 {
         gateway.spawn_idle_reaper(
             std::time::Duration::from_secs(30),

@@ -12,7 +12,6 @@
 //! | `POST` | `/units/:id/messages` | Send a direct unit message |
 //! | `POST` | `/units/:id/messages/:msgid/ack` | Acknowledge a direct message |
 //! | `POST` | `/units/:id/ownership` | Transfer a unit's ownership |
-//! | `GET` | `/runs` | Receipts recorded for finished trigger runs |
 //! | `POST` | `/sessions` | Open/create a session (`{"sessionPath"?: "…", "cwd"?: "…"}`) |
 //! | `GET` | `/sessions/:id` | Resolve state (subscribe → `get_state` → `state`) |
 //! | `DELETE` | `/sessions/:id` | Forget a unit (keeps the session file on disk) |
@@ -29,7 +28,6 @@
 
 use pi_host::{Host, HostError, MessageKind, RecvError, Subscription};
 use pi_rpc::{Event, PiEventAdapter};
-use pi_triggers::{Episode, Receipt, RunStore, Runner, TriggerSpec};
 use serde_json::{json, Value};
 use std::io::{Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
@@ -47,7 +45,6 @@ const MAX_BODY: usize = 1 << 20;
 /// Shared, thread-safe host plus the routing logic.
 pub struct Gateway {
     host: Mutex<Host>,
-    triggers: Option<Mutex<TriggerRuntime>>,
     /// When set, every request must present a matching bearer token. `None`
     /// means the gateway is only safe on a loopback bind (the CLI enforces
     /// this); it is never safe to expose an unauthenticated gateway publicly.
@@ -58,27 +55,10 @@ pub struct Gateway {
     allowed_hosts: Vec<String>,
 }
 
-struct TriggerRuntime {
-    runner: Runner,
-    store: Box<dyn RunStore>,
-}
-
 impl Gateway {
     pub fn new(host: Host) -> Self {
         Self {
             host: Mutex::new(host),
-            triggers: None,
-            token: None,
-            allowed_hosts: Vec::new(),
-        }
-    }
-
-    /// Attach a trigger runner and its durable store. Call
-    /// [`Gateway::spawn_trigger_loop`] to drive it.
-    pub fn with_triggers(host: Host, runner: Runner, store: Box<dyn RunStore>) -> Self {
-        Self {
-            host: Mutex::new(host),
-            triggers: Some(Mutex::new(TriggerRuntime { runner, store })),
             token: None,
             allowed_hosts: Vec::new(),
         }
@@ -138,49 +118,6 @@ impl Gateway {
                 .allowed_hosts
                 .iter()
                 .any(|allowed| allowed.eq_ignore_ascii_case(host))
-    }
-
-    /// Fire every due trigger at `now` (unix seconds); returns the episodes.
-    pub fn tick_triggers(&self, now: i64) -> Vec<Episode> {
-        let Some(triggers) = &self.triggers else {
-            return Vec::new();
-        };
-        // Fire the due triggers under both locks, then release them before
-        // waiting on the runs. A run that calls back into the gateway (the
-        // conductor's tick does `GET /swarm`) must not block behind the lock
-        // that is waiting for it (VED-389).
-        let (episodes, pending) = {
-            let mut runtime = triggers.lock().unwrap_or_else(|error| error.into_inner());
-            let mut host = self.host.lock().unwrap_or_else(|error| error.into_inner());
-            let TriggerRuntime { runner, store } = &mut *runtime;
-            runner.begin_tick(&mut host, store.as_mut(), now)
-        };
-        for run in pending {
-            let receipt = run.finish();
-            let mut runtime = triggers.lock().unwrap_or_else(|error| error.into_inner());
-            runtime.store.record_receipt(receipt);
-        }
-        episodes
-    }
-
-    /// Receipts recorded for finished runs, newest last. Empty when no trigger
-    /// runner is attached.
-    pub fn receipts(&self) -> Vec<Receipt> {
-        let Some(triggers) = &self.triggers else {
-            return Vec::new();
-        };
-        let runtime = triggers.lock().unwrap_or_else(|error| error.into_inner());
-        runtime.store.receipts().to_vec()
-    }
-
-    /// Start a background thread that ticks triggers every `interval`.
-    pub fn spawn_trigger_loop(self: &Arc<Self>, interval: Duration) {
-        let gateway = self.clone();
-        std::thread::spawn(move || loop {
-            std::thread::sleep(interval);
-            let now = time::OffsetDateTime::now_utc().unix_timestamp();
-            let _ = gateway.tick_triggers(now);
-        });
     }
 
     /// Periodically suspend units idle for `idle`, releasing their agents.
@@ -477,9 +414,6 @@ fn handle_connection(mut stream: TcpStream, gateway: Arc<Gateway>) -> std::io::R
             drop(host);
             write_json(&mut stream, 200, &json!({ "units": units, "cwd": cwd }));
         }
-        ("GET", ["cron"]) => list_cron(&mut stream, &gateway),
-        ("POST", ["cron"]) => upsert_cron(&mut stream, &gateway, &request),
-        ("DELETE", ["cron", id]) => remove_cron(&mut stream, &gateway, id),
         ("GET", ["units", id, "messages"]) => poll_messages(&mut stream, &gateway, id, &request),
         ("POST", ["units", id, "messages"]) => send_message(&mut stream, &gateway, id, &request),
         ("POST", ["units", id, "messages", msgid, "ack"]) => {
@@ -487,10 +421,6 @@ fn handle_connection(mut stream: TcpStream, gateway: Arc<Gateway>) -> std::io::R
         }
         ("POST", ["units", id, "ownership"]) => {
             transfer_ownership(&mut stream, &gateway, id, &request)
-        }
-        ("GET", ["runs"]) => {
-            let receipts = gateway.receipts();
-            write_json(&mut stream, 200, &json!({ "receipts": receipts }));
         }
         ("POST", ["sessions"]) => create_session(&mut stream, &gateway, &request),
         ("GET", ["sessions", id]) => session_state(&mut stream, &gateway, id),
@@ -743,76 +673,6 @@ fn remove_session(stream: &mut TcpStream, gateway: &Gateway, id: &str) {
             stream,
             404,
             &json!({ "error": format!("unknown session: {id}") }),
-        );
-    }
-}
-
-/// List the runtime cron jobs a unit has scheduled.
-fn list_cron(stream: &mut TcpStream, gateway: &Gateway) {
-    let Some(triggers) = &gateway.triggers else {
-        write_json(stream, 200, &json!({ "jobs": [] }));
-        return;
-    };
-    let runtime = triggers.lock().unwrap_or_else(|error| error.into_inner());
-    let jobs: Vec<Value> = runtime
-        .runner
-        .triggers()
-        .iter()
-        .map(|trigger| {
-            json!({
-                "id": trigger.id,
-                "schedule": trigger.schedule.describe(),
-                "prompt": trigger.prompt,
-                "target": trigger.target,
-                "lastFiredAt": runtime.runner.last_fired_at(&trigger.id),
-            })
-        })
-        .collect();
-    write_json(stream, 200, &json!({ "jobs": jobs }));
-}
-
-/// Add or replace a runtime cron job. The body is a `TriggerSpec`:
-/// `{id, interval_secs | cron, prompt, target?}`.
-fn upsert_cron(stream: &mut TcpStream, gateway: &Gateway, request: &Request) {
-    let Some(triggers) = &gateway.triggers else {
-        write_json(stream, 503, &json!({ "error": "cron is not enabled" }));
-        return;
-    };
-    let body = request.json().unwrap_or(Value::Null);
-    let spec: TriggerSpec = match serde_json::from_value(body) {
-        Ok(spec) => spec,
-        Err(error) => {
-            write_json(stream, 400, &json!({ "error": error.to_string() }));
-            return;
-        }
-    };
-    let id = spec.id.clone();
-    let trigger = match spec.into_trigger() {
-        Ok(trigger) => trigger,
-        Err(error) => {
-            write_json(stream, 400, &json!({ "error": error }));
-            return;
-        }
-    };
-    let mut runtime = triggers.lock().unwrap_or_else(|error| error.into_inner());
-    runtime.runner.upsert(trigger);
-    write_json(stream, 201, &json!({ "ok": true, "id": id }));
-}
-
-/// Remove a runtime cron job by id.
-fn remove_cron(stream: &mut TcpStream, gateway: &Gateway, id: &str) {
-    let Some(triggers) = &gateway.triggers else {
-        write_json(stream, 503, &json!({ "error": "cron is not enabled" }));
-        return;
-    };
-    let mut runtime = triggers.lock().unwrap_or_else(|error| error.into_inner());
-    if runtime.runner.remove(id) {
-        write_json(stream, 200, &json!({ "removed": true }));
-    } else {
-        write_json(
-            stream,
-            404,
-            &json!({ "error": format!("unknown cron job: {id}") }),
         );
     }
 }

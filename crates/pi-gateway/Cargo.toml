@@ -11,5 +11,4 @@ serde_json = { workspace = true }
 pi-agent = { path = "../pi-agent" }
 pi-host = { path = "../pi-host" }
 pi-rpc = { path = "../pi-rpc" }
-pi-triggers = { path = "../pi-triggers" }
 time = "0.3"

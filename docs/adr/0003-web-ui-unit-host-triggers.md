@@ -1,4 +1,5 @@
-# ADR 0003: Web UI, unit host, and triggers
+# ADR 0003: Web UI and unit host
+
 
 - Status: Proposed
 - Date: 2026-10-05
@@ -46,9 +47,11 @@ Findings from the investigation:
 4. Expose units over an **HTTP + SSE gateway** with pi-web-compatible semantics
    (snapshot + live + `Last-Event-ID` replay, backpressure that drops
    rebuildable deltas).
-5. Add a **trigger engine**: triggers produce episodes (find-or-create session,
-   enqueue prompt), each with a capability/budget envelope and durable run
-   records.
+
+An in-unit **trigger engine** (decision 5 in the original ADR: schedules,
+episodes, budgets, durable run records) was built and then removed by VED-419.
+Scheduling is owned by rig, which drives a scheduled prompt over the gateway like
+any other client; the unit carries no clock and no run ledger.
 
 ## Milestones
 
@@ -59,7 +62,7 @@ Findings from the investigation:
 | Unit host/supervisor | VED-340 | VED-338, VED-339 |
 | HTTP + SSE gateway | VED-341 | VED-340 |
 | pi-web fork adapter | VED-342 | VED-339 / VED-341 |
-| Trigger engine | VED-343 | VED-340 |
+| Trigger engine | VED-343 | VED-340 (removed by VED-419) |
 
 ## Consequences
 
@@ -68,8 +71,8 @@ Findings from the investigation:
   requires exposing provider stream deltas through the agent loop.
 - SDK-only panels (subagents, MCP, skills, plugins, project trust,
   exact system prompt, node-pty terminal) must be hidden or reimplemented.
-- Unattended triggers must run under the capability/approval policy added in the
-  sandbox fixes, with per-run budgets.
+- Unattended work runs under the capability/approval policy added in the
+  sandbox fixes. Budgeted scheduling is rig's concern (VED-416), not the unit's.
 
 ## Alternatives considered
 
