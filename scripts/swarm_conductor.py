@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
-"""Swarm conductor: keep the role units working through the open Linear board.
+"""Swarm conductor: planning/prioritisation over the open Linear board.
 
 A pi-native unit is request-driven: it runs one agent loop for a prompt and then
 idles. Nothing schedules the *next* prompt, which is why the swarm "stops".
-This conductor is that scheduler. It reads the open issues in the VED
-"pi native runtime" project, maps each to a role unit, and dispatches one at a
-time — only when no unit is busy, so `cargo test` and `git commit` never race.
+The conductor reads the open issues in the VED "pi native runtime" project and
+maps each to a role unit.
 
-It is intentionally deterministic (no LLM in the loop): mapping, claims, and
-retries live here; the units do the actual work and report back through Linear.
+Dispatch is delegated to the deterministic `swarm_orchestrator` (VED-368): the
+conductor decides *who* owns an issue (role routing + prompt), the orchestrator
+owns *what runs* — a durable claim table, bounded concurrency, exponential
+backoff, and reconciliation. No LLM is involved in either decision.
 
 Routing only sends write-intent work to units that are allowed to edit code
 (per ONBOARDING scope). Read-only units (`reviewer`, `planner`) receive an
@@ -21,17 +22,11 @@ from __future__ import annotations
 import json
 import os
 import re
-import subprocess
 import time
 import urllib.request
 
 GATEWAY = os.environ.get("SWARM_GATEWAY", "http://127.0.0.1:30142")
-PROJECT = "4d5e47500fa6"
-TEAM = "VED"
-STATE_PATH = "/tmp/swarm-conductor-state.json"
 POLL_SECONDS = 20
-MAX_ATTEMPTS = 3
-OPEN_STATES = {"Todo", "In Progress", "In Review"}
 
 # Stable role-unit session ids (the trailing segment of the session file name).
 ROLE_UNITS = {
@@ -54,21 +49,6 @@ READ_ONLY_ROLES = set(ROLE_UNITS) - EDITING_ROLES
 
 # A claim in one of these statuses is terminal: never re-dispatch it.
 TERMINAL_STATUSES = {"done", "declined", "blocked", "dispatching", "dispatched_readonly"}
-
-# A unit is busy while it recently emitted an active event. `state`/`response`
-# are poll replies, not work, so they never mark a unit busy.
-ACTIVE_EVENTS = {
-    "agent_start",
-    "turn_start",
-    "message_start",
-    "message_update",
-    "assistant_delta",
-    "thinking_delta",
-    "tool_start",
-    "tool_end",
-}
-BUSY_WINDOW_SECONDS = 90
-DISPATCH_COOLDOWN_SECONDS = 60
 
 
 # Titles that ask for review work route to a read-only unit. Matched only as
@@ -98,38 +78,6 @@ def role_for(title: str) -> str:
     return "coder"
 
 
-def open_issues() -> list[tuple[str, str]]:
-    result = subprocess.run(
-        ["linear", "issue", "mine", "--team", TEAM, "--project", PROJECT, "--all-states", "--json"],
-        capture_output=True,
-        text=True,
-        env={**os.environ, "LINEAR_IGNORE_ENV_FILE": "1"},
-    )
-    nodes = json.loads(result.stdout)["issues"]["nodes"]
-    issues = []
-    for node in nodes:
-        state = (node.get("state") or {}).get("name")
-        title = node.get("title") or ""
-        if state not in OPEN_STATES:
-            continue
-        if "swarm status" in title.lower():
-            continue  # the synthesizer's running status tracker
-        issues.append((node["identifier"], title))
-    return issues
-
-
-def swarm() -> dict[str, dict]:
-    with urllib.request.urlopen(f"{GATEWAY}/swarm", timeout=5) as response:
-        payload = json.load(response)
-    return {unit["sessionId"]: unit for unit in payload["units"]}
-
-
-def is_busy(unit: dict, now: float) -> bool:
-    if unit.get("lastEvent") not in ACTIVE_EVENTS:
-        return False
-    return now - float(unit.get("lastEventAt") or 0) < BUSY_WINDOW_SECONDS
-
-
 def dispatch(session_id: str, text: str) -> None:
     body = json.dumps({"type": "prompt", "text": text}).encode()
     request = urllib.request.Request(
@@ -142,17 +90,22 @@ def dispatch(session_id: str, text: str) -> None:
         pass
 
 
-def load_state() -> dict:
+def abort(session_id: str) -> None:
+    """Abort a unit's current run (used by reconcile when a card closes)."""
+    if not session_id:
+        return
+    body = json.dumps({"type": "abort"}).encode()
+    request = urllib.request.Request(
+        f"{GATEWAY}/sessions/{session_id}/commands",
+        data=body,
+        headers={"content-type": "application/json"},
+        method="POST",
+    )
     try:
-        with open(STATE_PATH) as handle:
-            return json.load(handle)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {}
-
-
-def save_state(state: dict) -> None:
-    with open(STATE_PATH, "w") as handle:
-        json.dump(state, handle, indent=2)
+        with urllib.request.urlopen(request, timeout=10):
+            pass
+    except OSError:
+        pass
 
 
 def assignment_prompt(identifier: str, title: str, role: str) -> str:
@@ -193,44 +146,66 @@ def prompt_for(identifier: str, title: str, role: str) -> str:
 
 
 def main() -> None:
-    state = load_state()
-    last_dispatch = 0.0
+    """Conductor loop.
+
+    Planning/prioritisation stays here (role routing and prompts). Dispatch,
+    claims, concurrency, retries, and reconciliation are delegated to the
+    deterministic `swarm_orchestrator` (VED-368), which owns the claim table.
+    """
+    import swarm_orchestrator as orchestrator_module
+
+    config = orchestrator_module.OrchestratorConfig(
+        max_concurrent_agents=orchestrator_module.DEFAULT_MAX_CONCURRENT_AGENTS
+    )
+    orchestrator = orchestrator_module.Orchestrator.load(
+        orchestrator_module.STATE_PATH, config
+    )
+    cleaned_up = False
     print("conductor started", flush=True)
     while True:
         try:
+            board = orchestrator_module.fetch_board()
+            active = {
+                issue
+                for issue, snap in board.items()
+                if snap.get("stateType") in orchestrator_module.ACTIVE_STATE_TYPES
+            }
+            # Prune terminal cards once at startup, after the board is known.
+            if not cleaned_up:
+                decisions = orchestrator.startup_cleanup(active)
+                for decision in decisions:
+                    print(
+                        f"{decision.action} {decision.issue} {decision.reason}", flush=True
+                    )
+                cleaned_up = True
+            units = orchestrator_module.fetch_units()
             now = time.time()
-            units = swarm()
-            busy = any(is_busy(unit, now) for unit in units.values())
-            if not busy and now - last_dispatch >= DISPATCH_COOLDOWN_SECONDS:
-                for identifier, title in open_issues():
-                    record = state.setdefault(identifier, {"attempts": 0})
-                    # A terminal verdict (done/declined/blocked, or an already-
-                    # dispatched read-only audit) is never retried.
-                    if record.get("terminal"):
-                        continue
-                    if record.get("status") in TERMINAL_STATUSES:
-                        continue
-                    if record["attempts"] >= MAX_ATTEMPTS:
-                        continue
-                    role = role_for(title)
-                    session_id = ROLE_UNITS[role]
-                    dispatch(session_id, prompt_for(identifier, title, role))
-                    last_dispatch = now
-                    record["attempts"] += 1
-                    record["role"] = role
-                    record["title"] = title
-                    record["at"] = now
-                    # A read-only unit is asked to audit, not to fix. Mark the
-                    # claim terminal so it is dispatched exactly once instead of
-                    # being retried until MAX_ATTEMPTS (VED-360).
-                    if role in READ_ONLY_ROLES:
-                        record["status"] = "dispatched_readonly"
-                        record["terminal"] = True
-                    else:
-                        record["status"] = "dispatched"
-                    save_state(state)
-                    print(f"dispatched {identifier} -> {role} (attempt {record['attempts']})", flush=True)
-                    break  # serial: one issue in flight at a time
+            decisions = orchestrator.tick(
+                board,
+                now=now,
+                is_busy=lambda sid: orchestrator_module.unit_is_busy(units.get(sid), now),
+                route=role_for,
+                session_for=lambda role: ROLE_UNITS[role],
+                read_only_roles=READ_ONLY_ROLES,
+            )
+            for decision in decisions:
+                if decision.action == "dispatch":
+                    title = board.get(decision.issue, {}).get("title", "")
+                    try:
+                        dispatch(
+                            decision.session_id,
+                            prompt_for(decision.issue, title, decision.role),
+                        )
+                    except OSError as error:
+                        orchestrator.record_failure(
+                            decision.issue, time.time(), f"dispatch failed: {error}"
+                        )
+                elif decision.action == "stop":
+                    abort(decision.session_id)
+                print(
+                    f"{decision.action} {decision.issue} {decision.reason}", flush=True
+                )
+            orchestrator.save(orchestrator_module.STATE_PATH)
         except Exception as error:  # keep the conductor alive across transient errors
             print(f"conductor error: {error}", flush=True)
         time.sleep(POLL_SECONDS)
