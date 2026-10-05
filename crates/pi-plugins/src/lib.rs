@@ -216,6 +216,20 @@ pub struct PluginToolSpec {
     pub parameters: serde_json::Value,
 }
 
+/// A custom renderer an extension registered via `pi.registerMessageRenderer`
+/// or `pi.registerMarkdownTransformer`. The render function is kept in a
+/// JS-side registry; this records the metadata for listing and dispatch.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PluginRendererSpec {
+    /// `message` for `registerMessageRenderer`, `markdown` for
+    /// `registerMarkdownTransformer`.
+    pub kind: String,
+    /// The name the extension registered under.
+    pub name: String,
+    /// Any additional metadata the registration carried.
+    pub spec: serde_json::Value,
+}
+
 /// Runs a plugin for the duration of one call and records its hostcalls.
 pub struct PluginHost {
     policy: PluginPolicy,
@@ -223,6 +237,54 @@ pub struct PluginHost {
     denials: Arc<Mutex<Vec<HostCall>>>,
     tools: Arc<Mutex<Vec<PluginToolSpec>>>,
     commands: Arc<Mutex<Vec<serde_json::Value>>>,
+    renderers: Arc<Mutex<Vec<PluginRendererSpec>>>,
+}
+
+/// Shared implementation of `pi.registerMessageRenderer` /
+/// `pi.registerMarkdownTransformer`: store the render function in the JS-side
+/// `__pi_renderers[kind]` registry and record its metadata on the host.
+#[allow(clippy::too_many_arguments)]
+fn install_renderer<'js>(
+    ctx: &Ctx<'js>,
+    policy: &PluginPolicy,
+    calls: &Arc<Mutex<Vec<HostCall>>>,
+    denials: &Arc<Mutex<Vec<HostCall>>>,
+    renderers: &Arc<Mutex<Vec<PluginRendererSpec>>>,
+    kind: &str,
+    name: &str,
+    render: rquickjs::Value<'js>,
+) {
+    let meta = serde_json::json!({ "kind": kind, "name": name });
+    if !record(
+        policy,
+        calls,
+        denials,
+        Capability::Events,
+        if kind == "message" {
+            "registerMessageRenderer"
+        } else {
+            "registerMarkdownTransformer"
+        },
+        meta.clone(),
+    ) {
+        return;
+    }
+    if name.is_empty() || !render.is_function() {
+        return;
+    }
+    if let Ok(registry) = ctx.globals().get::<_, Object>("__pi_renderers") {
+        if let Ok(bucket) = registry.get::<_, Object>(kind) {
+            let _ = bucket.set(name.to_string(), render);
+        }
+    }
+    renderers
+        .lock()
+        .expect("renderers lock")
+        .push(PluginRendererSpec {
+            kind: kind.to_string(),
+            name: name.to_string(),
+            spec: meta,
+        });
 }
 
 impl PluginHost {
@@ -233,6 +295,7 @@ impl PluginHost {
             denials: Arc::new(Mutex::new(Vec::new())),
             tools: Arc::new(Mutex::new(Vec::new())),
             commands: Arc::new(Mutex::new(Vec::new())),
+            renderers: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -332,6 +395,11 @@ impl PluginHost {
         let pi = Object::new(ctx.clone())?;
         // Registry of registered tools' `execute` functions (name -> function).
         ctx.globals().set("__pi_tools", Object::new(ctx.clone())?)?;
+        // Registry of custom renderers: {message:{name:fn},markdown:{name:fn}}.
+        let renderer_registry = Object::new(ctx.clone())?;
+        renderer_registry.set("message", Object::new(ctx.clone())?)?;
+        renderer_registry.set("markdown", Object::new(ctx.clone())?)?;
+        ctx.globals().set("__pi_renderers", renderer_registry)?;
 
         // pi.log(entry)
         let calls = self.calls.clone();
@@ -492,6 +560,44 @@ impl PluginHost {
                     json_from_js(&spec),
                 );
             }),
+        )?;
+
+        // pi.registerMessageRenderer(name, render) and
+        // pi.registerMarkdownTransformer(name, render) — see install_renderer.
+        let (calls, denials, policy) = (
+            self.calls.clone(),
+            self.denials.clone(),
+            self.policy.clone(),
+        );
+        let renderers = self.renderers.clone();
+        pi.set(
+            "registerMessageRenderer",
+            Function::new(
+                ctx.clone(),
+                move |ctx: Ctx<'js>, name: String, render: rquickjs::Value<'js>| {
+                    install_renderer(
+                        &ctx, &policy, &calls, &denials, &renderers, "message", &name, render,
+                    );
+                },
+            ),
+        )?;
+
+        let (calls, denials, policy) = (
+            self.calls.clone(),
+            self.denials.clone(),
+            self.policy.clone(),
+        );
+        let renderers = self.renderers.clone();
+        pi.set(
+            "registerMarkdownTransformer",
+            Function::new(
+                ctx.clone(),
+                move |ctx: Ctx<'js>, name: String, render: rquickjs::Value<'js>| {
+                    install_renderer(
+                        &ctx, &policy, &calls, &denials, &renderers, "markdown", &name, render,
+                    );
+                },
+            ),
         )?;
 
         // pi.session(op, args) / pi.ui(op, args) / pi.events(op, args)
@@ -1110,6 +1216,71 @@ fn run_command(command: &str, args: &[String], cwd: Option<&Path>) -> String {
     }
 }
 
+/// Build the single argument passed to a renderer function: the payload with
+/// an injected `width` field (plus the payload itself under `entry`/`value`
+/// when it is not an object), so extension renderers can read the width.
+fn renderer_argument<'js>(
+    ctx: &Ctx<'js>,
+    width: usize,
+    args: &serde_json::Value,
+) -> rquickjs::Value<'js> {
+    let mut object = match args {
+        serde_json::Value::Object(map) => map.clone(),
+        serde_json::Value::Null => serde_json::Map::new(),
+        other => {
+            let mut map = serde_json::Map::new();
+            map.insert("value".to_string(), other.clone());
+            map
+        }
+    };
+    object.insert("width".to_string(), serde_json::json!(width));
+    json_to_js(ctx, &serde_json::Value::Object(object))
+}
+
+/// Normalise a JS renderer result to a `Vec<String>` of terminal lines.
+/// Accepts a single string (split on newlines) or an array of strings.
+fn lines_from_js(value: &rquickjs::Value<'_>) -> Vec<String> {
+    match json_from_js(value) {
+        serde_json::Value::String(text) => text.split('\n').map(str::to_string).collect(),
+        serde_json::Value::Array(items) => items
+            .into_iter()
+            .map(|item| match item {
+                serde_json::Value::String(text) => text,
+                other => other.to_string(),
+            })
+            .collect(),
+        serde_json::Value::Null => Vec::new(),
+        other => vec![other.to_string()],
+    }
+}
+
+/// Resolve a renderer's return value to terminal lines, following pi's
+/// `Component` protocol: a renderer may return a **component object** exposing
+/// `render(width): string[]` (what `registerMessageRenderer` produces), or the
+/// lines directly.
+///
+/// If the value is an object with a callable `render`, it is called as
+/// `render(width)` and its result normalised. Otherwise the value itself is
+/// normalised, so a renderer that returns strings keeps working.
+fn component_lines<'js>(
+    ctx: &Ctx<'js>,
+    value: rquickjs::Value<'js>,
+    width: usize,
+) -> Result<Vec<String>, PluginError> {
+    if let Some(object) = value.as_object() {
+        if let Ok(render) = object.get::<_, rquickjs::Value>("render") {
+            if let Some(function) = render.as_function() {
+                let produced: rquickjs::Value<'js> = function
+                    .call((width,))
+                    .catch(ctx)
+                    .map_err(|error| caught_error("component.render", error))?;
+                return Ok(lines_from_js(&produced));
+            }
+        }
+    }
+    Ok(lines_from_js(&value))
+}
+
 fn caught_error(stage: &str, error: rquickjs::CaughtError<'_>) -> PluginError {
     match error {
         rquickjs::CaughtError::Exception(exception) => {
@@ -1365,6 +1536,7 @@ pub struct PluginInstance {
     context: Context,
     tools: Vec<PluginToolSpec>,
     commands: Vec<serde_json::Value>,
+    renderers: Vec<PluginRendererSpec>,
 }
 
 impl PluginInstance {
@@ -1388,10 +1560,12 @@ impl PluginInstance {
         }
         let tools = host.tools.lock().expect("tools lock").clone();
         let commands = host.commands.lock().expect("commands lock").clone();
+        let renderers = host.renderers.lock().expect("renderers lock").clone();
         Ok(Self {
             context,
             tools,
             commands,
+            renderers,
         })
     }
 
@@ -1407,6 +1581,47 @@ impl PluginInstance {
 
     pub fn commands(&self) -> &[serde_json::Value] {
         &self.commands
+    }
+
+    /// Custom renderers registered via `pi.registerMessageRenderer` /
+    /// `pi.registerMarkdownTransformer`.
+    pub fn renderers(&self) -> &[PluginRendererSpec] {
+        &self.renderers
+    }
+
+    /// Invoke a registered renderer and normalise its result to terminal lines.
+    ///
+    /// `kind` is `"message"` or `"markdown"`. The function is called as
+    /// `render(args)` where `args` is the extension-supplied payload (the
+    /// message entry or markdown string) plus an injected `width`. The result
+    /// may be an array of strings or a single string; either is split into
+    /// lines here so the caller always receives a `Vec<String>`.
+    pub fn render_lines(
+        &self,
+        kind: &str,
+        name: &str,
+        width: usize,
+        args: &serde_json::Value,
+    ) -> Result<Vec<String>, PluginError> {
+        self.context.with(|ctx| {
+            let registry: Object<'_> = ctx
+                .globals()
+                .get("__pi_renderers")
+                .map_err(PluginError::from)?;
+            let bucket: Object<'_> = registry.get(kind).map_err(PluginError::from)?;
+            let value: rquickjs::Value<'_> = bucket.get(name).map_err(PluginError::from)?;
+            let Some(function) = value.as_function() else {
+                return Err(PluginError::Engine(format!(
+                    "plugin {kind} renderer `{name}` is not callable"
+                )));
+            };
+            let call_arg = renderer_argument(&ctx, width, args);
+            let result: rquickjs::Value<'_> = function
+                .call((call_arg,))
+                .catch(&ctx)
+                .map_err(|error| caught_error("renderer", error))?;
+            component_lines(&ctx, result, width)
+        })
     }
 
     /// Call a registered tool's `execute(input)` and return its JSON result.

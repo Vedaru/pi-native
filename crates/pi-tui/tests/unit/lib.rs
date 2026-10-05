@@ -497,3 +497,85 @@ fn cursor_sequence_moves_to_a_one_based_cell() {
     assert_eq!(cursor_sequence(Some((4, 2))), "\x1b[3;5H");
     assert_eq!(cursor_sequence(None), "");
 }
+
+// ---- acceptance evidence: no full-frame re-render on large transcripts ----
+
+#[test]
+fn large_transcript_steady_state_emits_no_full_frame() {
+    // A long transcript must not be re-emitted every frame: once the frame is
+    // unchanged, the differential renderer emits nothing.
+    let mut screen = Screen::new();
+    for index in 0..5_000 {
+        screen.push_line(TranscriptLine::new(format!("transcript line {index}")));
+    }
+    let frame = screen.compose(120, 40).buffer;
+    let mut renderer = crate::render::Renderer::new();
+    let first = renderer.render(frame.clone());
+    assert!(!first.is_empty(), "the first frame must draw something");
+    // Redraw the identical frame: nothing should be written.
+    let second = renderer.render(frame.clone());
+    assert_eq!(second, "", "an unchanged large frame must emit nothing");
+    // The steady-state delta must be far smaller than a full repaint of the
+    // transcript (no full-frame regression).
+    assert!(
+        first.len() < 40 * 120 * 8,
+        "first frame unexpectedly large: {} bytes",
+        first.len()
+    );
+}
+
+#[test]
+fn editing_only_repaints_the_editor_row() {
+    let mut screen = Screen::new();
+    for index in 0..5_000 {
+        screen.push_line(TranscriptLine::new(format!("transcript line {index}")));
+    }
+    let before = screen.compose(120, 40).buffer;
+    screen.insert('x');
+    let after = screen.compose(120, 40).buffer;
+    let delta = crate::render::diff(Some(&before), &after);
+    // The change must be confined to the editor row (the last one).
+    assert!(delta.contains('x'), "the typed character must be drawn");
+    assert!(
+        !delta.contains("transcript line"),
+        "an editor keystroke must not re-emit the transcript: {} bytes",
+        delta.len()
+    );
+    assert!(
+        delta.len() < 256,
+        "editor delta should be tiny: {} bytes",
+        delta.len()
+    );
+}
+
+#[test]
+fn components_composite_into_a_screen_frame() {
+    use crate::component::{composite, ComponentCache, ComponentSource};
+
+    struct Static(Vec<String>);
+    impl ComponentSource for Static {
+        fn render(&mut self, _width: usize) -> Vec<String> {
+            self.0.clone()
+        }
+        fn invalidate(&mut self) {}
+    }
+
+    let mut cache = ComponentCache::new(Static(vec!["boxed".into(), "custom".into()]));
+    let lines = cache.lines(80).to_vec();
+    let mut screen = Screen::new();
+    screen.push_line(TranscriptLine::new("header"));
+    let mut frame = screen.compose(80, 6);
+    let written = composite(
+        &mut frame.buffer,
+        0,
+        2,
+        &lines,
+        crate::buffer::Style::default(),
+    );
+    assert_eq!(written, 2);
+    assert_eq!(row_string(&frame.buffer, 2), "boxed");
+    assert_eq!(row_string(&frame.buffer, 3), "custom");
+    // A second frame with the same width must not re-run the component.
+    let _ = cache.lines(80);
+    assert_eq!(cache.render_count(), 1, "unchanged component re-rendered");
+}

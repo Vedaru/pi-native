@@ -527,3 +527,110 @@ fn top_level_hostcall_error_makes_the_module_load_fail() {
 
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[test]
+fn register_message_renderer_is_recorded_and_callable() {
+    let source = r#"
+        export default function (pi) {
+            pi.registerMessageRenderer("boxed", (entry) => [
+                "+" + "-".repeat(entry.width) + "+",
+                "| " + entry.text + " |",
+                "+" + "-".repeat(entry.width) + "+",
+            ]);
+        }
+    "#;
+    let instance = PluginInstance::load(PluginPolicy::permissive(), "plugin://render.ts", source)
+        .expect("load");
+    assert_eq!(instance.renderers().len(), 1);
+    assert_eq!(instance.renderers()[0].kind, "message");
+    assert_eq!(instance.renderers()[0].name, "boxed");
+
+    let lines = instance
+        .render_lines("message", "boxed", 3, &serde_json::json!({ "text": "hi" }))
+        .expect("render");
+    assert_eq!(lines, vec!["+---+", "| hi |", "+---+"]);
+
+    let missing = instance.render_lines("message", "nope", 3, &serde_json::json!({}));
+    assert!(missing.is_err());
+}
+
+#[test]
+fn register_markdown_transformer_receives_width_and_returns_lines() {
+    let source = r#"
+        export default function (pi) {
+            pi.registerMarkdownTransformer("upper", (input) => {
+                const text = typeof input.value === "string" ? input.value : "";
+                return text.toUpperCase().split("\n");
+            });
+        }
+    "#;
+    let instance =
+        PluginInstance::load(PluginPolicy::permissive(), "plugin://md.ts", source).expect("load");
+    assert_eq!(instance.renderers()[0].kind, "markdown");
+
+    let lines = instance
+        .render_lines("markdown", "upper", 40, &serde_json::json!("hello\nworld"))
+        .expect("render");
+    assert_eq!(lines, vec!["HELLO", "WORLD"]);
+}
+
+#[test]
+fn render_lines_accepts_a_single_string() {
+    let source = r#"
+        export default function (pi) {
+            pi.registerMarkdownTransformer("plain", () => "one\ntwo");
+        }
+    "#;
+    let instance = PluginInstance::load(PluginPolicy::permissive(), "plugin://plain.ts", source)
+        .expect("load");
+    let lines = instance
+        .render_lines("markdown", "plain", 10, &serde_json::json!(null))
+        .expect("render");
+    assert_eq!(lines, vec!["one", "two"]);
+}
+
+#[test]
+fn message_renderer_may_return_a_component_object() {
+    // pi's `registerMessageRenderer(name, fn)` returns a Component with a
+    // `render(width)` method; the bridge must call that method, not stringify
+    // the object.
+    let source = r#"
+        export default function (pi) {
+            pi.registerMessageRenderer("component", (message) => ({
+                render: (width) => [
+                    "[" + width + "]",
+                    message.content,
+                ],
+                invalidate() {},
+            }));
+        }
+    "#;
+    let instance =
+        PluginInstance::load(PluginPolicy::permissive(), "plugin://comp.ts", source).expect("load");
+    let lines = instance
+        .render_lines(
+            "message",
+            "component",
+            24,
+            &serde_json::json!({ "content": "hi" }),
+        )
+        .expect("render");
+    assert_eq!(lines, vec!["[24]", "hi"]);
+}
+
+#[test]
+fn markdown_transformer_component_receives_width() {
+    let source = r#"
+        export default function (pi) {
+            pi.registerMarkdownTransformer("box", () => ({
+                render: (width) => ["+" + "-".repeat(width) + "+"],
+            }));
+        }
+    "#;
+    let instance = PluginInstance::load(PluginPolicy::permissive(), "plugin://mdbox.ts", source)
+        .expect("load");
+    let lines = instance
+        .render_lines("markdown", "box", 5, &serde_json::json!("x"))
+        .expect("render");
+    assert_eq!(lines, vec!["+-----+"]);
+}

@@ -11,6 +11,7 @@
 //! the returned bytes to their output.
 
 pub mod buffer;
+pub mod component;
 pub mod dialog;
 pub mod editor;
 pub mod image;
@@ -18,6 +19,7 @@ pub mod render;
 pub mod screen;
 
 pub use buffer::{Buffer, Cell, Color, Style};
+pub use component::{composite, CachedLines, ComponentCache, ComponentSource};
 pub use dialog::{Dialog, DialogOutcome, DialogState};
 pub use editor::{cursor_column, move_cursor, wrap_line, wrap_lines};
 pub use image::{
