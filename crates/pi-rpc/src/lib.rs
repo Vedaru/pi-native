@@ -394,6 +394,12 @@ fn apply_command(
                 Some(AgentEvent::Compacted { dropped, summary }) => (summary, Some(dropped)),
                 _ => (None, None),
             };
+            // Persist immediately so the on-disk file records the compaction
+            // (summary + firstKeptEntryId) rather than waiting for the next
+            // turn, which may never come.
+            if dropped.is_some() {
+                session.persist(agent);
+            }
             Some(response(
                 id,
                 "compact",

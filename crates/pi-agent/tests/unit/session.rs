@@ -1,7 +1,7 @@
 use super::*;
 use pi_providers::{AssistantBlock, ContentPart, TranscriptMessage};
 use pi_session::{SessionFile, SessionHeader};
-use serde_json::json;
+use serde_json::{json, Value};
 
 fn empty_session() -> SessionFile {
     SessionFile {
@@ -181,6 +181,118 @@ fn journal_rewrites_after_compaction() {
     let (_, seeded) = SessionJournal::open(path, "/tmp").expect("reopen");
     assert_eq!(seeded.len(), 1);
     assert!(matches!(&seeded[0], TranscriptMessage::UserText(text) if text == "summary"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn journal_records_a_compaction_entry_with_summary_and_first_kept() {
+    let (dir, path) = temp_session_path("compaction-entry");
+    let (mut journal, _) = SessionJournal::open(path.clone(), "/tmp").expect("open");
+    let before: Vec<TranscriptMessage> = (0..4)
+        .map(|index| TranscriptMessage::UserText(format!("m{index}")))
+        .collect();
+    journal.persist(&before).expect("persist");
+
+    // The agent replaces the dropped prefix with one summary message and keeps
+    // the last two messages.
+    let compacted = vec![
+        TranscriptMessage::UserText("SUMMARY".into()),
+        before[2].clone(),
+        before[3].clone(),
+    ];
+    journal.persist(&compacted).expect("persist");
+
+    let recorded = journal.last_compaction().expect("recorded compaction");
+    assert_eq!(recorded.summary, "SUMMARY");
+    assert_eq!(recorded.dropped, 2);
+    assert!(recorded.first_kept_entry_id.is_some());
+
+    // The file carries the compaction entry, and reloading yields the summary
+    // followed by the kept messages (not a plain rewrite that lost the span).
+    let session = SessionFile::read(&path).expect("read");
+    let compaction = session
+        .entries
+        .iter()
+        .find(|entry| entry.kind == "compaction")
+        .expect("compaction entry");
+    assert_eq!(compaction.get("summary"), Some(&json!("SUMMARY")));
+    let first_kept = compaction
+        .get("firstKeptEntryId")
+        .and_then(Value::as_str)
+        .expect("firstKeptEntryId");
+    assert_eq!(Some(first_kept), recorded.first_kept_entry_id.as_deref());
+
+    let (_, seeded) = SessionJournal::open(path, "/tmp").expect("reopen");
+    assert_eq!(seeded.len(), 3);
+    assert!(matches!(&seeded[0], TranscriptMessage::UserText(text) if text == "SUMMARY"));
+    assert!(matches!(&seeded[1], TranscriptMessage::UserText(text) if text == "m2"));
+    assert!(matches!(&seeded[2], TranscriptMessage::UserText(text) if text == "m3"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn journal_detects_compaction_by_identity_not_length() {
+    let (dir, path) = temp_session_path("identity");
+    let (mut journal, _) = SessionJournal::open(path.clone(), "/tmp").expect("open");
+    let before: Vec<TranscriptMessage> = (0..3)
+        .map(|index| TranscriptMessage::UserText(format!("m{index}")))
+        .collect();
+    journal.persist(&before).expect("persist");
+
+    // Compaction drops two messages but the same turn adds three new ones, so
+    // the transcript is not shorter. A length check would append and keep the
+    // summarized span; identity detection must rewrite and record compaction.
+    let compacted = vec![
+        TranscriptMessage::UserText("SUMMARY".into()),
+        before[2].clone(),
+        TranscriptMessage::UserText("n0".into()),
+        TranscriptMessage::UserText("n1".into()),
+        TranscriptMessage::UserText("n2".into()),
+    ];
+    assert!(compacted.len() > before.len());
+    journal.persist(&compacted).expect("persist");
+
+    let recorded = journal
+        .last_compaction()
+        .expect("compaction recorded despite growth");
+    assert_eq!(recorded.summary, "SUMMARY");
+    assert_eq!(recorded.dropped, 2);
+
+    let (_, seeded) = SessionJournal::open(path, "/tmp").expect("reopen");
+    assert_eq!(seeded.len(), compacted.len());
+    assert!(matches!(&seeded[0], TranscriptMessage::UserText(text) if text == "SUMMARY"));
+    assert!(matches!(&seeded[1], TranscriptMessage::UserText(text) if text == "m2"));
+    assert!(matches!(&seeded[4], TranscriptMessage::UserText(text) if text == "n2"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn journal_rewrite_matches_the_in_memory_transcript() {
+    let (dir, path) = temp_session_path("rewrite-match");
+    let (mut journal, _) = SessionJournal::open(path.clone(), "/tmp").expect("open");
+    journal
+        .persist(&[
+            TranscriptMessage::UserText("a".into()),
+            TranscriptMessage::UserText("b".into()),
+            TranscriptMessage::UserText("c".into()),
+        ])
+        .expect("persist");
+
+    let rewritten = vec![
+        TranscriptMessage::UserText("a".into()),
+        TranscriptMessage::UserText("new".into()),
+    ];
+    journal.persist(&rewritten).expect("persist");
+
+    let (_, seeded) = SessionJournal::open(path, "/tmp").expect("reopen");
+    let seeded_text: Vec<String> = seeded
+        .iter()
+        .map(|message| match message {
+            TranscriptMessage::UserText(text) => text.clone(),
+            other => panic!("unexpected message: {other:?}"),
+        })
+        .collect();
+    assert_eq!(seeded_text, vec!["a".to_string(), "new".to_string()]);
     let _ = std::fs::remove_dir_all(&dir);
 }
 

@@ -355,15 +355,192 @@ fn io_err(error: impl std::fmt::Display) -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string())
 }
 
+/// A content fingerprint for a transcript message: its canonical pi JSON shape
+/// without the volatile `timestamp`, so the same message keeps the same identity
+/// across turns. Compaction is detected by comparing these (identity), not by
+/// counting messages: a turn can drop a span and add at least as many new
+/// messages, which a length check would misread as an append.
+fn fingerprint(message: &TranscriptMessage) -> String {
+    let mut value = message_value(message);
+    if let Some(object) = value.as_object_mut() {
+        object.remove("timestamp");
+    }
+    value.to_string()
+}
+
+/// One message as it currently exists on disk, keyed by identity.
+#[derive(Clone)]
+struct Persisted {
+    fingerprint: String,
+    /// The session entry id this message was written as.
+    entry_id: String,
+    /// Approximate token size, for the compaction entry's `tokensBefore`.
+    tokens: usize,
+}
+
+/// The compaction recorded by the most recent rewrite, for callers that report
+/// it (the RPC `compact` response).
+#[derive(Debug, Clone, PartialEq)]
+pub struct RecordedCompaction {
+    /// Id of the `compaction` entry written to the file.
+    pub entry_id: String,
+    /// The summary the dropped span was replaced with.
+    pub summary: String,
+    /// The first kept entry, or `None` when nothing after the summary remains.
+    pub first_kept_entry_id: Option<String>,
+    /// How many messages were replaced by the summary.
+    pub dropped: usize,
+    /// Approximate tokens in the dropped span.
+    pub tokens_before: usize,
+}
+
 /// Persists a transcript to a pi session file.
 ///
-/// Appends new messages each turn (O(1) writes); when compaction shrinks the
-/// transcript, it rewrites the file from the current context. The file always
-/// reflects what `messages_from_session` would load back.
+/// Appends new messages each turn (O(1) writes); when the transcript is
+/// rewritten (compaction, or a context-policy drop), it rewrites the file from
+/// the current context and records a `compaction` entry carrying the summary and
+/// `firstKeptEntryId`, so the summarized span is not silently lost. The file
+/// always reflects what `messages_from_session` would load back.
 pub struct SessionJournal {
     path: std::path::PathBuf,
     session: SessionFile,
-    persisted: usize,
+    /// Identity of every message currently persisted, in order.
+    persisted: Vec<Persisted>,
+    /// The compaction recorded by the most recent `persist`, if it rewrote.
+    last_compaction: Option<RecordedCompaction>,
+}
+
+/// The longest common prefix of two slices, by identity.
+fn common_prefix(a: &[Persisted], b: &[String]) -> usize {
+    let mut count = 0;
+    while count < a.len() && count < b.len() && a[count].fingerprint == b[count] {
+        count += 1;
+    }
+    count
+}
+
+/// Locate the longest suffix of the old transcript (from `lcp` on) that still
+/// appears contiguously in the new fingerprints. Returns `(old_start,
+/// new_start)`; `old_start == persisted.len()` means nothing was kept. New
+/// messages may follow the kept run, so this searches for the run rather than
+/// anchoring on the end.
+fn kept_span(persisted: &[Persisted], fingerprints: &[String], lcp: usize) -> (usize, usize) {
+    let mut best = (persisted.len(), fingerprints.len());
+    let mut old_start = lcp;
+    while old_start < persisted.len() {
+        let run = persisted.len() - old_start;
+        let mut new_start = lcp;
+        let mut found = None;
+        while new_start + run <= fingerprints.len() {
+            if (0..run).all(|offset| {
+                persisted[old_start + offset].fingerprint == fingerprints[new_start + offset]
+            }) {
+                found = Some(new_start);
+                break;
+            }
+            new_start += 1;
+        }
+        if let Some(new_start) = found {
+            best = (old_start, new_start);
+            break;
+        }
+        old_start += 1;
+    }
+    best
+}
+
+/// Fingerprint of an already-serialized pi message value (a session entry's
+/// `message` field), matching [`fingerprint`] for the same message.
+fn fingerprint_of_value(message: &Value) -> String {
+    let mut value = message.clone();
+    if let Some(object) = value.as_object_mut() {
+        object.remove("timestamp");
+    }
+    value.to_string()
+}
+
+/// The text a replacement message contributes as a compaction summary.
+fn replacement_summary(replacements: &[TranscriptMessage]) -> String {
+    let text = replacements
+        .iter()
+        .map(|message| match message {
+            TranscriptMessage::UserText(text) => text.clone(),
+            TranscriptMessage::UserParts(parts) => parts
+                .iter()
+                .filter_map(|part| match part {
+                    ContentPart::Text { text } => Some(text.clone()),
+                    ContentPart::Image { .. } => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+            TranscriptMessage::Assistant(blocks) => blocks
+                .iter()
+                .filter_map(|block| match block {
+                    AssistantBlock::Text { text } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+            TranscriptMessage::ToolResult { content, .. } => content
+                .iter()
+                .filter_map(|part| match part {
+                    ContentPart::Text { text } => Some(text.clone()),
+                    ContentPart::Image { .. } => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    if text.trim().is_empty() {
+        "[earlier messages omitted to fit the context window]".to_string()
+    } else {
+        text
+    }
+}
+
+impl Persisted {
+    /// Rebuild the persisted identity list for a session loaded from disk,
+    /// matching transcript messages to the message entries that produced them.
+    /// The compaction summary message (which has no message entry) maps to the
+    /// latest `compaction` entry.
+    fn load(session: &SessionFile, transcript: &[TranscriptMessage]) -> Vec<Persisted> {
+        let entries: Vec<(String, String)> = session
+            .message_entries()
+            .map(|entry| {
+                (
+                    fingerprint_of_value(entry.message().unwrap_or(&Value::Null)),
+                    entry.id.clone(),
+                )
+            })
+            .collect();
+        let compaction_id = session
+            .entries
+            .iter()
+            .rev()
+            .find(|entry| entry.kind == "compaction")
+            .map(|entry| entry.id.clone());
+        let mut cursor = 0usize;
+        transcript
+            .iter()
+            .map(|message| {
+                let fp = fingerprint(message);
+                let matched = (cursor..entries.len()).find(|&index| entries[index].0 == fp);
+                let entry_id = match matched {
+                    Some(index) => {
+                        cursor = index + 1;
+                        entries[index].1.clone()
+                    }
+                    None => compaction_id.clone().unwrap_or_default(),
+                };
+                Persisted {
+                    fingerprint: fp,
+                    entry_id,
+                    tokens: message.approx_tokens(),
+                }
+            })
+            .collect()
+    }
 }
 
 impl SessionJournal {
@@ -416,48 +593,141 @@ impl SessionJournal {
             session.write(&path).map_err(io_err)?;
             (session, Vec::new())
         };
-        let persisted = transcript.len();
+        let persisted = Persisted::load(&session, &transcript);
         Ok((
             Self {
                 path,
                 session,
                 persisted,
+                last_compaction: None,
             },
             transcript,
         ))
     }
 
-    /// Record the current transcript. Returns the number of new entries.
+    /// The compaction recorded by the most recent [`Self::persist`], if it
+    /// rewrote the transcript.
+    pub fn last_compaction(&self) -> Option<&RecordedCompaction> {
+        self.last_compaction.as_ref()
+    }
+
+    /// Record the current transcript. Returns the number of entries written.
+    ///
+    /// A pure append (the transcript still begins with exactly what is on disk)
+    /// writes only the new messages. Any divergence is detected by message
+    /// identity, not by comparing lengths: a turn that drops a span and adds at
+    /// least as many new messages still rewrites, so the file cannot silently
+    /// keep a summarized span it no longer matches. When the rewrite is a
+    /// compaction (the divergence introduces a summary in place of the dropped
+    /// messages), a `compaction` entry carrying the summary and
+    /// `firstKeptEntryId` is written too.
     pub fn persist(&mut self, messages: &[TranscriptMessage]) -> std::io::Result<usize> {
-        if messages.len() < self.persisted {
-            // Compaction dropped history: rewrite from the current context.
-            let mut session = SessionFile {
-                header: self.session.header.clone(),
-                entries: Vec::new(),
-            };
-            let appended = append_messages(&mut session, messages);
-            session.write(&self.path).map_err(io_err)?;
-            self.session = session;
-            self.persisted = messages.len();
-            return Ok(appended);
+        let fingerprints: Vec<String> = messages.iter().map(fingerprint).collect();
+        let lcp = common_prefix(&self.persisted, &fingerprints);
+
+        if lcp == self.persisted.len() {
+            // The transcript begins with exactly what is already on disk: append
+            // only the new messages.
+            if messages.len() == lcp {
+                return Ok(0);
+            }
+            let before = self.session.entries.len();
+            append_messages(&mut self.session, &messages[lcp..]);
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .create(true)
+                .open(&self.path)?;
+            for entry in &self.session.entries[before..] {
+                let line = serde_json::to_string(entry).map_err(io_err)?;
+                writeln!(file, "{line}")?;
+            }
+            for (offset, entry) in self.session.entries[before..].iter().enumerate() {
+                self.persisted.push(Persisted {
+                    fingerprint: fingerprints[lcp + offset].clone(),
+                    entry_id: entry.id.clone(),
+                    tokens: messages[lcp + offset].approx_tokens(),
+                });
+            }
+            return Ok(self.session.entries.len() - before);
         }
 
-        let new = &messages[self.persisted..];
-        if new.is_empty() {
-            return Ok(0);
+        self.rewrite(messages, &fingerprints, lcp)
+    }
+
+    /// Rewrite the file for a transcript that diverged from disk, recording a
+    /// compaction entry when the divergence summarizes a prefix.
+    fn rewrite(
+        &mut self,
+        messages: &[TranscriptMessage],
+        fingerprints: &[String],
+        lcp: usize,
+    ) -> std::io::Result<usize> {
+        // The kept tail is the longest suffix of the old transcript that still
+        // appears contiguously in the new one; everything between the common
+        // prefix and it was dropped. New messages may follow the kept tail
+        // (compaction plus the same turn's output), so anchoring on the end is
+        // not enough.
+        let (old_i, new_i) = kept_span(&self.persisted, fingerprints, lcp);
+        let dropped = old_i.saturating_sub(lcp);
+        let tokens_before = self.persisted[lcp..old_i].iter().map(|p| p.tokens).sum();
+
+        // A compaction always summarizes history from the front of the
+        // transcript (the agent inserts one summary message at index 0). Only
+        // that shape is representable by a single `compaction` entry; a drop in
+        // the middle of the transcript is rewritten plainly so the file still
+        // matches the in-memory transcript exactly.
+        let summarizable = lcp == 0 && new_i > 0 && !messages[..new_i].is_empty();
+        let summary = summarizable.then(|| replacement_summary(&messages[..new_i]));
+
+        let mut session = SessionFile {
+            header: self.session.header.clone(),
+            entries: Vec::new(),
+        };
+        self.last_compaction = None;
+        let mut message_start = 0;
+        if let Some(summary) = summary {
+            let first_kept_entry_id = self.persisted.get(old_i).map(|p| p.entry_id.clone());
+            let entry_id = append_compaction(
+                &mut session,
+                &summary,
+                first_kept_entry_id.as_deref().unwrap_or(""),
+                tokens_before,
+            );
+            self.last_compaction = Some(RecordedCompaction {
+                entry_id,
+                summary,
+                first_kept_entry_id,
+                dropped,
+                tokens_before,
+            });
+            message_start = new_i;
         }
-        let before = self.session.entries.len();
-        append_messages(&mut self.session, new);
-        let mut file = std::fs::OpenOptions::new()
-            .append(true)
-            .create(true)
-            .open(&self.path)?;
-        for entry in &self.session.entries[before..] {
-            let line = serde_json::to_string(entry).map_err(io_err)?;
-            writeln!(file, "{line}")?;
-        }
-        self.persisted = messages.len();
-        Ok(self.session.entries.len() - before)
+        append_messages(&mut session, &messages[message_start..]);
+        session.write(&self.path).map_err(io_err)?;
+
+        let compaction_id = self.last_compaction.as_ref().map(|c| c.entry_id.clone());
+        let message_ids: Vec<String> = session
+            .entries
+            .iter()
+            .filter(|entry| entry.kind == "message")
+            .map(|entry| entry.id.clone())
+            .collect();
+        self.persisted = messages
+            .iter()
+            .enumerate()
+            .map(|(index, message)| Persisted {
+                fingerprint: fingerprints[index].clone(),
+                entry_id: if index < message_start {
+                    compaction_id.clone().unwrap_or_default()
+                } else {
+                    message_ids[index - message_start].clone()
+                },
+                tokens: message.approx_tokens(),
+            })
+            .collect();
+        let written = session.entries.len();
+        self.session = session;
+        Ok(written)
     }
 }
 
