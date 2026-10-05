@@ -229,7 +229,7 @@ impl PiEventAdapter {
             Event::TurnEnd => {
                 if self.streaming {
                     let message = self.assistant_message();
-                    out.push(json!({ "type": "message_end", "message": message.clone() }));
+                    out.push(json!({ "type": "message_end", "message": message }));
                     out.push(json!({
                         "type": "turn_end",
                         "message": message,

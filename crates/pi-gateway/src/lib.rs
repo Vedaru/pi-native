@@ -84,13 +84,6 @@ impl Gateway {
         });
     }
 
-    /// Recover the host (e.g. after stopping the server in a test).
-    pub fn into_host(self) -> Host {
-        self.host
-            .into_inner()
-            .unwrap_or_else(|error| error.into_inner())
-    }
-
     fn host(&self) -> MutexGuard<'_, Host> {
         self.host.lock().unwrap_or_else(|error| error.into_inner())
     }
@@ -276,7 +269,8 @@ fn create_session(stream: &mut TcpStream, gateway: &Gateway, request: &Request) 
             }
         }
     };
-    match gateway.host().open(path.clone()) {
+    let opened = gateway.host().open(path.clone());
+    match opened {
         Ok(id) => write_json(
             stream,
             201,
@@ -290,24 +284,44 @@ fn create_session(stream: &mut TcpStream, gateway: &Gateway, request: &Request) 
     }
 }
 
-fn session_state(stream: &mut TcpStream, gateway: &Gateway, id: &str) {
-    let subscription = match gateway.host().subscribe(id) {
-        Ok(subscription) => subscription,
+/// Subscribe to a unit, or write the error and return `None`. Binding the
+/// result drops the host lock before the response is written to the socket.
+fn subscribe_or_error(stream: &mut TcpStream, gateway: &Gateway, id: &str) -> Option<Subscription> {
+    let subscribed = gateway.host().subscribe(id);
+    match subscribed {
+        Ok(subscription) => Some(subscription),
         Err(error) => {
             write_json(
                 stream,
                 status_for(&error),
                 &json!({ "error": error.to_string() }),
             );
-            return;
+            None
         }
+    }
+}
+
+/// Send a command, or write the error and return `false`.
+fn send_or_error(stream: &mut TcpStream, gateway: &Gateway, id: &str, command: Value) -> bool {
+    let sent = gateway.host().send(id, command);
+    match sent {
+        Ok(()) => true,
+        Err(error) => {
+            write_json(
+                stream,
+                status_for(&error),
+                &json!({ "error": error.to_string() }),
+            );
+            false
+        }
+    }
+}
+
+fn session_state(stream: &mut TcpStream, gateway: &Gateway, id: &str) {
+    let Some(subscription) = subscribe_or_error(stream, gateway, id) else {
+        return;
     };
-    if let Err(error) = gateway.host().send(id, json!({ "type": "get_state" })) {
-        write_json(
-            stream,
-            status_for(&error),
-            &json!({ "error": error.to_string() }),
-        );
+    if !send_or_error(stream, gateway, id, json!({ "type": "get_state" })) {
         return;
     }
     write_json(stream, 200, &await_state(&subscription));
@@ -321,23 +335,10 @@ fn await_state(subscription: &Subscription) -> Value {
 }
 
 fn session_commands(stream: &mut TcpStream, gateway: &Gateway, id: &str) {
-    let subscription = match gateway.host().subscribe(id) {
-        Ok(subscription) => subscription,
-        Err(error) => {
-            write_json(
-                stream,
-                status_for(&error),
-                &json!({ "error": error.to_string() }),
-            );
-            return;
-        }
+    let Some(subscription) = subscribe_or_error(stream, gateway, id) else {
+        return;
     };
-    if let Err(error) = gateway.host().send(id, json!({ "type": "get_commands" })) {
-        write_json(
-            stream,
-            status_for(&error),
-            &json!({ "error": error.to_string() }),
-        );
+    if !send_or_error(stream, gateway, id, json!({ "type": "get_commands" })) {
         return;
     }
     let data = await_response(&subscription, "get_commands", |event| {
@@ -349,23 +350,10 @@ fn session_commands(stream: &mut TcpStream, gateway: &Gateway, id: &str) {
 
 /// Generate a session title using the unit's own provider.
 fn session_title(stream: &mut TcpStream, gateway: &Gateway, id: &str) {
-    let subscription = match gateway.host().subscribe(id) {
-        Ok(subscription) => subscription,
-        Err(error) => {
-            write_json(
-                stream,
-                status_for(&error),
-                &json!({ "error": error.to_string() }),
-            );
-            return;
-        }
+    let Some(subscription) = subscribe_or_error(stream, gateway, id) else {
+        return;
     };
-    if let Err(error) = gateway.host().send(id, json!({ "type": "generate_title" })) {
-        write_json(
-            stream,
-            status_for(&error),
-            &json!({ "error": error.to_string() }),
-        );
+    if !send_or_error(stream, gateway, id, json!({ "type": "generate_title" })) {
         return;
     }
     let data = await_response(&subscription, "generate_title", |event| {
@@ -411,13 +399,8 @@ fn send_command(stream: &mut TcpStream, gateway: &Gateway, id: &str, request: &R
         );
         return;
     }
-    match gateway.host().send(id, command) {
-        Ok(()) => write_json(stream, 202, &json!({ "accepted": true })),
-        Err(error) => write_json(
-            stream,
-            status_for(&error),
-            &json!({ "error": error.to_string() }),
-        ),
+    if send_or_error(stream, gateway, id, command) {
+        write_json(stream, 202, &json!({ "accepted": true }));
     }
 }
 
@@ -429,13 +412,8 @@ fn ui_response(stream: &mut TcpStream, gateway: &Gateway, id: &str, request: &Re
     };
     let value = body.get("value").cloned().unwrap_or(Value::Bool(false));
     let command = json!({ "type": "ui_response", "id": request_id, "value": value });
-    match gateway.host().send(id, command) {
-        Ok(()) => write_json(stream, 202, &json!({ "accepted": true })),
-        Err(error) => write_json(
-            stream,
-            status_for(&error),
-            &json!({ "error": error.to_string() }),
-        ),
+    if send_or_error(stream, gateway, id, command) {
+        write_json(stream, 202, &json!({ "accepted": true }));
     }
 }
 
@@ -445,16 +423,8 @@ fn stream_events(
     id: &str,
     pi_format: bool,
 ) -> std::io::Result<()> {
-    let subscription = match gateway.host().subscribe(id) {
-        Ok(subscription) => subscription,
-        Err(error) => {
-            write_json(
-                &mut stream,
-                status_for(&error),
-                &json!({ "error": error.to_string() }),
-            );
-            return Ok(());
-        }
+    let Some(subscription) = subscribe_or_error(&mut stream, gateway, id) else {
+        return Ok(());
     };
     let head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache, no-transform\r\nConnection: keep-alive\r\nX-Accel-Buffering: no\r\n\r\n";
     stream.write_all(head.as_bytes())?;

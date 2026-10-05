@@ -53,6 +53,8 @@ struct Shared {
     /// Most recent event type and its unix-seconds timestamp, for the swarm view.
     last_event: Mutex<Option<String>>,
     last_event_at: Mutex<i64>,
+    /// Session display name, cached against the session file's mtime.
+    name_cache: Mutex<Option<(u64, Option<String>)>>,
 }
 
 impl Shared {
@@ -78,6 +80,7 @@ impl Shared {
             replay.pop_front();
         }
         replay.push_back(event.clone());
+        drop(replay);
         let mut subscribers = self
             .subscribers
             .lock()
@@ -109,6 +112,32 @@ impl Shared {
 
     fn subscriber_count(&self) -> usize {
         self.subscribers.lock().map(|subs| subs.len()).unwrap_or(0)
+    }
+
+    /// The session's display name, re-read only when the file changes. The
+    /// swarm dashboard polls this, so parsing the whole JSONL every time is
+    /// avoided for long sessions.
+    fn session_name(&self, path: &std::path::Path) -> Option<String> {
+        let mtime = std::fs::metadata(path)
+            .and_then(|meta| meta.modified())
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|duration| duration.as_nanos() as u64)
+            .unwrap_or(0);
+        if let Ok(cache) = self.name_cache.lock() {
+            if let Some((cached_mtime, name)) = cache.as_ref() {
+                if *cached_mtime == mtime {
+                    return name.clone();
+                }
+            }
+        }
+        let name = pi_session::SessionFile::read(path)
+            .ok()
+            .and_then(|session| session.name().map(str::to_string));
+        if let Ok(mut cache) = self.name_cache.lock() {
+            *cache = Some((mtime, name.clone()));
+        }
+        name
     }
 }
 
@@ -395,9 +424,7 @@ impl Host {
             .iter()
             .map(|(session_id, unit)| UnitInfo {
                 session_id: session_id.clone(),
-                name: pi_session::SessionFile::read(&unit.session_path)
-                    .ok()
-                    .and_then(|session| session.name().map(str::to_string)),
+                name: unit.shared.session_name(&unit.session_path),
                 cwd: unit.cwd.clone(),
                 session_path: unit.session_path.to_string_lossy().into_owned(),
                 running: unit.is_running(),

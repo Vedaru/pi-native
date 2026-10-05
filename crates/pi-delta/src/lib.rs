@@ -41,11 +41,11 @@ pub enum Op {
 /// Returns an empty batch when the revisions are equal.
 pub fn diff(before: &Value, after: &Value) -> Vec<Op> {
     let mut ops = Vec::new();
-    diff_into(before, after, &mut Vec::new(), &mut ops);
+    diff_into(before, after, &Vec::new(), &mut ops);
     ops
 }
 
-fn diff_into(before: &Value, after: &Value, path: &mut Path, ops: &mut Vec<Op>) {
+fn diff_into(before: &Value, after: &Value, path: &Path, ops: &mut Vec<Op>) {
     if before == after {
         return;
     }
@@ -62,7 +62,7 @@ fn diff_into(before: &Value, after: &Value, path: &mut Path, ops: &mut Vec<Op>) 
                 let mut key_path = path.clone();
                 key_path.push(key.clone());
                 match before_map.get(key) {
-                    Some(before_value) => diff_into(before_value, after_value, &mut key_path, ops),
+                    Some(before_value) => diff_into(before_value, after_value, &key_path, ops),
                     None => ops.push(Op::Set {
                         path: key_path,
                         value: after_value.clone(),

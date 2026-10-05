@@ -14,7 +14,7 @@
 //! budgets (iterations, tokens, wall-clock) belong to the unit host, which owns
 //! the agent configuration.
 
-use pi_host::{Host, HostError};
+use pi_host::Host;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -466,33 +466,6 @@ impl Field {
             .copied()
             .unwrap_or(false)
     }
-}
-
-/// A convenience: start a background thread that ticks every `interval`.
-///
-/// The caller owns the host and store; this only supplies the clock. A real
-/// deployment would drive `tick` from its event loop instead.
-pub fn spawn_ticker(interval: Duration) -> std::sync::mpsc::Receiver<i64> {
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || loop {
-        std::thread::sleep(interval);
-        let now = time::OffsetDateTime::now_utc().unix_timestamp();
-        if tx.send(now).is_err() {
-            return;
-        }
-    });
-    rx
-}
-
-/// Helper to run one trigger's session path (exposed for callers that persist
-/// their own layout).
-pub fn default_session_path(root: &Path, trigger_id: &str) -> PathBuf {
-    root.join(format!("{}.jsonl", sanitize(trigger_id)))
-}
-
-/// Map a host error into whether the runner should retry later.
-pub fn is_retryable(error: &HostError) -> bool {
-    matches!(error, HostError::Stopped)
 }
 
 #[cfg(test)]

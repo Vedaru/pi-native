@@ -256,7 +256,8 @@ impl PluginHost {
         let context = Context::full(&runtime).map_err(PluginError::from)?;
         self.evaluate(&context, name, &prepared)?;
 
-        if let Some(denied) = self.denials.lock().expect("denials lock").first().cloned() {
+        let denied = self.denials.lock().expect("denials lock").first().cloned();
+        if let Some(denied) = denied {
             return Err(PluginError::Denied {
                 capability: denied.capability,
                 method: denied.method,
@@ -1234,7 +1235,8 @@ impl PluginInstance {
         runtime.set_loader(modules::PiResolver, modules::PiLoader);
         let context = Context::full(&runtime).map_err(PluginError::from)?;
         host.evaluate(&context, name, &prepared)?;
-        if let Some(denied) = host.denials.lock().expect("denials lock").first().cloned() {
+        let denied = host.denials.lock().expect("denials lock").first().cloned();
+        if let Some(denied) = denied {
             return Err(PluginError::Denied {
                 capability: denied.capability,
                 method: denied.method,

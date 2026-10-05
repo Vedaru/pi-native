@@ -536,7 +536,7 @@ impl Agent {
             if turn.tool_calls.is_empty() {
                 on_event(&AgentEvent::TurnEnd);
                 on_event(&AgentEvent::Done {
-                    stop_reason: turn.stop_reason.clone(),
+                    stop_reason: turn.stop_reason,
                 });
                 on_event(&AgentEvent::AgentSettled);
                 return Ok(());
@@ -582,6 +582,23 @@ impl Agent {
             return ToolResult::error(format!("unknown tool: {}", call.name));
         };
         tool.run(&call.arguments, &self.tool_context)
+    }
+
+    /// The most recent assistant text block, without building the whole
+    /// transcript (used by `get_last_assistant_text`).
+    pub fn last_assistant_text(&self) -> Option<String> {
+        self.messages
+            .iter()
+            .rev()
+            .find_map(|message| match message {
+                TranscriptMessage::Assistant(blocks) => {
+                    blocks.iter().find_map(|block| match block {
+                        AssistantBlock::Text { text } => Some(text.clone()),
+                        _ => None,
+                    })
+                }
+                _ => None,
+            })
     }
 
     /// Generate a short session title from the transcript using this agent's

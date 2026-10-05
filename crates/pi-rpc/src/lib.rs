@@ -448,8 +448,8 @@ fn apply_command(
                 // An explicit path is an arbitrary file write unless jailed; keep
                 // it inside the session directory or the workspace.
                 Some(requested) => {
-                    let context = pi_tools::ToolContext::new(base.clone())
-                        .with_write_roots([PathBuf::from(cwd)]);
+                    let context =
+                        pi_tools::ToolContext::new(base).with_write_roots([PathBuf::from(cwd)]);
                     match context.resolve_write(&requested) {
                         Ok(path) => path,
                         Err(error) => return Some(failure(id, "export_html", &error.to_string())),
@@ -522,28 +522,7 @@ fn state_event(agent: &Agent) -> Event {
 }
 
 fn last_assistant_text(agent: &Agent) -> Option<String> {
-    transcript_values(agent.messages())
-        .into_iter()
-        .rev()
-        .find_map(|message| {
-            if message.get("role").and_then(serde_json::Value::as_str) != Some("assistant") {
-                return None;
-            }
-            message
-                .get("content")?
-                .as_array()?
-                .iter()
-                .find_map(|block| {
-                    if block.get("type").and_then(serde_json::Value::as_str) == Some("text") {
-                        block
-                            .get("text")
-                            .and_then(serde_json::Value::as_str)
-                            .map(str::to_string)
-                    } else {
-                        None
-                    }
-                })
-        })
+    agent.last_assistant_text()
 }
 
 fn export_html(agent: &Agent, path: &std::path::Path) -> std::io::Result<()> {
@@ -778,7 +757,7 @@ impl SessionState {
         dir.join(format!("{nanos:x}.jsonl"))
     }
 
-    fn clone_session(&mut self, cwd: &str, agent: &mut Agent) -> std::io::Result<()> {
+    fn clone_session(&mut self, cwd: &str, agent: &Agent) -> std::io::Result<()> {
         let messages = agent.messages().to_vec();
         let path = self.new_file_path(cwd);
         let (mut journal, _) = SessionJournal::open(path.clone(), cwd)?;
@@ -822,7 +801,7 @@ impl SessionState {
             })
             .collect();
         let branch = SessionFile {
-            header: session.header.clone(),
+            header: session.header,
             entries,
         };
         let text = branch

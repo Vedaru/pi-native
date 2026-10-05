@@ -4,7 +4,7 @@
 //! one line at a time into a fixed-capacity buffer, so a huge file (or a single
 //! huge line) cannot allocate unbounded memory.
 
-use std::io::{BufRead, Read};
+use std::io::BufRead;
 
 /// Read one line (up to and including `\n`) into `buf`, keeping at most `max`
 /// bytes in `buf`. The rest of an over-long line is consumed but discarded.
@@ -50,16 +50,4 @@ pub fn read_line_capped<R: BufRead>(
             }
         }
     }
-}
-
-/// Total bytes in a reader, if it is a file, without reading the whole thing.
-pub fn file_len(path: &std::path::Path) -> Option<u64> {
-    std::fs::metadata(path).ok().map(|meta| meta.len())
-}
-
-/// Read at most `max` bytes from a reader, returning lossy UTF-8.
-pub fn read_capped<R: Read>(reader: R, max: usize) -> std::io::Result<String> {
-    let mut buffer = Vec::new();
-    reader.take(max as u64).read_to_end(&mut buffer)?;
-    Ok(String::from_utf8_lossy(&buffer).into_owned())
 }
