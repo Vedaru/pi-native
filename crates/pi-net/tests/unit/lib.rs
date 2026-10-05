@@ -117,3 +117,33 @@ fn streams_openai_responses_sse_with_usage() {
     assert_eq!(result.usage.output, 7);
     assert_eq!(result.usage.cache_hit_rate(), Some(0.6));
 }
+
+/// Serve `429` once, then `200` with the completions stream, on one listener.
+fn serve_retry_then_ok() -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    std::thread::spawn(move || {
+        for (status, body) in [("429 Too Many Requests", ""), ("200 OK", COMPLETIONS_SSE)] {
+            let Ok((mut socket, _)) = listener.accept() else {
+                return;
+            };
+            let mut request = [0u8; 4096];
+            let _ = std::io::Read::read(&mut socket, &mut request);
+            let response = format!(
+                "HTTP/1.1 {status}\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = socket.write_all(response.as_bytes());
+        }
+    });
+    format!("http://{addr}")
+}
+
+#[test]
+fn retries_a_rate_limited_request() {
+    let base = serve_retry_then_ok();
+    let params = completions_params();
+    let result =
+        stream_openai_completions(&base, "test-key", &params).expect("streams after a 429 retry");
+    assert_eq!(result.text, "Hello");
+}

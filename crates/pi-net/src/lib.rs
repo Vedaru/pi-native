@@ -5,6 +5,7 @@
 //! no Node. Only the OpenAI wire formats are supported.
 
 use std::io::Read;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use pi_providers::{
     collect_completions, collect_response, ContentBlock, OpenAiCompletionsStream,
@@ -45,7 +46,67 @@ impl HttpResponse {
 }
 
 /// POST a JSON body and return the streaming response.
+///
+/// A swarm of units hits the provider concurrently, so a 429 or 5xx is normal
+/// rather than exceptional. The request is retried with jittered backoff: at
+/// most [`MAX_ATTEMPTS`] tries for a retryable status or a transport error, and
+/// never for a 4xx (the API answered, and the same question gets the same
+/// answer). Provider completions are stateless reads, so repeating one is safe.
 pub fn post_json(
+    url: &str,
+    headers: &[(&str, String)],
+    body_json: &str,
+) -> Result<HttpResponse, NetError> {
+    let mut attempt = 0u32;
+    loop {
+        match post_json_once(url, headers, body_json) {
+            Ok(response) => return Ok(response),
+            Err(error) => {
+                if attempt + 1 >= MAX_ATTEMPTS || !is_retryable(&error) {
+                    return Err(error);
+                }
+                std::thread::sleep(backoff(attempt));
+                attempt += 1;
+            }
+        }
+    }
+}
+
+/// Total tries: one attempt plus two retries.
+pub const MAX_ATTEMPTS: u32 = 3;
+/// First backoff, doubled per attempt and then jittered.
+pub const BACKOFF_BASE: Duration = Duration::from_millis(250);
+/// Ceiling on a single backoff sleep.
+pub const BACKOFF_MAX: Duration = Duration::from_secs(4);
+
+/// Whether a failure is worth another attempt.
+pub fn is_retryable(error: &NetError) -> bool {
+    match error {
+        NetError::Status(code) => *code == 429 || (500..600).contains(code),
+        // A connection reset or DNS failure is worth a bounded retry too.
+        NetError::Transport(_) => true,
+        NetError::Encode(_) => false,
+    }
+}
+
+/// The sleep before attempt `attempt` (0-based), doubled and jittered so that a
+/// fleet hitting one rate limit does not synchronise into a second stampede.
+/// Jitter comes from the clock, so it costs no dependency.
+pub fn backoff(attempt: u32) -> Duration {
+    let doubled = BACKOFF_BASE
+        .checked_mul(1u32 << attempt.min(8))
+        .unwrap_or(BACKOFF_MAX)
+        .min(BACKOFF_MAX);
+    let jitter_ceiling = (doubled.as_millis() as u64 / 2).max(1);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|now| now.subsec_nanos() as u64)
+        .unwrap_or(0);
+    let jitter = Duration::from_millis(nanos % jitter_ceiling);
+    (doubled + jitter).min(BACKOFF_MAX)
+}
+
+fn post_json_once(
     url: &str,
     headers: &[(&str, String)],
     body_json: &str,
