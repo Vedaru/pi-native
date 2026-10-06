@@ -613,7 +613,9 @@ fn main() -> std::io::Result<()> {
                             toggle_thinking(&mut app)
                         }
                         KeyCode::Up if palette_active => app.sel = app.sel.saturating_sub(1),
-                        KeyCode::Down if palette_active => app.sel = app.sel.saturating_add(1),
+                        KeyCode::Down if palette_active => {
+                            app.sel = app.sel.saturating_add(1).min(palette.len() - 1)
+                        }
                         KeyCode::Tab if palette_active => {
                             let c = &COMMANDS[palette[sel]];
                             app.input = format!("/{} ", c.name);
@@ -739,8 +741,7 @@ fn build_window(app: &App, width: usize, height: usize) -> (Vec<Line<'static>>, 
         render_assistant(&mut live, &app.streaming, width, true);
     }
     let live_len = live.len();
-    let spinner = app.running;
-    let total = l.total + live_len + usize::from(spinner);
+    let total = l.total + live_len;
     // Keep the viewport anchored when the transcript grows/shrinks while
     // scrolled up, so expanding a block does not scroll it out from under you.
     if app.anchor.get() || app.scroll.get() > 0 {
@@ -782,10 +783,6 @@ fn build_window(app: &App, width: usize, height: usize) -> (Vec<Line<'static>>, 
             visible.push(line);
             owners.push(usize::MAX);
         }
-    }
-    if spinner && l.total + live_len >= start && l.total + live_len < end {
-        visible.push(spinner_line(app));
-        owners.push(usize::MAX);
     }
     (visible, owners)
 }
@@ -903,8 +900,16 @@ fn run_command(app: &mut App, stdin: &mut ChildStdin, text: &str) -> bool {
 
 fn draw_palette(frame: &mut ratatui::Frame, area: Rect, app: &App, matches: &[usize]) {
     let sel = app.sel.min(matches.len().saturating_sub(1));
+    const WIN: usize = 8;
+    let start = if sel < WIN { 0 } else { sel + 1 - WIN };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Theme::BORDER_MUTED))
+        .title(" commands ");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
     let mut lines = Vec::new();
-    for (i, &ci) in matches.iter().enumerate().take(8) {
+    for (i, &ci) in matches.iter().enumerate().skip(start).take(WIN) {
         let c = &COMMANDS[ci];
         let selected = i == sel;
         let name_style = if selected {
@@ -921,7 +926,7 @@ fn draw_palette(frame: &mut ratatui::Frame, area: Rect, app: &App, matches: &[us
             Span::styled(format!("   {}", c.desc), Style::default().fg(Theme::MUTED)),
         ]));
     }
-    frame.render_widget(Paragraph::new(lines), area);
+    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 fn draw(frame: &mut ratatui::Frame, app: &App) {
@@ -931,12 +936,18 @@ fn draw(frame: &mut ratatui::Frame, app: &App) {
     } else {
         Vec::new()
     };
-    let pal_rows = palette.len().min(8) as u16;
+    let pal_rows = if palette.is_empty() {
+        0
+    } else {
+        palette.len().min(8) as u16 + 2
+    };
+    let status_rows = if app.running { 1 } else { 0 };
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(3),
             Constraint::Length(pal_rows),
+            Constraint::Length(status_rows),
             Constraint::Length(3),
             Constraint::Length(1),
         ])
@@ -959,8 +970,11 @@ fn draw(frame: &mut ratatui::Frame, app: &App) {
     if pal_rows > 0 {
         draw_palette(frame, rows[1], app, &palette);
     }
-    draw_editor(frame, rows[2], app);
-    draw_footer(frame, rows[3], app);
+    if status_rows > 0 {
+        frame.render_widget(Paragraph::new(spinner_line(app)), rows[2]);
+    }
+    draw_editor(frame, rows[3], app);
+    draw_footer(frame, rows[4], app);
 }
 
 /// Left: usage + context. Right: provider/model/thinking.
