@@ -45,6 +45,7 @@ fn get_state_reports_the_resolved_context() {
         messages,
         system,
         transcript,
+        settings: _,
     } = &events[0]
     else {
         panic!("expected state, got {events:?}");

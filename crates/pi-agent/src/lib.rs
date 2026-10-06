@@ -175,6 +175,9 @@ impl<F: Fn(usize) -> AssistantTurn + Send + Sync> ModelProvider for FnProvider<F
     }
 }
 
+/// Rebuilds the provider for a new model id (set by the CLI).
+pub type ProviderFactory = Arc<dyn Fn(&str) -> Box<dyn ModelProvider> + Send + Sync>;
+
 /// A model backend. Returns a full turn; streaming is a provider concern.
 ///
 /// `Send + Sync` so a second instance can power the compaction summarizer.
@@ -272,7 +275,7 @@ pub struct Agent {
     commands: Vec<Value>,
     /// Rebuilds the provider for a new model, set by the CLI. With it,
     /// `set_model` swaps the live model instead of only recording it.
-    provider_factory: Option<Arc<dyn Fn(&str) -> Box<dyn ModelProvider> + Send + Sync>>,
+    provider_factory: Option<ProviderFactory>,
     /// The current model id, if known.
     model: Option<String>,
 }
@@ -312,10 +315,7 @@ impl Agent {
     }
 
     /// Give the agent a way to rebuild its provider for a new model.
-    pub fn with_provider_factory(
-        mut self,
-        factory: Arc<dyn Fn(&str) -> Box<dyn ModelProvider> + Send + Sync>,
-    ) -> Self {
+    pub fn with_provider_factory(mut self, factory: ProviderFactory) -> Self {
         self.provider_factory = Some(factory);
         self
     }

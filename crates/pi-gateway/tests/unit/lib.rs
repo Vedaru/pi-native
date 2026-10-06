@@ -281,8 +281,14 @@ fn reports_extension_commands() {
     );
     assert_eq!(status, 200, "{body}");
     let data: Value = serde_json::from_str(&body).unwrap();
-    assert_eq!(data["commands"][0]["name"], json!("demo"));
-    assert_eq!(data["commands"][0]["source"], json!("extension"));
+    // Built-ins come first; find the extension command by name.
+    let demo = data["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|command| command["name"] == json!("demo"))
+        .expect("extension command present");
+    assert_eq!(demo["source"], json!("extension"));
     let _ = std::fs::remove_dir_all(&dir);
 }
 
