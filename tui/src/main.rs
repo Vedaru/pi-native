@@ -29,7 +29,7 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Terminal;
 use serde_json::Value;
 
-const POLL: Duration = Duration::from_millis(40);
+const POLL: Duration = Duration::from_millis(16);
 /// Code lines kept in memory per block; the rest are counted, not stored.
 const MAX_CODE: usize = 12;
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -158,6 +158,8 @@ struct App {
     /// Ctrl+O: expand tool output and long code blocks.
     expanded: std::cell::Cell<bool>,
     last_len: std::cell::Cell<usize>,
+    /// Transcript height from the last frame, for PageUp/PageDown.
+    page: std::cell::Cell<usize>,
     /// entry index owning each rendered transcript line (for click hit-testing)
     row_owner: Rc<RefCell<Vec<usize>>>,
 }
@@ -185,6 +187,7 @@ impl App {
             dirty: std::cell::Cell::new(false),
             expanded: std::cell::Cell::new(false),
             last_len: std::cell::Cell::new(0),
+            page: std::cell::Cell::new(20),
             row_owner: Rc::new(RefCell::new(Vec::new())),
         }
     }
@@ -403,7 +406,13 @@ fn main() -> std::io::Result<()> {
                 }
             }
         }
-        while event::poll(POLL)? {
+        let mut had = false;
+        loop {
+            let timeout = if had { Duration::ZERO } else { POLL };
+            if !event::poll(timeout)? {
+                break;
+            }
+            had = true;
             match event::read()? {
                 CEvent::Key(key) => match key.code {
                     KeyCode::Esc => break 'outer,
@@ -434,8 +443,12 @@ fn main() -> std::io::Result<()> {
                     }
                     KeyCode::Up => app.scroll = app.scroll.saturating_add(1),
                     KeyCode::Down => app.scroll = app.scroll.saturating_sub(1),
-                    KeyCode::PageUp => app.scroll = app.scroll.saturating_add(10),
-                    KeyCode::PageDown => app.scroll = app.scroll.saturating_sub(10),
+                    KeyCode::PageUp => {
+                        app.scroll = app.scroll.saturating_add(app.page.get() as u16)
+                    }
+                    KeyCode::PageDown => {
+                        app.scroll = app.scroll.saturating_sub(app.page.get() as u16)
+                    }
                     KeyCode::Home => app.scroll = u16::MAX,
                     KeyCode::End => app.scroll = 0,
                     KeyCode::Backspace => {
