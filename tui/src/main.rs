@@ -165,7 +165,48 @@ const COMMANDS: &[Cmd] = &[
     },
 ];
 
-/// Indices of commands whose name starts with the current `/` query.
+/// (display, fill) suggestions for the current input: model completions after
+/// `/model `, otherwise command completions.
+fn suggestions(app: &App) -> Vec<(String, String)> {
+    let input = app.input.as_str();
+    if let Some(rest) = input.strip_prefix("/model ") {
+        {
+            let prefix = rest.trim_start();
+            return app
+                .models
+                .iter()
+                .map(|(p, id)| {
+                    if p.is_empty() {
+                        id.clone()
+                    } else {
+                        format!("{p}/{id}")
+                    }
+                })
+                .filter(|full| full.starts_with(prefix))
+                .map(|full| (full.clone(), format!("/model {full}")))
+                .collect();
+        }
+    }
+    let q = input.trim_start_matches('/');
+    if input.starts_with('/') && !q.contains(' ') {
+        return COMMANDS
+            .iter()
+            .filter(|c| c.name.starts_with(q))
+            .map(|c| {
+                let hint = c.args.map(|a| format!(" {a}")).unwrap_or_default();
+                let fill = if c.args.is_some() {
+                    format!("/{} ", c.name)
+                } else {
+                    format!("/{}", c.name)
+                };
+                (format!("/{}{hint}   {}", c.name, c.desc), fill)
+            })
+            .collect();
+    }
+    Vec::new()
+}
+
+#[allow(dead_code)]
 fn palette_matches(input: &str) -> Vec<usize> {
     let q = input.trim_start_matches('/');
     if q.contains(' ') {
@@ -310,6 +351,8 @@ struct App {
     /// Highest useful scroll offset, from the last frame.
     max_scroll: std::cell::Cell<u16>,
     sel: usize,
+    /// (provider, id) advertised by the unit.
+    models: Vec<(String, String)>,
     /// entry index owning each rendered transcript line (for click hit-testing)
     row_owner: Rc<RefCell<Vec<usize>>>,
 }
@@ -341,6 +384,7 @@ impl App {
             page: std::cell::Cell::new(20),
             max_scroll: std::cell::Cell::new(0),
             sel: 0,
+            models: Vec::new(),
             row_owner: Rc::new(RefCell::new(Vec::new())),
         }
     }
@@ -418,6 +462,18 @@ impl App {
                             .and_then(Value::as_str)
                         {
                             self.model = id.to_string();
+                        }
+                    }
+                    "get_available_models" => {
+                        if let Some(list) = data.get("models").and_then(Value::as_array) {
+                            self.models = list
+                                .iter()
+                                .filter_map(|m| {
+                                    let id = m.get("id").and_then(Value::as_str)?;
+                                    let p = m.get("provider").and_then(Value::as_str).unwrap_or("");
+                                    Some((p.to_string(), id.to_string()))
+                                })
+                                .collect();
                         }
                     }
                     "set_thinking_level" => {
@@ -578,6 +634,8 @@ fn main() -> std::io::Result<()> {
         .unwrap_or_else(|_| "pi".into());
     let thinking_level = std::env::var("PIPELETS_THINKING").unwrap_or_else(|_| "off".to_string());
     let (mut child, mut stdin, rx) = spawn_unit(&bin, &session);
+    let _ = writeln!(stdin, "{{\"type\":\"get_available_models\"}}");
+    let _ = stdin.flush();
 
     enable_raw_mode()?;
     let mut out = std::io::stdout();
@@ -606,13 +664,12 @@ fn main() -> std::io::Result<()> {
             had = true;
             match event::read()? {
                 CEvent::Key(key) => {
-                    let palette = palette_matches(&app.input);
-                    let palette_active =
-                        app.input.starts_with('/') && !app.input[1..].contains(' ');
-                    let sel = if palette.is_empty() {
+                    let sugg = suggestions(&app);
+                    let palette_active = !sugg.is_empty();
+                    let sel = if sugg.is_empty() {
                         0
                     } else {
-                        app.sel.min(palette.len() - 1)
+                        app.sel.min(sugg.len() - 1)
                     };
                     match key.code {
                         KeyCode::Esc if palette_active => {
@@ -633,19 +690,23 @@ fn main() -> std::io::Result<()> {
                         }
                         KeyCode::Up if palette_active => app.sel = app.sel.saturating_sub(1),
                         KeyCode::Down if palette_active => {
-                            app.sel = app.sel.saturating_add(1).min(palette.len() - 1)
+                            app.sel = app.sel.saturating_add(1).min(sugg.len() - 1)
                         }
                         KeyCode::Tab if palette_active => {
-                            let c = &COMMANDS[palette[sel]];
-                            app.input = format!("/{} ", c.name);
+                            app.input = sugg[sel].1.clone();
                             app.sel = 0;
                         }
                         KeyCode::Enter if palette_active => {
-                            let text = app.input.clone();
-                            app.input.clear();
-                            app.sel = 0;
-                            if run_command(&mut app, &mut stdin, &text) {
-                                break 'outer;
+                            let fill = sugg[sel].1.clone();
+                            if fill.ends_with(' ') {
+                                app.input = fill;
+                                app.sel = 0;
+                            } else {
+                                app.input.clear();
+                                app.sel = 0;
+                                if run_command(&mut app, &mut stdin, &fill) {
+                                    break 'outer;
+                                }
                             }
                         }
                         KeyCode::Enter => {
@@ -939,44 +1000,40 @@ fn run_command(app: &mut App, stdin: &mut ChildStdin, text: &str) -> bool {
     false
 }
 
-fn draw_palette(frame: &mut ratatui::Frame, area: Rect, app: &App, matches: &[usize]) {
+fn draw_palette(frame: &mut ratatui::Frame, area: Rect, app: &App, matches: &[(String, String)]) {
     let sel = app.sel.min(matches.len().saturating_sub(1));
     const WIN: usize = 8;
     let start = if sel < WIN { 0 } else { sel + 1 - WIN };
+    let title = if app.input.starts_with("/model ") {
+        " models "
+    } else {
+        " commands "
+    };
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Theme::BORDER_MUTED))
-        .title(" commands ");
+        .title(title);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let mut lines = Vec::new();
-    for (i, &ci) in matches.iter().enumerate().skip(start).take(WIN) {
-        let c = &COMMANDS[ci];
+    for (i, (label, _)) in matches.iter().enumerate().skip(start).take(WIN) {
         let selected = i == sel;
-        let name_style = if selected {
+        let style = if selected {
             Style::default().fg(Theme::ACCENT)
         } else {
             Style::default().fg(Theme::TEXT)
         };
-        let hint = c.args.map(|a| format!(" {a}")).unwrap_or_default();
-        lines.push(Line::from(vec![
-            Span::styled(
-                format!(" {} /{}{hint}", if selected { "❯" } else { " " }, c.name),
-                name_style,
-            ),
-            Span::styled(format!("   {}", c.desc), Style::default().fg(Theme::MUTED)),
-        ]));
+        lines.push(Line::from(Span::styled(
+            format!(" {} {label}", if selected { "❯" } else { " " }),
+            style,
+        )));
     }
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
 fn draw(frame: &mut ratatui::Frame, app: &App) {
     let area = frame.area();
-    let palette: Vec<usize> = if app.input.starts_with('/') && !app.input[1..].contains(' ') {
-        palette_matches(&app.input)
-    } else {
-        Vec::new()
-    };
+    let palette = suggestions(app);
     let pal_rows = if palette.is_empty() {
         0
     } else {

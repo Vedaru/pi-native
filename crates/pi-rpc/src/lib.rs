@@ -874,12 +874,28 @@ impl SessionState {
         }
     }
 
+    /// Models the unit can use: `PIPELETS_MODELS` (`id` or `provider/id`,
+    /// comma-separated) plus the model set by `set_model`. Empty when neither
+    /// is known; there is no bundled catalog.
     fn model_values(&self) -> Vec<serde_json::Value> {
-        if self.model.is_some() {
-            vec![self.model_value()]
-        } else {
-            Vec::new()
+        let mut out: Vec<serde_json::Value> = Vec::new();
+        let current_provider = self.model.as_ref().map(|(p, _)| p.clone());
+        if let Ok(list) = std::env::var("PIPELETS_MODELS") {
+            for item in list.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                let (provider, id) = match item.split_once('/') {
+                    Some((p, i)) => (p.to_string(), i.to_string()),
+                    None => (current_provider.clone().unwrap_or_default(), item.to_string()),
+                };
+                out.push(serde_json::json!({ "id": id, "provider": provider }));
+            }
         }
+        if self.model.is_some() {
+            let value = self.model_value();
+            if !out.iter().any(|m| m == &value) {
+                out.push(value);
+            }
+        }
+        out
     }
 
     /// Drain queued messages per `mode`: all of them, or just the first one
