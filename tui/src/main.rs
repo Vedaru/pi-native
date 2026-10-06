@@ -201,7 +201,119 @@ struct Sugg {
 
 /// Suggestions for the current input: model completions after
 /// `/model `, otherwise command completions.
+/// A toggle row: the label carries the state, the fill carries the action.
+fn toggle_row(label: &str, on: bool, action: &str) -> Sugg {
+    Sugg {
+        label: format!("{label:<18}{}", if on { "on" } else { "off" }),
+        fill: format!("!toggle:{action}"),
+        detail: String::new(),
+    }
+}
+
+fn settings_items(app: &App) -> Vec<Sugg> {
+    vec![
+        Sugg {
+            label: format!("{:<18}{}", "Model", app.model),
+            fill: "!palette:/model ".into(),
+            detail: "choose the model".into(),
+        },
+        Sugg {
+            label: format!("{:<18}{}", "Thinking level", app.thinking_level),
+            fill: "!palette:/thinking ".into(),
+            detail: "set the thinking level".into(),
+        },
+        toggle_row("Auto-compact", app.auto_compaction, "auto_compaction"),
+        toggle_row("Auto-retry", app.auto_retry, "auto_retry"),
+        Sugg {
+            label: format!("{:<18}{}", "Steering", app.steering_mode),
+            fill: "!toggle:steering_mode".into(),
+            detail: "one-at-a-time / all".into(),
+        },
+        Sugg {
+            label: format!("{:<18}{}", "Follow-up", app.follow_up_mode),
+            fill: "!toggle:follow_up_mode".into(),
+            detail: "one-at-a-time / all".into(),
+        },
+        Sugg {
+            label: format!("{:<18}", "Session name"),
+            fill: "!input:name".into(),
+            detail: "rename the session".into(),
+        },
+    ]
+}
+
+/// A short, human label for a command response (never the raw payload).
+fn friendly_response(command: &str, data: &Value) -> String {
+    let text = |k: &str| data.get(k).and_then(Value::as_str).unwrap_or("");
+    let flag = |k: &str| {
+        if data.get(k).and_then(Value::as_bool).unwrap_or(false) {
+            "on"
+        } else {
+            "off"
+        }
+    };
+    match command {
+        "set_auto_compaction" => format!("auto-compact {}", flag("enabled")),
+        "set_auto_retry" => format!("auto-retry {}", flag("enabled")),
+        "set_thinking_level" => format!("thinking {}", text("level")),
+        "set_steering_mode" => format!("steering {}", text("mode")),
+        "set_follow_up_mode" => format!("follow-up {}", text("mode")),
+        "set_model" => format!(
+            "model {}",
+            data.get("model")
+                .and_then(|m| m.get("id"))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+        ),
+        "set_session_name" => format!("name {}", text("name")),
+        "new_session" => "new session".into(),
+        "reset" => "reset".into(),
+        "abort" => "aborted".into(),
+        other => other.to_string(),
+    }
+}
+
+/// Apply a settings-menu action and tell the core. Model/thinking re-open a
+/// palette; the rest flip immediately.
+fn apply_setting(app: &mut App, stdin: &mut std::process::ChildStdin, action: &str) {
+    let (request, next) = match action {
+        "auto_compaction" => (
+            serde_json::json!({ "type": "set_auto_compaction", "enabled": !app.auto_compaction }),
+            !app.auto_compaction,
+        ),
+        "auto_retry" => (
+            serde_json::json!({ "type": "set_auto_retry", "enabled": !app.auto_retry }),
+            !app.auto_retry,
+        ),
+        "steering_mode" | "follow_up_mode" => {
+            let current = if action == "steering_mode" {
+                &app.steering_mode
+            } else {
+                &app.follow_up_mode
+            };
+            let next_mode = if current == "all" { "one-at-a-time" } else { "all" };
+            (
+                serde_json::json!({ "type": format!("set_{action}"), "mode": next_mode }),
+                next_mode == "all",
+            )
+        }
+        _ => return,
+    };
+    let _ = writeln!(stdin, "{request}");
+    let _ = stdin.flush();
+    match action {
+        "auto_compaction" => app.auto_compaction = next,
+        "auto_retry" => app.auto_retry = next,
+        "steering_mode" => app.steering_mode = if next { "all" } else { "one-at-a-time" }.into(),
+        "follow_up_mode" => app.follow_up_mode = if next { "all" } else { "one-at-a-time" }.into(),
+        _ => {}
+    }
+}
+
 fn suggestions(app: &App) -> Vec<Sugg> {
+    if app.settings_open {
+        return settings_items(app);
+    }
     let input = app.input.as_str();
     if let Some(rest) = input.strip_prefix("/model ") {
         {
@@ -406,6 +518,12 @@ struct App {
     models: Vec<(String, String)>,
     model_names: std::collections::HashMap<String, String>,
     commands: Vec<(String, String, Option<String>)>,
+    settings_open: bool,
+    notice: Option<(String, std::time::Instant)>,
+    auto_compaction: bool,
+    auto_retry: bool,
+    steering_mode: String,
+    follow_up_mode: String,
     /// entry index owning each rendered transcript line (for click hit-testing)
     row_owner: Rc<RefCell<Vec<usize>>>,
 }
@@ -443,7 +561,20 @@ impl App {
                 .iter()
                 .map(|c| (c.name.into(), c.desc.into(), c.args.map(String::from)))
                 .collect(),
+            settings_open: false,
+            notice: None,
+            auto_compaction: true,
+            auto_retry: true,
+            steering_mode: "all".into(),
+            follow_up_mode: "all".into(),
             row_owner: Rc::new(RefCell::new(Vec::new())),
+        }
+    }
+
+    /// Command feedback belongs on the status line, not in the transcript.
+    fn set_notice(&mut self, entry: Entry) {
+        if let Entry::Notice(text) = entry {
+            self.notice = Some((text, std::time::Instant::now()));
         }
     }
 
@@ -456,6 +587,29 @@ impl App {
             "ready" => {
                 self.status = "ready".into();
                 self.running = false;
+            }
+            "state" => {
+                if let Some(s) = v.get("settings") {
+                    let text_of = |k: &str| s.get(k).and_then(Value::as_str);
+                    if let Some(m) = text_of("model") {
+                        self.model = m.to_string();
+                    }
+                    if let Some(t) = text_of("thinkingLevel") {
+                        self.thinking_level = t.to_string();
+                    }
+                    if let Some(b) = s.get("autoCompaction").and_then(Value::as_bool) {
+                        self.auto_compaction = b;
+                    }
+                    if let Some(b) = s.get("autoRetry").and_then(Value::as_bool) {
+                        self.auto_retry = b;
+                    }
+                    if let Some(m) = text_of("steeringMode") {
+                        self.steering_mode = m.to_string();
+                    }
+                    if let Some(m) = text_of("followUpMode") {
+                        self.follow_up_mode = m.to_string();
+                    }
+                }
             }
             "assistant_delta" => {
                 self.flush_thinking();
@@ -528,14 +682,12 @@ impl App {
                             let mut out = std::io::stdout();
                             let _ = write!(out, "\u{1b}]52;c;{}\u{7}", base64(text.as_bytes()));
                             let _ = out.flush();
-                            self.entries
-                                .push(Entry::Notice(format!("\u{b7} copied {} bytes", text.len())));
+                            self.set_notice(Entry::Notice(format!("\u{b7} copied {} bytes", text.len())));
                         } else {
-                            self.entries
-                                .push(Entry::Notice("\u{b7} no assistant message yet".into()));
+                            self.set_notice(Entry::Notice("\u{b7} no assistant message yet".into()));
                         }
                     }
-                    "export_html" => self.entries.push(Entry::Notice(format!(
+                    "export_html" => self.set_notice(Entry::Notice(format!(
                         "\u{b7} exported to {}",
                         data.get("path")
                             .or_else(|| data.get("outputPath"))
@@ -551,8 +703,7 @@ impl App {
                             .and_then(Value::as_array)
                             .map(|a| a.len())
                             .unwrap_or(0);
-                        self.entries
-                            .push(Entry::Notice(format!("\u{b7} session tree: {n} entries")));
+                        self.set_notice(Entry::Notice(format!("\u{b7} session tree: {n} entries")));
                     }
                     "get_fork_messages" => {
                         let n = data
@@ -560,8 +711,7 @@ impl App {
                             .and_then(Value::as_array)
                             .map(|a| a.len())
                             .unwrap_or(0);
-                        self.entries
-                            .push(Entry::Notice(format!("\u{b7} {n} forkable message(s)")));
+                        self.set_notice(Entry::Notice(format!("\u{b7} {n} forkable message(s)")));
                     }
                     "get_commands" => {
                         if let Some(list) = data.get("commands").and_then(Value::as_array) {
@@ -616,19 +766,10 @@ impl App {
                         | "export_html"
                         | "get_last_assistant_text"
                         | "get_available_models"
-                        | "set_model"
-                        | "set_thinking_level"
                 ) {
-                    self.entries.push(Entry::Notice(format!(
-                        "{} {}{}",
-                        if ok { "\u{2713}" } else { "\u{2717}" },
-                        text("command"),
-                        if detail.is_empty() || detail == "null" {
-                            String::new()
-                        } else {
-                            format!(" {detail}")
-                        }
-                    )));
+                    let flag = if ok { "\u{2713}" } else { "\u{2717}" };
+                    let label = friendly_response(text("command"), &data);
+                    self.set_notice(Entry::Notice(format!("{flag} {label}")));
                 }
             }
             "error" => {
@@ -772,6 +913,7 @@ fn main() -> std::io::Result<()> {
     let (mut child, mut stdin, rx) = spawn_unit(&bin, &session);
     let _ = writeln!(stdin, "{{\"type\":\"get_available_models\"}}");
     let _ = writeln!(stdin, "{{\"type\":\"get_commands\"}}");
+    let _ = writeln!(stdin, "{{\"type\":\"get_state\"}}");
     let _ = stdin.flush();
 
     enable_raw_mode()?;
@@ -810,7 +952,11 @@ fn main() -> std::io::Result<()> {
                     };
                     match key.code {
                         KeyCode::Esc if palette_active => {
-                            app.input.clear();
+                            if app.settings_open {
+                                app.settings_open = false;
+                            } else {
+                                app.input.clear();
+                            }
                             app.sel = 0;
                         }
                         KeyCode::Esc => break 'outer,
@@ -835,7 +981,17 @@ fn main() -> std::io::Result<()> {
                         }
                         KeyCode::Enter if palette_active => {
                             let fill = sugg[sel].fill.clone();
-                            if fill.ends_with(' ') {
+                            if let Some(action) = fill.strip_prefix("!toggle:") {
+                                apply_setting(&mut app, &mut stdin, action);
+                            } else if let Some(target) = fill.strip_prefix("!palette:") {
+                                app.settings_open = false;
+                                app.input = target.to_string();
+                                app.sel = 0;
+                            } else if let Some(field) = fill.strip_prefix("!input:") {
+                                app.settings_open = false;
+                                app.input = format!("/{field} ");
+                                app.sel = 0;
+                            } else if fill.ends_with(' ') {
                                 app.input = fill;
                                 app.sel = 0;
                             } else {
@@ -998,6 +1154,26 @@ fn build_window(app: &App, width: usize, height: usize) -> (Vec<Line<'static>>, 
     (visible, owners)
 }
 
+/// A notice shows for this long before the status line clears.
+const NOTICE_TTL: Duration = Duration::from_secs(4);
+
+fn live_notice(app: &App) -> Option<&str> {
+    app.notice
+        .as_ref()
+        .filter(|(_, at)| at.elapsed() < NOTICE_TTL)
+        .map(|(text, _)| text.as_str())
+}
+
+fn status_line(app: &App) -> Line<'static> {
+    if let Some(text) = live_notice(app) {
+        return Line::from(vec![
+            Span::raw("  "),
+            Span::styled(text.to_string(), Style::default().fg(Theme::MUTED)),
+        ]);
+    }
+    spinner_line(app)
+}
+
 fn spinner_line(app: &App) -> Line<'static> {
     Line::from(vec![
         Span::raw("  "),
@@ -1056,10 +1232,10 @@ fn run_command(app: &mut App, stdin: &mut ChildStdin, text: &str) -> bool {
     let send = |app: &mut App, stdin: &mut ChildStdin, line: serde_json::Value, label: &str| {
         let _ = writeln!(stdin, "{line}");
         let _ = stdin.flush();
-        app.entries.push(Entry::Notice(format!("· /{label}")));
+        app.set_notice(Entry::Notice(format!("· /{label}")));
     };
     let usage = |app: &mut App, spec: &str| {
-        app.entries.push(Entry::Notice(format!("usage: {spec}")));
+        app.set_notice(Entry::Notice(format!("usage: {spec}")));
     };
     match name {
         "quit" => return true,
@@ -1106,10 +1282,10 @@ fn run_command(app: &mut App, stdin: &mut ChildStdin, text: &str) -> bool {
             serde_json::json!({ "type": "get_last_assistant_text" }),
             "copy",
         ),
-        "settings" => app.entries.push(Entry::Notice(format!(
-            "\u{b7} model {} \u{b7} provider {} \u{b7} thinking {} \u{b7} context {} \u{b7} auto-compact {}",
-            app.model, app.provider, app.thinking_level, app.context_window, app.auto_compact
-        ))),
+        "settings" => {
+            app.settings_open = true;
+            app.sel = 0;
+        }
         "scoped-models" => app.input = "/model ".to_string(),
         "changelog" => app
             .entries
@@ -1117,7 +1293,7 @@ fn run_command(app: &mut App, stdin: &mut ChildStdin, text: &str) -> bool {
         "trust" => app
             .entries
             .push(Entry::Notice("\u{b7} pipelets runs with the operator's env; no project trust".into())),
-        "login" | "logout" => app.entries.push(Entry::Notice(
+        "login" | "logout" => app.set_notice(Entry::Notice(
             "\u{b7} credentials come from the daemon env (PIPELETS_*/OPENAI_*)".into(),
         )),
         "share" => app
@@ -1126,7 +1302,7 @@ fn run_command(app: &mut App, stdin: &mut ChildStdin, text: &str) -> bool {
         "bug" => app
             .entries
             .push(Entry::Notice("\u{b7} file issues against Vedaru/pipelets".into())),
-        "hotkeys" => app.entries.push(Entry::Notice(
+        "hotkeys" => app.set_notice(Entry::Notice(
             "enter send \u{b7} esc quit \u{b7} ctrl+o tools \u{b7} ctrl+t thinking \u{b7} / commands"
                 .into(),
         )),
@@ -1182,7 +1358,7 @@ fn run_command(app: &mut App, stdin: &mut ChildStdin, text: &str) -> bool {
                 );
             }
         }
-        _ => app.entries.push(Entry::Notice(format!(
+        _ => app.set_notice(Entry::Notice(format!(
             "\u{b7} /{name} is not supported by pipelets-tui yet"
         ))),
     }
@@ -1193,7 +1369,9 @@ fn draw_palette(frame: &mut ratatui::Frame, area: Rect, app: &App, matches: &[Su
     let sel = app.sel.min(matches.len().saturating_sub(1));
     const WIN: usize = 8;
     let start = if sel < WIN { 0 } else { sel + 1 - WIN };
-    let title = if app.input.starts_with("/model ") {
+    let title = if app.settings_open {
+        " settings "
+    } else if app.input.starts_with("/model ") {
         " models "
     } else {
         " commands "
@@ -1237,7 +1415,11 @@ fn draw(frame: &mut ratatui::Frame, app: &App) {
     } else {
         palette.len().min(8) as u16 + 2
     };
-    let status_rows = if app.running { 1 } else { 0 };
+    let status_rows = if app.running || live_notice(app).is_some() {
+        1
+    } else {
+        0
+    };
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -1267,7 +1449,7 @@ fn draw(frame: &mut ratatui::Frame, app: &App) {
         draw_palette(frame, rows[1], app, &palette);
     }
     if status_rows > 0 {
-        frame.render_widget(Paragraph::new(spinner_line(app)), rows[2]);
+        frame.render_widget(Paragraph::new(status_line(app)), rows[2]);
     }
     draw_editor(frame, rows[3], app);
     draw_footer(frame, rows[4], app);

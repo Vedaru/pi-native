@@ -224,6 +224,7 @@ pub enum Event {
         messages: usize,
         system: String,
         transcript: Vec<serde_json::Value>,
+        settings: serde_json::Value,
     },
     /// A generic UI request any frontend can render. `kind` is one of
     /// `confirm`/`select`/`input`/`notify`; `id` is echoed in `ui_response`.
@@ -322,7 +323,7 @@ fn apply_command(
 ) -> Option<Event> {
     match request {
         Request::Prompt { .. } | Request::UiResponse { .. } => None,
-        Request::GetState => Some(state_event(agent)),
+        Request::GetState => Some(state_event(agent, session)),
         Request::GetMessages => Some(response(
             id,
             "get_messages",
@@ -695,11 +696,19 @@ fn models_file() -> Option<std::path::PathBuf> {
     candidate.exists().then_some(candidate)
 }
 
-fn state_event(agent: &Agent) -> Event {
+fn state_event(agent: &Agent, session: &SessionState) -> Event {
     Event::State {
         messages: agent.messages().len(),
         system: agent.system().to_string(),
         transcript: transcript_values(agent.messages()),
+        settings: serde_json::json!({
+            "model": agent.model(),
+            "thinkingLevel": agent.thinking_level(),
+            "autoCompaction": agent.auto_compaction(),
+            "autoRetry": agent.auto_retry(),
+            "steeringMode": session.steering_mode,
+            "followUpMode": session.follow_up_mode,
+        }),
     }
 }
 

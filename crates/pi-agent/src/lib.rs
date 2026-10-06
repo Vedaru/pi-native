@@ -263,6 +263,10 @@ pub struct Agent {
     /// crossed. The RPC `set_auto_compaction` command writes it; `false`
     /// suppresses automatic compaction (manual `force_compact` still works).
     auto_compaction: bool,
+    /// Current thinking level, reported by the state snapshot.
+    thinking_level: String,
+    /// Whether the provider retry loop is enabled.
+    auto_retry: bool,
     /// Slash commands registered by loaded extensions, in pi's
     /// `SlashCommandInfo` shape (returned by the RPC `get_commands`).
     commands: Vec<Value>,
@@ -293,6 +297,8 @@ impl Agent {
             compaction: None,
             summarizer: None,
             auto_compaction: true,
+            thinking_level: "off".to_string(),
+            auto_retry: true,
             commands: Vec::new(),
             provider_factory: None,
             model: None,
@@ -341,7 +347,13 @@ impl Agent {
     /// The RPC `set_thinking_level` / `cycle_thinking_level` commands call this
     /// so the level reaches the wire instead of being stored and ignored.
     pub fn set_thinking_level(&mut self, level: &str) {
+        self.thinking_level = level.to_string();
         self.provider.set_thinking_level(level);
+    }
+
+    /// The current thinking level.
+    pub fn thinking_level(&self) -> &str {
+        &self.thinking_level
     }
 
     /// Enable or disable automatic (threshold-triggered) compaction.
@@ -361,8 +373,14 @@ impl Agent {
 
     /// Enable or disable the provider transport's retry loop for subsequent
     /// requests (the RPC `set_auto_retry` flag).
-    pub fn set_auto_retry(&self, enabled: bool) {
+    pub fn set_auto_retry(&mut self, enabled: bool) {
+        self.auto_retry = enabled;
         self.provider.set_auto_retry(enabled);
+    }
+
+    /// Whether the provider retry loop is enabled.
+    pub fn auto_retry(&self) -> bool {
+        self.auto_retry
     }
 
     /// Bound retained context to the most recent `max_messages` entries.
