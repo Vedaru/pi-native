@@ -412,7 +412,11 @@ impl App {
                 let data = v.get("data").cloned().unwrap_or(Value::Null);
                 match text("command") {
                     "set_model" => {
-                        if let Some(id) = data.get("model").and_then(|m| m.get("id")).and_then(Value::as_str) {
+                        if let Some(id) = data
+                            .get("model")
+                            .and_then(|m| m.get("id"))
+                            .and_then(Value::as_str)
+                        {
                             self.model = id.to_string();
                         }
                     }
@@ -637,17 +641,11 @@ fn main() -> std::io::Result<()> {
                             app.sel = 0;
                         }
                         KeyCode::Enter if palette_active => {
-                            let c = &COMMANDS[palette[sel]];
-                            let typed = app.input.trim_start_matches('/').trim();
-                            if typed == c.name && c.args.is_some() {
-                                app.input = format!("/{} ", c.name);
-                            } else {
-                                let text = app.input.clone();
-                                app.input.clear();
-                                app.sel = 0;
-                                if run_command(&mut app, &mut stdin, &text) {
-                                    break 'outer;
-                                }
+                            let text = app.input.clone();
+                            app.input.clear();
+                            app.sel = 0;
+                            if run_command(&mut app, &mut stdin, &text) {
+                                break 'outer;
                             }
                         }
                         KeyCode::Enter => {
@@ -862,58 +860,80 @@ fn run_command(app: &mut App, stdin: &mut ChildStdin, text: &str) -> bool {
         let _ = stdin.flush();
         app.entries.push(Entry::Notice(format!("· /{label}")));
     };
+    let usage = |app: &mut App, spec: &str| {
+        app.entries.push(Entry::Notice(format!("usage: {spec}")));
+    };
     match name {
         "quit" => return true,
-        "new" => send(
-            app,
-            stdin,
-            serde_json::json!({ "type": "new_session" }),
-            "new",
-        ),
-        "compact" => send(
-            app,
-            stdin,
-            serde_json::json!({ "type": "compact" }),
-            "compact",
-        ),
+        "new" => send(app, stdin, serde_json::json!({ "type": "new_session" }), "new"),
+        "compact" => send(app, stdin, serde_json::json!({ "type": "compact" }), "compact"),
         "session" => send(
             app,
             stdin,
             serde_json::json!({ "type": "get_session_stats" }),
             "session",
         ),
-        "thinking" if !args.is_empty() => send(
-            app,
-            stdin,
-            serde_json::json!({ "type": "set_thinking_level", "level": args }),
-            "thinking",
-        ),
-        "model" if !args.is_empty() => {
-            let (provider, model) = match args.split_once('/') {
-                Some((p, m)) => (p.to_string(), m.to_string()),
-                None => (app.provider.clone(), args.to_string()),
-            };
-            send(
-                app,
-                stdin,
-                serde_json::json!({ "type": "set_model", "provider": provider, "modelId": model }),
-                "model",
-            );
+        "reload" => app
+            .entries
+            .push(Entry::Notice("\u{b7} reload is not needed (pipelets)".into())),
+        "hotkeys" => app.entries.push(Entry::Notice(
+            "enter send \u{b7} esc quit \u{b7} ctrl+o tools \u{b7} ctrl+t thinking \u{b7} / commands"
+                .into(),
+        )),
+        "thinking" => {
+            if args.is_empty() {
+                usage(app, "/thinking <off|minimal|low|medium|high|xhigh|max>");
+            } else {
+                send(
+                    app,
+                    stdin,
+                    serde_json::json!({ "type": "set_thinking_level", "level": args }),
+                    "thinking",
+                );
+            }
         }
-        "name" if !args.is_empty() => send(
-            app,
-            stdin,
-            serde_json::json!({ "type": "set_session_name", "name": args }),
-            "name",
-        ),
-        "resume" if !args.is_empty() => send(
-            app,
-            stdin,
-            serde_json::json!({ "type": "switch_session", "sessionPath": args }),
-            "resume",
-        ),
+        "model" => {
+            if args.is_empty() {
+                usage(app, "/model <provider/model>");
+            } else {
+                let (provider, model) = match args.split_once('/') {
+                    Some((p, m)) => (p.to_string(), m.to_string()),
+                    None => (app.provider.clone(), args.to_string()),
+                };
+                send(
+                    app,
+                    stdin,
+                    serde_json::json!({ "type": "set_model", "provider": provider, "modelId": model }),
+                    "model",
+                );
+            }
+        }
+        "name" => {
+            if args.is_empty() {
+                usage(app, "/name <name>");
+            } else {
+                send(
+                    app,
+                    stdin,
+                    serde_json::json!({ "type": "set_session_name", "name": args }),
+                    "name",
+                );
+            }
+        }
+        "resume" => {
+            if args.is_empty() {
+                usage(app, "/resume <path>");
+            } else {
+                send(
+                    app,
+                    stdin,
+                    serde_json::json!({ "type": "switch_session", "sessionPath": args }),
+                    "resume",
+                );
+            }
+        }
         _ => app.entries.push(Entry::Notice(format!(
-            "· /{name} is not supported by pipelets-tui yet"
+            "\u{b7} /{name} is not supported by pipelets-tui yet"
         ))),
     }
     false
