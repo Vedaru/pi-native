@@ -125,12 +125,14 @@ impl Entry {
     }
 }
 
+/// Per-entry line counts and cumulative starts. This is all we keep: rendering
+/// a line is O(visible), so no styled transcript is retained.
 #[derive(Default)]
-struct Rendered {
-    lines: Vec<Line<'static>>,
-    owners: Vec<usize>,
-    /// Number of entries fully rendered into `lines`.
-    ready: usize,
+struct LineIndex {
+    width: usize,
+    start: Vec<usize>,
+    count: Vec<usize>,
+    total: usize,
 }
 
 struct App {
@@ -148,8 +150,7 @@ struct App {
     auto_compact: bool,
     tick: usize,
     scroll: u16,
-    /// Lines already rendered for all but the streaming last entry.
-    rendered: RefCell<Rendered>,
+    layout: RefCell<LineIndex>,
     /// Set when a cached (non-tail) entry changed and the cache must rebuild.
     dirty: std::cell::Cell<bool>,
     /// entry index owning each rendered transcript line (for click hit-testing)
@@ -175,7 +176,7 @@ impl App {
             auto_compact: true,
             tick: 0,
             scroll: 0,
-            rendered: RefCell::new(Rendered::default()),
+            layout: RefCell::new(LineIndex::default()),
             dirty: std::cell::Cell::new(false),
             row_owner: Rc::new(RefCell::new(Vec::new())),
         }
@@ -471,69 +472,90 @@ fn main() -> std::io::Result<()> {
 /// Cache every entry but the streaming last, and clone only the visible window.
 /// This keeps a frame cheap even when the transcript is long.
 fn build_window(app: &App, width: usize, height: usize) -> (Vec<Line<'static>>, Vec<usize>) {
-    {
-        let mut r = app.rendered.borrow_mut();
-        if app.dirty.get() || r.ready > app.entries.len() {
-            r.lines.clear();
-            r.owners.clear();
-            r.ready = 0;
-            app.dirty.set(false);
-        }
-        let target = app.entries.len().saturating_sub(1);
-        while r.ready < target {
-            let (lines, owners) = render_entry(&app.entries[r.ready], r.ready, width);
-            r.lines.extend(lines);
-            r.owners.extend(owners);
-            r.ready += 1;
-        }
-    }
-    let tail = app
-        .entries
-        .last()
-        .map(|e| render_entry(e, app.entries.len() - 1, width));
-    let spinner = app.running.then(|| {
-        Line::from(vec![
-            Span::raw("  "),
-            Span::styled(
-                format!("{} ", SPINNER[app.tick % SPINNER.len()]),
-                Style::default().fg(Theme::ACCENT),
-            ),
-            Span::styled(
-                if app.streaming.is_empty() {
-                    "working\u{2026}"
-                } else {
-                    "responding\u{2026}"
-                },
-                Style::default().fg(Theme::MUTED),
-            ),
-        ])
-    });
-    let r = app.rendered.borrow();
-    let prefix: &[Line<'static>] = &r.lines;
-    let prefix_owners: &[usize] = &r.owners;
-    let tail_lines: &[Line<'static>] = tail.as_ref().map(|(l, _)| l.as_slice()).unwrap_or(&[]);
-    let tail_owners: &[usize] = tail.as_ref().map(|(_, o)| o.as_slice()).unwrap_or(&[]);
-    let total = prefix.len() + tail_lines.len() + usize::from(spinner.is_some());
+    ensure_layout(app, width);
+    let l = app.layout.borrow();
+    let spinner = app.running;
+    let total = l.total + usize::from(spinner);
     let max_scroll = total.saturating_sub(height);
     let scroll = (app.scroll as usize).min(max_scroll);
     let start = max_scroll - scroll;
     let end = (start + height).min(total);
+
     let mut visible = Vec::with_capacity(end - start);
     let mut owners = Vec::with_capacity(end - start);
-    for i in start..end {
-        if i < prefix.len() {
-            visible.push(prefix[i].clone());
-            owners.push(prefix_owners[i]);
-        } else if i < prefix.len() + tail_lines.len() {
-            let j = i - prefix.len();
-            visible.push(tail_lines[j].clone());
-            owners.push(tail_owners[j]);
-        } else if let Some(s) = &spinner {
-            visible.push(s.clone());
+    if app.entries.is_empty() {
+        if spinner && end > start {
+            visible.push(spinner_line(app));
             owners.push(usize::MAX);
         }
+        return (visible, owners);
+    }
+    let mut idx = l.start.partition_point(|s| *s <= start).saturating_sub(1);
+    let mut li = l.start[idx];
+    while idx < app.entries.len() && li < end {
+        let (lines, entry_owners) = render_entry(&app.entries[idx], idx, width);
+        for (j, line) in lines.into_iter().enumerate() {
+            let n = li + j;
+            if n >= start && n < end {
+                visible.push(line);
+                owners.push(entry_owners[j]);
+            }
+        }
+        li += l.count[idx];
+        idx += 1;
+    }
+    if spinner && l.total >= start && l.total < end {
+        visible.push(spinner_line(app));
+        owners.push(usize::MAX);
     }
     (visible, owners)
+}
+
+fn spinner_line(app: &App) -> Line<'static> {
+    Line::from(vec![
+        Span::raw("  "),
+        Span::styled(
+            format!("{} ", SPINNER[app.tick % SPINNER.len()]),
+            Style::default().fg(Theme::ACCENT),
+        ),
+        Span::styled(
+            if app.streaming.is_empty() {
+                "working\u{2026}"
+            } else {
+                "responding\u{2026}"
+            },
+            Style::default().fg(Theme::MUTED),
+        ),
+    ])
+}
+
+/// Refresh per-entry counts and cumulative starts. Only the streaming last entry
+/// is re-counted each frame; a toggle or resize rebuilds the table.
+fn ensure_layout(app: &App, width: usize) {
+    let mut l = app.layout.borrow_mut();
+    if l.width != width || l.start.len() != app.entries.len() || app.dirty.get() {
+        l.width = width;
+        l.start.clear();
+        l.count.clear();
+        l.total = 0;
+        for (i, e) in app.entries.iter().enumerate() {
+            let c = render_entry(e, i, width).0.len();
+            let at = l.total;
+            l.start.push(at);
+            l.count.push(c);
+            l.total += c;
+        }
+        app.dirty.set(false);
+        return;
+    }
+    if let Some(e) = app.entries.last() {
+        let c = render_entry(e, app.entries.len() - 1, width).0.len();
+        let last = l.count.len() - 1;
+        if c != l.count[last] {
+            l.total = l.total - l.count[last] + c;
+            l.count[last] = c;
+        }
+    }
 }
 
 fn draw(frame: &mut ratatui::Frame, app: &App) {
@@ -1320,5 +1342,60 @@ mod tests {
             elapsed
         );
         assert!(elapsed.as_millis() < 200, "{elapsed:?}");
+    }
+
+    fn big_app(n: usize) -> App {
+        let mut app = App::new("m".into(), "p".into(), "off".into(), 65536);
+        for i in 0..n {
+            app.entries.push(Entry::Assistant(format!(
+                "line {i}: assistant text with `code`, **bold**, and a - bullet that is fairly long"
+            )));
+            app.entries.push(Entry::Tool(ToolCard {
+                name: "bash".into(),
+                summary: format!("echo {i}"),
+                state: ToolState::Ok,
+                output: format!("output {i}\nsecond line\nthird line"),
+                expanded: true,
+            }));
+        }
+        app
+    }
+
+    #[test]
+    fn scrolling_a_long_context_is_cheap() {
+        let mut app = big_app(3000);
+        let _ = build_window(&app, 100, 30);
+        let start = std::time::Instant::now();
+        for k in 0..200u32 {
+            app.scroll = (k * 37) as u16;
+            let (v, _) = build_window(&app, 100, 30);
+            assert_eq!(v.len(), 30);
+        }
+        let e = start.elapsed();
+        eprintln!("200 scrolled frames: {e:?}");
+        assert!(e.as_millis() < 200, "{e:?}");
+    }
+
+    #[test]
+    fn report_cache_memory() {
+        let app = big_app(3000);
+        let _ = build_window(&app, 100, 30);
+        let r = app.layout.borrow();
+        let text: usize = app
+            .entries
+            .iter()
+            .map(|e| match e {
+                Entry::Assistant(s) => s.len(),
+                Entry::Tool(t) => t.name.len() + t.summary.len() + t.output.len(),
+                _ => 0,
+            })
+            .sum();
+        let meta = (r.start.len() + r.count.len()) * 8;
+        eprintln!(
+            "entries={} raw_text={} KB  layout_meta={} KB  (no styled cache)",
+            app.entries.len(),
+            text / 1024,
+            meta / 1024
+        );
     }
 }
