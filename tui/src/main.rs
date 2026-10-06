@@ -32,6 +32,8 @@ use serde_json::Value;
 const POLL: Duration = Duration::from_millis(16);
 /// Code lines kept in memory per block; the rest are counted, not stored.
 const MAX_CODE: usize = 12;
+/// Tool-output preview lines while collapsed (pi: 5 bash / 10 generic).
+const TOOL_PREVIEW: usize = 8;
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 /// pi's built-in slash commands (`core/slash-commands.ts`).
@@ -379,7 +381,7 @@ impl App {
                     summary: tool_summary(text("name"), &v["input"]),
                     state: ToolState::Running,
                     output: String::new(),
-                    expanded: true,
+                    expanded: false,
                 }));
             }
             "tool_end" => {
@@ -408,6 +410,19 @@ impl App {
             "response" if !matches!(text("command"), "prompt" | "steer" | "follow_up") => {
                 let ok = v.get("success").and_then(Value::as_bool).unwrap_or(false);
                 let data = v.get("data").cloned().unwrap_or(Value::Null);
+                match text("command") {
+                    "set_model" => {
+                        if let Some(id) = data.get("model").and_then(|m| m.get("id")).and_then(Value::as_str) {
+                            self.model = id.to_string();
+                        }
+                    }
+                    "set_thinking_level" => {
+                        if let Some(level) = data.get("level").and_then(Value::as_str) {
+                            self.thinking_level = level.to_string();
+                        }
+                    }
+                    _ => {}
+                }
                 let detail = compact(&data);
                 self.entries.push(Entry::Notice(format!(
                     "{} {}{}",
@@ -873,12 +888,18 @@ fn run_command(app: &mut App, stdin: &mut ChildStdin, text: &str) -> bool {
             serde_json::json!({ "type": "set_thinking_level", "level": args }),
             "thinking",
         ),
-        "model" if !args.is_empty() => send(
-            app,
-            stdin,
-            serde_json::json!({ "type": "set_model", "provider": "", "modelId": args }),
-            "model",
-        ),
+        "model" if !args.is_empty() => {
+            let (provider, model) = match args.split_once('/') {
+                Some((p, m)) => (p.to_string(), m.to_string()),
+                None => (app.provider.clone(), args.to_string()),
+            };
+            send(
+                app,
+                stdin,
+                serde_json::json!({ "type": "set_model", "provider": provider, "modelId": model }),
+                "model",
+            );
+        }
         "name" if !args.is_empty() => send(
             app,
             stdin,
@@ -1141,30 +1162,13 @@ fn render_tool(out: &mut Vec<Line<'static>>, card: &ToolCard, width: usize) {
     if card.output.is_empty() {
         return;
     }
-    if !card.expanded {
-        out.push(pad_line(
-            vec![Span::styled(
-                format!("  ⤸ {} line(s)", card.output.lines().count()),
-                Style::default().fg(Theme::MUTED),
-            )],
-            width,
-            Some(bg),
-        ));
-        return;
-    }
-    let total = card.output.lines().count();
-    for (i, raw) in card.output.lines().enumerate() {
-        if i >= 12 {
-            out.push(pad_line(
-                vec![Span::styled(
-                    format!("  ⤸ {} more line(s)", total - i),
-                    Style::default().fg(Theme::MUTED),
-                )],
-                width,
-                Some(bg),
-            ));
-            break;
-        }
+    let lines: Vec<&str> = card.output.lines().collect();
+    let shown = if card.expanded {
+        lines.len()
+    } else {
+        lines.len().min(TOOL_PREVIEW)
+    };
+    for raw in &lines[..shown] {
         let color = if raw.trim_start().starts_with('+') {
             Theme::DIFF_ADDED
         } else if raw.trim_start().starts_with('-') {
@@ -1182,6 +1186,19 @@ fn render_tool(out: &mut Vec<Line<'static>>, card: &ToolCard, width: usize) {
                 Some(bg),
             ));
         }
+    }
+    if shown < lines.len() {
+        out.push(pad_line(
+            vec![Span::styled(
+                format!(
+                    "  ... ({} more lines, ctrl+o to expand)",
+                    lines.len() - shown
+                ),
+                Style::default().fg(Theme::MUTED),
+            )],
+            width,
+            Some(bg),
+        ));
     }
 }
 

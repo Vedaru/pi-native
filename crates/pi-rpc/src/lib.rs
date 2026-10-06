@@ -414,10 +414,14 @@ fn apply_command(
         }
         Request::SetModel { provider, model_id } => {
             session.model = Some((provider.clone(), model_id.clone()));
+            let applied = agent.set_model(&model_id);
             Some(response(
                 id,
                 "set_model",
-                serde_json::json!({ "model": { "id": model_id, "provider": provider } }),
+                serde_json::json!({
+                    "model": { "id": model_id, "provider": provider },
+                    "applied": applied,
+                }),
             ))
         }
         Request::CycleModel => Some(response(

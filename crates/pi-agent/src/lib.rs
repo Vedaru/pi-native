@@ -266,6 +266,11 @@ pub struct Agent {
     /// Slash commands registered by loaded extensions, in pi's
     /// `SlashCommandInfo` shape (returned by the RPC `get_commands`).
     commands: Vec<Value>,
+    /// Rebuilds the provider for a new model, set by the CLI. With it,
+    /// `set_model` swaps the live model instead of only recording it.
+    provider_factory: Option<Arc<dyn Fn(&str) -> Box<dyn ModelProvider> + Send + Sync>>,
+    /// The current model id, if known.
+    model: Option<String>,
 }
 
 impl Agent {
@@ -289,6 +294,8 @@ impl Agent {
             summarizer: None,
             auto_compaction: true,
             commands: Vec::new(),
+            provider_factory: None,
+            model: None,
         }
     }
 
@@ -296,6 +303,33 @@ impl Agent {
     pub fn with_commands(mut self, commands: Vec<Value>) -> Self {
         self.commands = commands;
         self
+    }
+
+    /// Give the agent a way to rebuild its provider for a new model.
+    pub fn with_provider_factory(
+        mut self,
+        factory: Arc<dyn Fn(&str) -> Box<dyn ModelProvider> + Send + Sync>,
+    ) -> Self {
+        self.provider_factory = Some(factory);
+        self
+    }
+
+    /// Swap the live model. Returns false when the unit has no provider
+    /// factory (the model was fixed at startup).
+    pub fn set_model(&mut self, model: &str) -> bool {
+        match &self.provider_factory {
+            Some(factory) => {
+                self.provider = factory(model);
+                self.model = Some(model.to_string());
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The model id reported by `set_model`, if any.
+    pub fn model(&self) -> Option<&str> {
+        self.model.as_deref()
     }
 
     /// Slash commands registered by extensions.

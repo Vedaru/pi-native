@@ -739,8 +739,16 @@ fn resolve_agent(
         .allow_outside(yolo)
         .with_read_roots([scratch.clone()])
         .with_write_roots([scratch]);
-    let mut agent =
-        Agent::new(make_provider(config), tools, system, tool_context).with_commands(commands);
+    let mut agent = Agent::new(make_provider(config), tools, system, tool_context)
+        .with_commands(commands)
+        .with_provider_factory({
+            let cfg = config.clone();
+            std::sync::Arc::new(move |model: &str| {
+                let mut cfg = cfg.clone();
+                cfg.model = model.to_string();
+                make_provider(&cfg)
+            })
+        });
     if context_window > 0 {
         // Compaction summarizes dropped history with the model (pi's behavior).
         agent = agent
