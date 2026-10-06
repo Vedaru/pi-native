@@ -1141,9 +1141,15 @@ impl SessionState {
                 }
                 let text = message
                     .get("content")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("")
-                    .to_string();
+                    .and_then(serde_json::Value::as_array)
+                    .map(|parts| {
+                        parts
+                            .iter()
+                            .filter_map(|part| part.get("text").and_then(serde_json::Value::as_str))
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    })
+                    .unwrap_or_default();
                 Some(serde_json::json!({ "entryId": entry.id, "text": text }))
             })
             .collect()

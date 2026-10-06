@@ -229,7 +229,7 @@ fn fork_items(app: &App) -> Vec<Sugg> {
         .iter()
         .enumerate()
         .map(|(i, message)| {
-            let id = message.get("id").and_then(Value::as_str).unwrap_or("");
+            let id = message.get("entryId").and_then(Value::as_str).unwrap_or("");
             let raw = message.get("text").and_then(Value::as_str).unwrap_or("");
             Sugg {
                 label: shorten(&raw.replace('\n', " "), 68),
@@ -271,22 +271,52 @@ fn resume_items(app: &App) -> Vec<Sugg> {
 }
 
 fn tree_items(app: &App) -> Vec<Sugg> {
-    app.tree
-        .iter()
-        .map(|node| {
-            let id = node.get("id").and_then(Value::as_str).unwrap_or("");
-            let text = node.get("text").and_then(Value::as_str).unwrap_or("");
-            Sugg {
-                label: if text.is_empty() {
-                    id.to_string()
-                } else {
-                    shorten(text, 68)
-                },
-                fill: String::new(),
-                detail: id.to_string(),
-            }
+    let mut out = Vec::new();
+    for node in &app.tree {
+        flatten_tree(node, 0, &mut out);
+    }
+    out
+}
+
+/// Depth-first over pi's `SessionTreeNode { entry, children }`.
+fn flatten_tree(node: &Value, depth: usize, out: &mut Vec<Sugg>) {
+    let entry = node.get("entry");
+    let id = entry
+        .and_then(|e| e.get("id"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let role = entry
+        .and_then(|e| e.get("message"))
+        .and_then(|m| m.get("role"))
+        .and_then(Value::as_str)
+        .or_else(|| entry.and_then(|e| e.get("type")).and_then(Value::as_str))
+        .unwrap_or("");
+    let text = entry
+        .and_then(|e| e.get("message"))
+        .and_then(|m| m.get("content"))
+        .and_then(Value::as_array)
+        .map(|parts| {
+            parts
+                .iter()
+                .filter_map(|part| part.get("text").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+                .join(" ")
         })
-        .collect()
+        .unwrap_or_default();
+    out.push(Sugg {
+        label: format!(
+            "{}{}",
+            "  ".repeat(depth),
+            shorten(&text.replace('\n', " "), 64)
+        ),
+        fill: String::new(),
+        detail: format!("{role} · {id}"),
+    });
+    if let Some(children) = node.get("children").and_then(Value::as_array) {
+        for child in children {
+            flatten_tree(child, depth + 1, out);
+        }
+    }
 }
 
 fn settings_items(app: &App) -> Vec<Sugg> {
@@ -1142,7 +1172,9 @@ fn spawn_unit(bin: &str, session: &str) -> (Child, ChildStdin, Receiver<String>)
     let stdout = child.stdout.take().expect("child stdout");
     let (tx, rx) = channel();
     thread::spawn(move || {
-        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+        // filter_map, not map_while: one bad line must not kill the reader,
+        // or every later command silently stops responding.
+        for line in BufReader::new(stdout).lines().filter_map(Result::ok) {
             if tx.send(line).is_err() {
                 break;
             }
@@ -1356,9 +1388,12 @@ fn main() -> std::io::Result<()> {
                             app.sel = 0;
                         }
                         // Ignore control/alt chords so they never type a letter.
+                        // While an overlay is open it owns the keyboard, like
+                        // pi's selectors; Esc closes it before editing resumes.
                         KeyCode::Char(c)
                             if !key.modifiers.contains(KeyModifiers::CONTROL)
-                                && !key.modifiers.contains(KeyModifiers::ALT) =>
+                                && !key.modifiers.contains(KeyModifiers::ALT)
+                                && app.overlay == Overlay::None =>
                         {
                             app.input.push(c);
                             app.sel = 0;
