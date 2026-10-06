@@ -25,7 +25,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Terminal;
 use serde_json::Value;
 
@@ -49,7 +49,6 @@ impl Theme {
     const TOOL_ERROR_BG: Color = Color::Rgb(91, 40, 42);
     const MD_HEADING: Color = Color::Rgb(205, 154, 34);
     const MD_CODE: Color = Color::Rgb(167, 152, 215);
-    const MD_CODE_BLOCK: Color = Color::Rgb(104, 183, 141);
     const MD_CODE_BLOCK_BORDER: Color = Color::Rgb(157, 165, 169);
     const SYNTAX_KEYWORD: Color = Color::Rgb(105, 173, 208);
     const SYNTAX_FUNCTION: Color = Color::Rgb(205, 154, 34);
@@ -126,6 +125,14 @@ impl Entry {
     }
 }
 
+#[derive(Default)]
+struct Rendered {
+    lines: Vec<Line<'static>>,
+    owners: Vec<usize>,
+    /// Number of entries fully rendered into `lines`.
+    ready: usize,
+}
+
 struct App {
     entries: Vec<Entry>,
     input: String,
@@ -136,30 +143,25 @@ struct App {
     provider: String,
     thinking_level: String,
     context_window: u64,
-    cwd: String,
     status: String,
     running: bool,
     auto_compact: bool,
     tick: usize,
+    scroll: u16,
+    /// Lines already rendered for all but the streaming last entry.
+    rendered: RefCell<Rendered>,
+    /// Set when a cached (non-tail) entry changed and the cache must rebuild.
+    dirty: std::cell::Cell<bool>,
     /// entry index owning each rendered transcript line (for click hit-testing)
     row_owner: Rc<RefCell<Vec<usize>>>,
 }
 
 impl App {
     fn new(model: String, provider: String, thinking_level: String, context_window: u64) -> Self {
-        let cwd = std::env::current_dir()
-            .map(|p| {
-                let s = p.display().to_string();
-                let home = std::env::var("HOME").unwrap_or_default();
-                if !home.is_empty() && s.starts_with(&home) {
-                    format!("~{}", &s[home.len()..])
-                } else {
-                    s
-                }
-            })
-            .unwrap_or_default();
         App {
-            entries: Vec::new(),
+            entries: vec![Entry::Notice(
+                "type a prompt — enter sends, ctrl+o tools, ctrl+t thinking, esc quits".into(),
+            )],
             input: String::new(),
             streaming: String::new(),
             thinking: String::new(),
@@ -168,11 +170,13 @@ impl App {
             provider,
             thinking_level,
             context_window,
-            cwd,
             status: "connecting".into(),
             running: true,
             auto_compact: true,
             tick: 0,
+            scroll: 0,
+            rendered: RefCell::new(Rendered::default()),
+            dirty: std::cell::Cell::new(false),
             row_owner: Rc::new(RefCell::new(Vec::new())),
         }
     }
@@ -191,10 +195,15 @@ impl App {
             "thinking_delta" => self.thinking.push_str(text("text")),
             "assistant_text" => {
                 self.flush_thinking();
-                if self.streaming.is_empty() && !text("text").is_empty() {
-                    self.push_assistant(text("text").to_string());
+                let full = text("text");
+                if full.is_empty() {
+                    self.flush_stream();
+                } else {
+                    // The consolidated text is authoritative; streamed deltas
+                    // can carry artifacts (an extra blank line).
+                    self.streaming.clear();
+                    self.push_assistant(full.to_string());
                 }
-                self.flush_stream();
             }
             "usage" => self.usage.absorb(&v),
             "tool_start" => {
@@ -209,6 +218,7 @@ impl App {
                 }));
             }
             "tool_end" => {
+                self.dirty.set(true);
                 let failed = v.get("is_error").and_then(Value::as_bool).unwrap_or(false);
                 let content = text("content");
                 for e in self.entries.iter_mut().rev() {
@@ -405,6 +415,7 @@ fn main() -> std::io::Result<()> {
                         if !text.is_empty() {
                             app.entries.push(Entry::User(text.clone()));
                             app.input.clear();
+                            app.scroll = 0;
                             app.running = true;
                             app.status = "working".into();
                             let req = serde_json::json!({ "type": "prompt", "text": text });
@@ -412,20 +423,32 @@ fn main() -> std::io::Result<()> {
                             let _ = stdin.flush();
                         }
                     }
+                    KeyCode::Up => app.scroll = app.scroll.saturating_add(1),
+                    KeyCode::Down => app.scroll = app.scroll.saturating_sub(1),
+                    KeyCode::PageUp => app.scroll = app.scroll.saturating_add(10),
+                    KeyCode::PageDown => app.scroll = app.scroll.saturating_sub(10),
+                    KeyCode::Home => app.scroll = u16::MAX,
+                    KeyCode::End => app.scroll = 0,
                     KeyCode::Backspace => {
                         app.input.pop();
                     }
                     KeyCode::Char(c) => app.input.push(c),
                     _ => {}
                 },
-                CEvent::Mouse(m) if m.kind == MouseEventKind::Down(MouseButton::Left) => {
-                    let owner = app.row_owner.borrow().get(m.row as usize).copied();
-                    if let Some(index) = owner {
-                        if let Some(entry) = app.entries.get_mut(index) {
-                            entry.hit();
+                CEvent::Mouse(m) => match m.kind {
+                    MouseEventKind::ScrollUp => app.scroll = app.scroll.saturating_add(3),
+                    MouseEventKind::ScrollDown => app.scroll = app.scroll.saturating_sub(3),
+                    MouseEventKind::Down(MouseButton::Left) => {
+                        let owner = app.row_owner.borrow().get(m.row as usize).copied();
+                        if let Some(index) = owner {
+                            if let Some(entry) = app.entries.get_mut(index) {
+                                entry.hit();
+                                app.dirty.set(true);
+                            }
                         }
                     }
-                }
+                    _ => {}
+                },
                 _ => {}
             }
         }
@@ -445,6 +468,74 @@ fn main() -> std::io::Result<()> {
     Ok(())
 }
 
+/// Cache every entry but the streaming last, and clone only the visible window.
+/// This keeps a frame cheap even when the transcript is long.
+fn build_window(app: &App, width: usize, height: usize) -> (Vec<Line<'static>>, Vec<usize>) {
+    {
+        let mut r = app.rendered.borrow_mut();
+        if app.dirty.get() || r.ready > app.entries.len() {
+            r.lines.clear();
+            r.owners.clear();
+            r.ready = 0;
+            app.dirty.set(false);
+        }
+        let target = app.entries.len().saturating_sub(1);
+        while r.ready < target {
+            let (lines, owners) = render_entry(&app.entries[r.ready], r.ready, width);
+            r.lines.extend(lines);
+            r.owners.extend(owners);
+            r.ready += 1;
+        }
+    }
+    let tail = app
+        .entries
+        .last()
+        .map(|e| render_entry(e, app.entries.len() - 1, width));
+    let spinner = app.running.then(|| {
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled(
+                format!("{} ", SPINNER[app.tick % SPINNER.len()]),
+                Style::default().fg(Theme::ACCENT),
+            ),
+            Span::styled(
+                if app.streaming.is_empty() {
+                    "working\u{2026}"
+                } else {
+                    "responding\u{2026}"
+                },
+                Style::default().fg(Theme::MUTED),
+            ),
+        ])
+    });
+    let r = app.rendered.borrow();
+    let prefix: &[Line<'static>] = &r.lines;
+    let prefix_owners: &[usize] = &r.owners;
+    let tail_lines: &[Line<'static>] = tail.as_ref().map(|(l, _)| l.as_slice()).unwrap_or(&[]);
+    let tail_owners: &[usize] = tail.as_ref().map(|(_, o)| o.as_slice()).unwrap_or(&[]);
+    let total = prefix.len() + tail_lines.len() + usize::from(spinner.is_some());
+    let max_scroll = total.saturating_sub(height);
+    let scroll = (app.scroll as usize).min(max_scroll);
+    let start = max_scroll - scroll;
+    let end = (start + height).min(total);
+    let mut visible = Vec::with_capacity(end - start);
+    let mut owners = Vec::with_capacity(end - start);
+    for i in start..end {
+        if i < prefix.len() {
+            visible.push(prefix[i].clone());
+            owners.push(prefix_owners[i]);
+        } else if i < prefix.len() + tail_lines.len() {
+            let j = i - prefix.len();
+            visible.push(tail_lines[j].clone());
+            owners.push(tail_owners[j]);
+        } else if let Some(s) = &spinner {
+            visible.push(s.clone());
+            owners.push(usize::MAX);
+        }
+    }
+    (visible, owners)
+}
+
 fn draw(frame: &mut ratatui::Frame, app: &App) {
     let area = frame.area();
     let rows = Layout::default()
@@ -456,33 +547,14 @@ fn draw(frame: &mut ratatui::Frame, app: &App) {
         ])
         .split(area);
 
-    let mut owners: Vec<usize> = Vec::new();
-    let mut lines = render_entries(app, rows[0].width as usize, &mut owners);
-    if app.running {
-        let spinner = SPINNER[app.tick % SPINNER.len()];
-        let label = if !app.streaming.is_empty() {
-            "responding…"
-        } else {
-            "working…"
-        };
-        owners.push(usize::MAX);
-        lines.push(Line::from(vec![
-            Span::raw("  "),
-            Span::styled(format!("{spinner} "), Style::default().fg(Theme::ACCENT)),
-            Span::styled(label, Style::default().fg(Theme::MUTED)),
-        ]));
-    }
-    let height = rows[0].height as usize;
-    let start = lines.len().saturating_sub(height);
-    let lines = lines.split_off(start);
-    owners = owners.split_off(start.min(owners.len()));
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), rows[0]);
+    let (visible, vis_owners) = build_window(app, rows[0].width as usize, rows[0].height as usize);
+    frame.render_widget(Paragraph::new(visible), rows[0]);
 
     // Record the absolute screen row owning each entry, for click hit-testing.
     let mut map = app.row_owner.borrow_mut();
     map.clear();
     map.resize(area.height as usize, usize::MAX);
-    for (i, owner) in owners.iter().enumerate() {
+    for (i, owner) in vis_owners.iter().enumerate() {
         let row = rows[0].y as usize + i;
         if row < map.len() {
             map[row] = *owner;
@@ -576,29 +648,26 @@ fn draw_editor(frame: &mut ratatui::Frame, area: Rect, app: &App) {
     frame.set_cursor_position((inner.x + 2 + app.input.chars().count() as u16, inner.y));
 }
 
-fn render_entries(app: &App, width: usize, owners: &mut Vec<usize>) -> Vec<Line<'static>> {
-    let mut out = Vec::new();
-    for (index, entry) in app.entries.iter().enumerate() {
-        let before = out.len();
-        match entry {
-            Entry::User(text) => block_msg(&mut out, text, width, Theme::USER_BG, Theme::TEXT),
-            Entry::Assistant(text) => render_assistant(&mut out, text, width),
-            Entry::Thinking { text, expanded } => render_thinking(&mut out, text, *expanded, width),
-            Entry::Tool(card) => render_tool(&mut out, card, width),
-            Entry::Error(text) => {
-                block_msg(&mut out, text, width, Theme::TOOL_ERROR_BG, Theme::TEXT)
-            }
-            Entry::Notice(text) => {
-                block_msg(&mut out, text, width, Theme::TOOL_PENDING_BG, Theme::MUTED)
-            }
-        }
-        for _ in before..out.len() {
-            owners.push(index);
-        }
-        out.push(Line::from(""));
-        owners.push(usize::MAX);
+fn render_entry(entry: &Entry, index: usize, width: usize) -> (Vec<Line<'static>>, Vec<usize>) {
+    let mut lines = Vec::new();
+    match entry {
+        Entry::User(text) => block_msg(&mut lines, text, width, Theme::USER_BG, Theme::TEXT),
+        Entry::Assistant(text) => render_assistant(&mut lines, text, width),
+        Entry::Thinking { text, expanded } => render_thinking(&mut lines, text, *expanded, width),
+        Entry::Tool(card) => render_tool(&mut lines, card, width),
+        Entry::Error(text) => block_msg(&mut lines, text, width, Theme::TOOL_ERROR_BG, Theme::TEXT),
+        Entry::Notice(text) => block_msg(
+            &mut lines,
+            text,
+            width,
+            Theme::TOOL_PENDING_BG,
+            Theme::MUTED,
+        ),
     }
-    out
+    let mut owners = vec![index; lines.len()];
+    lines.push(Line::from(""));
+    owners.push(usize::MAX);
+    (lines, owners)
 }
 
 /// Thinking: italic, `thinkingText` colour, click to collapse (pi's MouseRegion).
@@ -708,6 +777,7 @@ fn render_assistant(out: &mut Vec<Line<'static>>, text: &str, width: usize) {
     let mut in_code = false;
     let mut lang = String::new();
     let mut code: Vec<String> = Vec::new();
+    let mut last_blank = false;
     for raw in text.split('\n') {
         let trimmed = raw.trim_start();
         if trimmed.starts_with("```") {
@@ -726,6 +796,14 @@ fn render_assistant(out: &mut Vec<Line<'static>>, text: &str, width: usize) {
             continue;
         }
         let (style, body, marker) = markdown_line(raw);
+        if marker.is_none() && body.trim().is_empty() {
+            if last_blank {
+                continue;
+            }
+            last_blank = true;
+        } else {
+            last_blank = false;
+        }
         let indent = if marker.is_some() { 4 } else { 1 };
         for (i, chunk) in wrap(&body, width.saturating_sub(indent))
             .into_iter()
@@ -755,13 +833,14 @@ fn render_assistant(out: &mut Vec<Line<'static>>, text: &str, width: usize) {
 /// pi renders a ```lang border, the highlighted body, then a ``` border
 /// (`components/markdown.ts`).
 fn render_code_block(out: &mut Vec<Line<'static>>, code: &[String], lang: &str, width: usize) {
-    let _ = width;
     let border = Style::default().fg(Theme::MD_CODE_BLOCK_BORDER);
     out.push(Line::from(Span::styled(format!("  ```{lang}"), border)));
     for line in code {
-        let mut spans = vec![Span::raw("  ")];
-        spans.extend(highlight(line, lang));
-        out.push(Line::from(spans));
+        for chunk in wrap_code(line, width.saturating_sub(4)) {
+            let mut spans = vec![Span::raw("  ")];
+            spans.extend(highlight(&chunk, lang));
+            out.push(Line::from(spans));
+        }
     }
     out.push(Line::from(Span::styled("  ```", border)));
 }
@@ -860,6 +939,40 @@ fn highlight(line: &str, lang: &str) -> Vec<Span<'static>> {
     }
     flush_buf(&mut buf, &mut spans);
     spans
+}
+
+/// Word-wrap a code line, keeping its leading indentation as a hanging indent
+/// so a wrapped line still reads as code.
+fn wrap_code(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    if text.chars().count() <= width {
+        return vec![text.to_string()];
+    }
+    let indent: String = text.chars().take_while(|c| *c == ' ').collect();
+    let avail = width.saturating_sub(indent.chars().count()).max(8);
+    let mut out = Vec::new();
+    let mut line = String::new();
+    for word in text[indent.len()..].split(' ') {
+        let wlen = word.chars().count();
+        let cur = line.chars().count();
+        if cur == 0 {
+            line = word.to_string();
+        } else if cur + 1 + wlen <= avail {
+            line.push(' ');
+            line.push_str(word);
+        } else {
+            out.push(format!("{indent}{line}"));
+            line = word.to_string();
+        }
+        while line.chars().count() > avail {
+            let split: String = line.chars().take(avail).collect();
+            let rest: String = line.chars().skip(avail).collect();
+            out.push(format!("{indent}{split}"));
+            line = rest;
+        }
+    }
+    out.push(format!("{indent}{line}"));
+    out
 }
 
 fn flush_buf(buf: &mut String, spans: &mut Vec<Span<'static>>) {
@@ -1109,4 +1222,103 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
     }
     out.push(line);
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn text_of(line: &Line) -> String {
+        line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn a_code_block_has_no_extra_blank_lines() {
+        let src = "```rust\nstruct C {\n    x: u32,\n}\n\nimpl C {\n}\n```";
+        let mut out = Vec::new();
+        render_assistant(&mut out, src, 80);
+        let rendered: Vec<String> = out.iter().map(text_of).collect();
+        for l in &rendered {
+            eprintln!("[{l}]");
+        }
+        assert_eq!(rendered.len(), 8, "{rendered:#?}");
+        assert_eq!(rendered.iter().filter(|l| l.trim().is_empty()).count(), 1);
+    }
+
+    #[test]
+    fn an_assistant_entry_renders_code_tightly() {
+        let mut app = App::new("m".into(), "p".into(), "off".into(), 65536);
+        app.entries.push(Entry::Assistant(
+            "```rust\nstruct C {\n}\n\nimpl C {\n}\n```".into(),
+        ));
+        let last = app.entries.len() - 1;
+        let (lines, _) = render_entry(&app.entries[last], last, 80);
+        for l in &lines {
+            eprintln!("[{}]", text_of(l));
+        }
+        assert_eq!(lines.len(), 8, "fence+5code+fence+trailing");
+    }
+
+    #[test]
+    fn long_transcript_render_cost() {
+        let mut app = App::new("m".into(), "p".into(), "off".into(), 65536);
+        for i in 0..2000 {
+            app.entries.push(Entry::Assistant(format!(
+                "line {i}: some assistant text with `code` and **bold** and a - bullet"
+            )));
+            app.entries.push(Entry::Tool(ToolCard {
+                name: "bash".into(),
+                summary: format!("echo {i}"),
+                state: ToolState::Ok,
+                output: format!("out {i}\nsecond line"),
+                expanded: true,
+            }));
+        }
+        let start = std::time::Instant::now();
+        for _ in 0..30 {
+            let mut total = 0;
+            for (i, e) in app.entries.iter().enumerate() {
+                let (lines, _) = render_entry(e, i, 100);
+                total += lines.len();
+            }
+            assert!(total > 1000);
+        }
+        let elapsed = start.elapsed();
+        eprintln!(
+            "30 renders of {} entries took {:?}",
+            app.entries.len(),
+            elapsed
+        );
+        assert!(elapsed.as_millis() < 2000, "{elapsed:?}");
+    }
+
+    #[test]
+    fn long_context_frames_stay_cheap() {
+        let mut app = App::new("m".into(), "p".into(), "off".into(), 65536);
+        for i in 0..3000 {
+            app.entries.push(Entry::Assistant(format!(
+                "line {i}: assistant text with `code` and **bold** and a - bullet"
+            )));
+            app.entries.push(Entry::Tool(ToolCard {
+                name: "bash".into(),
+                summary: format!("echo {i}"),
+                state: ToolState::Ok,
+                output: format!("out {i}\nsecond"),
+                expanded: true,
+            }));
+        }
+        let _ = build_window(&app, 100, 30);
+        let start = std::time::Instant::now();
+        for _ in 0..200 {
+            let (visible, _) = build_window(&app, 100, 30);
+            assert_eq!(visible.len(), 30);
+        }
+        let elapsed = start.elapsed();
+        eprintln!(
+            "200 cached frames over {} entries: {:?}",
+            app.entries.len(),
+            elapsed
+        );
+        assert!(elapsed.as_millis() < 200, "{elapsed:?}");
+    }
 }
