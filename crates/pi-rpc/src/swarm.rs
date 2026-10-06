@@ -1,9 +1,9 @@
 //! Swarm inlets and outlets.
 //!
 //! A unit's **outlet** is its action stream, mirrored one JSON line at a time to
-//! `<dir>/<id>.outlet`. Its **inlet** is every peer's `.outlet`: each new line is
-//! framed as `<shout from="…" kind="…">…</shout>` and queued as follow-up
-//! context for the next turn.
+//! `<dir>/<id>.outlet`. Its **inlet** is every peer's `.outlet`; new lines are
+//! summarised into one short `<shouts>` block and queued as follow-up context
+//! for the next turn.
 //!
 //! Enabled by `PIPELETS_SWARM_DIR`; a unit with no swarm dir is standalone and
 //! writes nothing (pi parity). One append per action, one poll per turn — no
@@ -15,6 +15,10 @@ use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 
 use crate::Event;
+
+/// Most peer lines folded into one heard block; older ones collapse to a count
+/// so a burst of activity cannot flood the context window.
+const MAX_HEARD: usize = 10;
 
 /// One unit's view of the swarm.
 pub struct Swarm {
@@ -49,20 +53,23 @@ impl Swarm {
         })
     }
 
-    /// Broadcast one action on the outlet. Events that are not actions
-    /// (deltas, ready, usage) are ignored; `assistant_text` is the whole reply,
-    /// so a turn is one line, not one per token.
+    /// Broadcast one action on the outlet. Reads, successful tool completions,
+    /// and streaming deltas are not shouted; `assistant_text` is the whole
+    /// reply, so a turn is one line, not one per token.
     pub fn emit(&mut self, event: &Event) {
         let (kind, text) = match event {
             Event::ToolStart { name, input, .. } => {
-                ("tool", format!("{name} {}", compact_value(input)))
+                if !worth_shouting(name) {
+                    return;
+                }
+                ("tool", tool_summary(name, input))
             }
-            Event::ToolEnd { name, is_error, .. } => (
-                "tool_done",
-                format!("{name} {}", if *is_error { "failed" } else { "ok" }),
-            ),
-            Event::AssistantText { text } => ("says", compact(text)),
-            Event::Error { message } => ("error", compact(message)),
+            Event::ToolEnd { name, is_error, .. } if *is_error => {
+                ("error", format!("{name} failed"))
+            }
+            Event::ToolEnd { .. } => return,
+            Event::AssistantText { text } => ("says", compact(text, 160)),
+            Event::Error { message } => ("error", compact(message, 160)),
             _ => return,
         };
         let line = serde_json::json!({ "from": self.id, "kind": kind, "text": text });
@@ -71,15 +78,39 @@ impl Swarm {
         }
     }
 
-    /// Read every peer's new outlet lines and frame them as shouts. Own outlet
-    /// is skipped.
-    pub fn poll(&mut self) -> Vec<String> {
+    /// Read every peer's new outlet lines and fold them into one short, clean
+    /// `<shouts>` block, or `None` when there is nothing new.
+    pub fn poll(&mut self) -> Option<String> {
+        let mut heard = self.new_peer_lines();
+        if heard.is_empty() {
+            return None;
+        }
+        let elided = heard.len().saturating_sub(MAX_HEARD);
+        let tail = heard.split_off(elided.min(heard.len()));
+        let mut block = String::from("<shouts>\n");
+        if elided > 0 {
+            block.push_str(&format!("({elided} earlier peer action(s) omitted)\n"));
+        }
+        let mut last: Option<&str> = None;
+        for line in &tail {
+            if last == Some(line.as_str()) {
+                continue; // collapse an exact repeat
+            }
+            block.push_str(line);
+            block.push('\n');
+            last = Some(line.as_str());
+        }
+        block.push_str("</shouts>");
+        Some(block)
+    }
+
+    fn new_peer_lines(&mut self) -> Vec<String> {
         let entries = match std::fs::read_dir(&self.dir) {
             Ok(entries) => entries,
             Err(_) => return Vec::new(),
         };
         let own = format!("{}.outlet", self.id);
-        let mut shouts = Vec::new();
+        let mut lines = Vec::new();
         for entry in entries.flatten() {
             let path = entry.path();
             if path.file_name().and_then(|n| n.to_str()) == Some(own.as_str()) {
@@ -98,41 +129,60 @@ impl Swarm {
             let mut consumed = offset;
             for line in BufReader::new(&mut file).lines().map_while(Result::ok) {
                 consumed += line.len() as u64 + 1;
-                if let Some(shout) = frame(&line) {
-                    shouts.push(shout);
+                if let Some(line) = heard_line(&line) {
+                    lines.push(line);
                 }
             }
             self.read.insert(path, consumed);
         }
-        shouts
+        lines
     }
 }
 
-/// Turn one outlet line into the peer-context envelope, or `None` if malformed.
-fn frame(line: &str) -> Option<String> {
+/// Turn one outlet line into `[unit] kind: detail`, or `None` if malformed.
+fn heard_line(line: &str) -> Option<String> {
     let value: serde_json::Value = serde_json::from_str(line).ok()?;
     let from = value.get("from")?.as_str()?;
     let kind = value.get("kind").and_then(|k| k.as_str()).unwrap_or("");
     let text = value.get("text").and_then(|t| t.as_str()).unwrap_or("");
-    Some(format!(
-        "<shout from=\"{from}\" kind=\"{kind}\">{text}</shout>"
-    ))
+    Some(format!("[{from}] {kind}: {text}"))
 }
 
-/// One line, whitespace-collapsed and clamped, for an outlet record.
-fn compact_value(value: &serde_json::Value) -> String {
-    match value {
-        serde_json::Value::String(text) => compact(text),
-        serde_json::Value::Null => String::new(),
-        other => compact(&other.to_string()),
+/// Tools that change the workspace; a read or a search is peer noise.
+fn worth_shouting(name: &str) -> bool {
+    matches!(
+        name,
+        "bash" | "edit" | "write" | "apply_patch" | "create" | "delete" | "move"
+    )
+}
+
+/// A tool call in the few words that matter: the command or the path.
+fn tool_summary(name: &str, input: &serde_json::Value) -> String {
+    let field = |key: &str| {
+        input
+            .get(key)
+            .and_then(|v| v.as_str())
+            .map(|v| compact(v, 100))
+    };
+    let detail = match name {
+        "bash" => field("command"),
+        "edit" | "write" | "create" | "delete" | "apply_patch" => {
+            field("path").or_else(|| field("file_path").or_else(|| field("file")))
+        }
+        "move" => field("to"),
+        _ => None,
+    };
+    match detail.filter(|d| !d.is_empty()) {
+        Some(detail) => format!("{name} {detail}"),
+        None => name.to_string(),
     }
 }
 
-fn compact(text: &str) -> String {
+/// Whitespace-collapsed and clamped so a shout stays one short line.
+fn compact(text: &str, max: usize) -> String {
     let collapsed: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    // Short and clean: enough to know what happened, not the whole reply.
-    let mut trimmed: String = collapsed.chars().take(200).collect();
-    if collapsed.chars().count() > 200 {
+    let mut trimmed: String = collapsed.chars().take(max).collect();
+    if collapsed.chars().count() > max {
         trimmed.push('…');
     }
     trimmed

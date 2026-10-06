@@ -1102,13 +1102,9 @@ impl<R: std::io::BufRead, W: std::io::Write> SharedIo<R, W> {
         }
     }
 
-    /// Peer actions since the last poll, framed as shouts (the inlet).
-    fn take_shouts(&self) -> Vec<String> {
-        self.swarm
-            .borrow_mut()
-            .as_mut()
-            .map(Swarm::poll)
-            .unwrap_or_default()
+    /// Peer actions since the last poll, folded into one short `<shouts>` block.
+    fn take_shouts(&self) -> Option<String> {
+        self.swarm.borrow_mut().as_mut().and_then(Swarm::poll)
     }
 
     /// The next valid request with its optional correlation id, or `None` at end
@@ -1196,9 +1192,12 @@ fn drive<R: std::io::BufRead, W: std::io::Write, F: FnMut(&Agent)>(
         version: PROTOCOL_VERSION,
     });
     while let Some((id, request)) = io.next_request() {
-        // Inlet: peer actions since the last turn join the follow-up queue, so
-        // they ride the same delivery as the unit's own follow-ups.
-        session.follow_up.extend(io.take_shouts());
+        // Inlet: peer actions since the last turn join the follow-up queue as
+        // one short block, so they ride the same delivery as the unit's own
+        // follow-ups.
+        if let Some(shouts) = io.take_shouts() {
+            session.follow_up.push(shouts);
+        }
         // A prompt to run after the request is applied. `reset` sets this too,
         // so a clear-and-re-run shares the streaming turn below.
         let mut run: Option<String> = None;
