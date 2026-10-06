@@ -611,11 +611,28 @@ fn apply_command(
             "get_fork_messages",
             serde_json::json!({ "messages": session.fork_messages() }),
         )),
-        Request::GetCommands => Some(response(
-            id,
-            "get_commands",
-            serde_json::json!({ "commands": agent.commands() }),
-        )),
+        Request::GetCommands => {
+            let mut commands: Vec<serde_json::Value> = BUILTIN_COMMANDS
+                .iter()
+                .map(|(name, description, args)| {
+                    let mut value = serde_json::json!({
+                        "name": name,
+                        "description": description,
+                        "source": "builtin",
+                    });
+                    if let Some(args) = args {
+                        value["argumentHint"] = serde_json::json!(args);
+                    }
+                    value
+                })
+                .collect();
+            commands.extend(agent.commands().iter().cloned());
+            Some(response(
+                id,
+                "get_commands",
+                serde_json::json!({ "commands": commands }),
+            ))
+        }
     }
 }
 
@@ -635,6 +652,47 @@ fn failure(id: Option<String>, command: &str, message: &str) -> Event {
         success: false,
         data: serde_json::json!({ "error": message }),
     }
+}
+
+/// Every `(provider, model)` from the catalog file, as `{id, provider, name}`.
+fn catalog_models() -> Vec<serde_json::Value> {
+    let Some(text) = models_file().and_then(|file| std::fs::read_to_string(file).ok()) else {
+        return Vec::new();
+    };
+    let Ok(serde_json::Value::Object(top)) = serde_json::from_str(&text) else {
+        return Vec::new();
+    };
+    top.iter()
+        .flat_map(|(provider, entry)| {
+            entry
+                .get("models")
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(move |model| {
+                    let id = model.get("id")?.as_str()?;
+                    let name = model
+                        .get("name")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or(id);
+                    Some(serde_json::json!({ "id": id, "provider": provider, "name": name }))
+                })
+        })
+        .collect()
+}
+
+/// Path to the model catalog: `PIPELETS_MODELS_FILE`, else
+/// `$HOME/.pi/agent/models-store.json` when it exists.
+fn models_file() -> Option<std::path::PathBuf> {
+    if let Some(path) = std::env::var_os("PIPELETS_MODELS_FILE") {
+        return Some(std::path::PathBuf::from(path));
+    }
+    let home = std::env::var_os("HOME")?;
+    let candidate = std::path::PathBuf::from(home)
+        .join(".pi")
+        .join("agent")
+        .join("models-store.json");
+    candidate.exists().then_some(candidate)
 }
 
 fn state_event(agent: &Agent) -> Event {
@@ -738,6 +796,38 @@ struct SessionState {
 }
 
 /// pi's thinking levels, in order.
+/// Slash commands this core serves over RPC, in pi's built-in shape.
+const BUILTIN_COMMANDS: &[(&str, &str, Option<&str>)] = &[
+    ("settings", "Open settings", None),
+    ("model", "Select or set the model", Some("<provider/model>")),
+    ("tree", "Show the session tree", None),
+    ("thinking", "Set the thinking level", Some("<level>")),
+    ("scoped-models", "Models to cycle with ctrl+p", None),
+    ("export", "Export the session", None),
+    ("import", "Resume a session from a file", Some("<path>")),
+    ("share", "Share the session", None),
+    ("bug", "Report a bug", Some("<description>")),
+    ("copy", "Copy the last agent message", None),
+    ("name", "Set the session display name", Some("<name>")),
+    ("session", "Show session info and stats", None),
+    ("changelog", "Show the changelog", None),
+    ("hotkeys", "Show keyboard shortcuts", None),
+    ("fork", "Fork from a previous message", None),
+    ("clone", "Duplicate the session", None),
+    ("trust", "Save the project trust decision", None),
+    (
+        "login",
+        "Configure provider authentication",
+        Some("<provider>"),
+    ),
+    ("logout", "Remove provider authentication", None),
+    ("new", "Start a new session", None),
+    ("compact", "Compact the session context", None),
+    ("resume", "Resume a different session", Some("<path>")),
+    ("reload", "Reload configuration", None),
+    ("quit", "Quit", None),
+];
+
 const THINKING_LEVELS: &[&str] = &["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 
 /// A queue delivery mode: deliver every queued message at once, or one per
@@ -874,24 +964,21 @@ impl SessionState {
         }
     }
 
-    /// Models the unit can use: `PIPELETS_MODELS` (`id` or `provider/id`,
-    /// comma-separated) plus the model set by `set_model`. Empty when neither
-    /// is known; there is no bundled catalog.
+    /// Models the unit can advertise, deduped by `(provider, id)`: the catalog
+    /// file, then `PIPELETS_MODELS`, then the model set by `set_model`.
     fn model_values(&self) -> Vec<serde_json::Value> {
-        let mut out: Vec<serde_json::Value> = Vec::new();
-        let current_provider = self.model.as_ref().map(|(p, _)| p.clone());
-        if let Ok(list) = std::env::var("PIPELETS_MODELS") {
-            for item in list.split(',').map(str::trim).filter(|s| !s.is_empty()) {
-                let (provider, id) = match item.split_once('/') {
-                    Some((p, i)) => (p.to_string(), i.to_string()),
-                    None => (current_provider.clone().unwrap_or_default(), item.to_string()),
-                };
-                out.push(serde_json::json!({ "id": id, "provider": provider }));
-            }
-        }
-        if self.model.is_some() {
-            let value = self.model_value();
-            if !out.iter().any(|m| m == &value) {
+        let mut out = catalog_models();
+        let provider = self.model.as_ref().map(|(p, _)| p.as_str()).unwrap_or("");
+        let env = std::env::var("PIPELETS_MODELS").unwrap_or_default();
+        out.extend(env.split(',').filter_map(|item| {
+            let item = item.trim();
+            (!item.is_empty()).then(|| {
+                let (p, id) = item.split_once('/').unwrap_or((provider, item));
+                serde_json::json!({ "id": id, "provider": p, "name": id })
+            })
+        }));
+        if let Some(value) = self.model.as_ref().map(|_| self.model_value()) {
+            if !out.contains(&value) {
                 out.push(value);
             }
         }

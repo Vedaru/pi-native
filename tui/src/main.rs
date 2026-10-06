@@ -165,9 +165,43 @@ const COMMANDS: &[Cmd] = &[
     },
 ];
 
-/// (display, fill) suggestions for the current input: model completions after
+/// Minimal base64 (standard alphabet) for an OSC 52 clipboard write.
+fn base64(data: &[u8]) -> String {
+    const T: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for chunk in data.chunks(3) {
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
+        let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
+        out.push(T[(n >> 18) as usize & 63] as char);
+        out.push(T[(n >> 12) as usize & 63] as char);
+        out.push(if chunk.len() > 1 {
+            T[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            T[n as usize & 63] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
+/// One completion entry.
+struct Sugg {
+    label: String,
+    fill: String,
+    detail: String,
+}
+
+/// Suggestions for the current input: model completions after
 /// `/model `, otherwise command completions.
-fn suggestions(app: &App) -> Vec<(String, String)> {
+fn suggestions(app: &App) -> Vec<Sugg> {
     let input = app.input.as_str();
     if let Some(rest) = input.strip_prefix("/model ") {
         {
@@ -175,31 +209,48 @@ fn suggestions(app: &App) -> Vec<(String, String)> {
             return app
                 .models
                 .iter()
-                .map(|(p, id)| {
-                    if p.is_empty() {
+                .filter(|(p, id)| {
+                    let label = if p.is_empty() {
                         id.clone()
                     } else {
-                        format!("{p}/{id}")
+                        format!("{id} [{p}]")
+                    };
+                    id.starts_with(prefix) || label.starts_with(prefix)
+                })
+                .map(|(p, id)| {
+                    let mark = if *id == app.model { "\u{2713}" } else { " " };
+                    let provider = if p.is_empty() { String::new() } else { format!(" [{p}]") };
+                    Sugg {
+                        label: format!("{mark} {id}{provider}"),
+                        fill: if p.is_empty() {
+                            format!("/model {id}")
+                        } else {
+                            format!("/model {p}/{id}")
+                        },
+                        detail: app.model_names.get(id).cloned().unwrap_or_default(),
                     }
                 })
-                .filter(|full| full.starts_with(prefix))
-                .map(|full| (full.clone(), format!("/model {full}")))
                 .collect();
         }
     }
     let q = input.trim_start_matches('/');
     if input.starts_with('/') && !q.contains(' ') {
-        return COMMANDS
+        return app
+            .commands
             .iter()
-            .filter(|c| c.name.starts_with(q))
-            .map(|c| {
-                let hint = c.args.map(|a| format!(" {a}")).unwrap_or_default();
-                let fill = if c.args.is_some() {
-                    format!("/{} ", c.name)
+            .filter(|(name, _, _)| name.starts_with(q))
+            .map(|(name, desc, args)| {
+                let hint = args.as_ref().map(|a| format!(" {a}")).unwrap_or_default();
+                let fill = if args.is_some() {
+                    format!("/{name} ")
                 } else {
-                    format!("/{}", c.name)
+                    format!("/{name}")
                 };
-                (format!("/{}{hint}   {}", c.name, c.desc), fill)
+                Sugg {
+                    label: format!("/{name}{hint}"),
+                    fill,
+                    detail: desc.clone(),
+                }
             })
             .collect();
     }
@@ -353,6 +404,8 @@ struct App {
     sel: usize,
     /// (provider, id) advertised by the unit.
     models: Vec<(String, String)>,
+    model_names: std::collections::HashMap<String, String>,
+    commands: Vec<(String, String, Option<String>)>,
     /// entry index owning each rendered transcript line (for click hit-testing)
     row_owner: Rc<RefCell<Vec<usize>>>,
 }
@@ -385,6 +438,11 @@ impl App {
             max_scroll: std::cell::Cell::new(0),
             sel: 0,
             models: Vec::new(),
+            model_names: std::collections::HashMap::new(),
+            commands: COMMANDS
+                .iter()
+                .map(|c| (c.name.into(), c.desc.into(), c.args.map(String::from)))
+                .collect(),
             row_owner: Rc::new(RefCell::new(Vec::new())),
         }
     }
@@ -454,6 +512,7 @@ impl App {
             "response" if !matches!(text("command"), "prompt" | "steer" | "follow_up") => {
                 let ok = v.get("success").and_then(Value::as_bool).unwrap_or(false);
                 let data = v.get("data").cloned().unwrap_or(Value::Null);
+                let detail = compact(&data);
                 match text("command") {
                     "set_model" => {
                         if let Some(id) = data
@@ -464,6 +523,69 @@ impl App {
                             self.model = id.to_string();
                         }
                     }
+                    "get_last_assistant_text" => {
+                        if let Some(text) = data.get("text").and_then(Value::as_str) {
+                            let mut out = std::io::stdout();
+                            let _ = write!(out, "\u{1b}]52;c;{}\u{7}", base64(text.as_bytes()));
+                            let _ = out.flush();
+                            self.entries
+                                .push(Entry::Notice(format!("\u{b7} copied {} bytes", text.len())));
+                        } else {
+                            self.entries
+                                .push(Entry::Notice("\u{b7} no assistant message yet".into()));
+                        }
+                    }
+                    "export_html" => self.entries.push(Entry::Notice(format!(
+                        "\u{b7} exported to {}",
+                        data.get("path")
+                            .or_else(|| data.get("outputPath"))
+                            .and_then(Value::as_str)
+                            .unwrap_or("(session dir)")
+                    ))),
+                    "clone" => self
+                        .entries
+                        .push(Entry::Notice(format!("\u{b7} cloned: {detail}"))),
+                    "get_tree" => {
+                        let n = data
+                            .get("tree")
+                            .and_then(Value::as_array)
+                            .map(|a| a.len())
+                            .unwrap_or(0);
+                        self.entries
+                            .push(Entry::Notice(format!("\u{b7} session tree: {n} entries")));
+                    }
+                    "get_fork_messages" => {
+                        let n = data
+                            .get("messages")
+                            .and_then(Value::as_array)
+                            .map(|a| a.len())
+                            .unwrap_or(0);
+                        self.entries
+                            .push(Entry::Notice(format!("\u{b7} {n} forkable message(s)")));
+                    }
+                    "get_commands" => {
+                        if let Some(list) = data.get("commands").and_then(Value::as_array) {
+                            let fetched: Vec<_> = list
+                                .iter()
+                                .filter_map(|c| {
+                                    let name = c.get("name").and_then(Value::as_str)?;
+                                    let desc = c
+                                        .get("description")
+                                        .and_then(Value::as_str)
+                                        .unwrap_or("")
+                                        .to_string();
+                                    let args = c
+                                        .get("argumentHint")
+                                        .and_then(Value::as_str)
+                                        .map(str::to_string);
+                                    Some((name.to_string(), desc, args))
+                                })
+                                .collect();
+                            if !fetched.is_empty() {
+                                self.commands = fetched;
+                            }
+                        }
+                    }
                     "get_available_models" => {
                         if let Some(list) = data.get("models").and_then(Value::as_array) {
                             self.models = list
@@ -471,6 +593,9 @@ impl App {
                                 .filter_map(|m| {
                                     let id = m.get("id").and_then(Value::as_str)?;
                                     let p = m.get("provider").and_then(Value::as_str).unwrap_or("");
+                                    if let Some(name) = m.get("name").and_then(Value::as_str) {
+                                        self.model_names.insert(id.to_string(), name.to_string());
+                                    }
                                     Some((p.to_string(), id.to_string()))
                                 })
                                 .collect();
@@ -483,17 +608,28 @@ impl App {
                     }
                     _ => {}
                 }
-                let detail = compact(&data);
-                self.entries.push(Entry::Notice(format!(
-                    "{} {}{}",
-                    if ok { "✓" } else { "✗" },
+                if !matches!(
                     text("command"),
-                    if detail.is_empty() || detail == "null" {
-                        String::new()
-                    } else {
-                        format!(" {detail}")
-                    }
-                )));
+                    "get_tree"
+                        | "get_fork_messages"
+                        | "get_commands"
+                        | "export_html"
+                        | "get_last_assistant_text"
+                        | "get_available_models"
+                        | "set_model"
+                        | "set_thinking_level"
+                ) {
+                    self.entries.push(Entry::Notice(format!(
+                        "{} {}{}",
+                        if ok { "\u{2713}" } else { "\u{2717}" },
+                        text("command"),
+                        if detail.is_empty() || detail == "null" {
+                            String::new()
+                        } else {
+                            format!(" {detail}")
+                        }
+                    )));
+                }
             }
             "error" => {
                 self.flush_thinking();
@@ -635,6 +771,7 @@ fn main() -> std::io::Result<()> {
     let thinking_level = std::env::var("PIPELETS_THINKING").unwrap_or_else(|_| "off".to_string());
     let (mut child, mut stdin, rx) = spawn_unit(&bin, &session);
     let _ = writeln!(stdin, "{{\"type\":\"get_available_models\"}}");
+    let _ = writeln!(stdin, "{{\"type\":\"get_commands\"}}");
     let _ = stdin.flush();
 
     enable_raw_mode()?;
@@ -693,11 +830,11 @@ fn main() -> std::io::Result<()> {
                             app.sel = app.sel.saturating_add(1).min(sugg.len() - 1)
                         }
                         KeyCode::Tab if palette_active => {
-                            app.input = sugg[sel].1.clone();
+                            app.input = sugg[sel].fill.clone();
                             app.sel = 0;
                         }
                         KeyCode::Enter if palette_active => {
-                            let fill = sugg[sel].1.clone();
+                            let fill = sugg[sel].fill.clone();
                             if fill.ends_with(' ') {
                                 app.input = fill;
                                 app.sel = 0;
@@ -937,6 +1074,58 @@ fn run_command(app: &mut App, stdin: &mut ChildStdin, text: &str) -> bool {
         "reload" => app
             .entries
             .push(Entry::Notice("\u{b7} reload is not needed (pipelets)".into())),
+        "export" => send(
+            app,
+            stdin,
+            serde_json::json!({ "type": "export_html" }),
+            "export",
+        ),
+        "import" => {
+            if args.is_empty() {
+                usage(app, "/import <path>");
+            } else {
+                send(
+                    app,
+                    stdin,
+                    serde_json::json!({ "type": "switch_session", "sessionPath": args }),
+                    "import",
+                );
+            }
+        }
+        "clone" => send(app, stdin, serde_json::json!({ "type": "clone" }), "clone"),
+        "fork" => send(
+            app,
+            stdin,
+            serde_json::json!({ "type": "get_fork_messages" }),
+            "fork",
+        ),
+        "tree" => send(app, stdin, serde_json::json!({ "type": "get_tree" }), "tree"),
+        "copy" => send(
+            app,
+            stdin,
+            serde_json::json!({ "type": "get_last_assistant_text" }),
+            "copy",
+        ),
+        "settings" => app.entries.push(Entry::Notice(format!(
+            "\u{b7} model {} \u{b7} provider {} \u{b7} thinking {} \u{b7} context {} \u{b7} auto-compact {}",
+            app.model, app.provider, app.thinking_level, app.context_window, app.auto_compact
+        ))),
+        "scoped-models" => app.input = "/model ".to_string(),
+        "changelog" => app
+            .entries
+            .push(Entry::Notice("\u{b7} no changelog bundled".into())),
+        "trust" => app
+            .entries
+            .push(Entry::Notice("\u{b7} pipelets runs with the operator's env; no project trust".into())),
+        "login" | "logout" => app.entries.push(Entry::Notice(
+            "\u{b7} credentials come from the daemon env (PIPELETS_*/OPENAI_*)".into(),
+        )),
+        "share" => app
+            .entries
+            .push(Entry::Notice("\u{b7} share is not available in pipelets-tui".into())),
+        "bug" => app
+            .entries
+            .push(Entry::Notice("\u{b7} file issues against Vedaru/pipelets".into())),
         "hotkeys" => app.entries.push(Entry::Notice(
             "enter send \u{b7} esc quit \u{b7} ctrl+o tools \u{b7} ctrl+t thinking \u{b7} / commands"
                 .into(),
@@ -1000,7 +1189,7 @@ fn run_command(app: &mut App, stdin: &mut ChildStdin, text: &str) -> bool {
     false
 }
 
-fn draw_palette(frame: &mut ratatui::Frame, area: Rect, app: &App, matches: &[(String, String)]) {
+fn draw_palette(frame: &mut ratatui::Frame, area: Rect, app: &App, matches: &[Sugg]) {
     let sel = app.sel.min(matches.len().saturating_sub(1));
     const WIN: usize = 8;
     let start = if sel < WIN { 0 } else { sel + 1 - WIN };
@@ -1016,17 +1205,26 @@ fn draw_palette(frame: &mut ratatui::Frame, area: Rect, app: &App, matches: &[(S
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let mut lines = Vec::new();
-    for (i, (label, _)) in matches.iter().enumerate().skip(start).take(WIN) {
+    for (i, s) in matches.iter().enumerate().skip(start).take(WIN) {
         let selected = i == sel;
         let style = if selected {
             Style::default().fg(Theme::ACCENT)
         } else {
             Style::default().fg(Theme::TEXT)
         };
-        lines.push(Line::from(Span::styled(
-            format!(" {} {label}", if selected { "❯" } else { " " }),
-            style,
-        )));
+        lines.push(Line::from(vec![
+            Span::styled(format!(" {} {}", if selected { "\u{276f}" } else { " " }, s.label), style),
+            Span::styled(format!("   {}", s.detail), Style::default().fg(Theme::MUTED)),
+        ]));
+    }
+    if let Some(s) = matches.get(sel) {
+        if !s.detail.is_empty() {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                format!(" Model Name: {}", s.detail),
+                Style::default().fg(Theme::TEXT),
+            )));
+        }
     }
     frame.render_widget(Paragraph::new(lines), inner);
 }
