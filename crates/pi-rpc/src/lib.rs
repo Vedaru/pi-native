@@ -90,14 +90,6 @@ pub enum Request {
         #[serde(alias = "message")]
         text: String,
     },
-    /// A peer unit's action, delivered to this unit's context (the swarm
-    /// inlet). Framed so the model reads it as peer context, not an instruction.
-    Shout {
-        from: String,
-        #[serde(default)]
-        kind: String,
-        text: String,
-    },
     /// Abort the current operation (a unit runs one turn at a time).
     Abort,
     /// Drop queued steering/follow-up messages.
@@ -407,16 +399,6 @@ fn apply_command(
             Some(response(
                 id,
                 "follow_up",
-                serde_json::json!({ "disposition": "queued" }),
-            ))
-        }
-        Request::Shout { from, kind, text } => {
-            session.follow_up.push(format!(
-                "<shout from=\"{from}\" kind=\"{kind}\">{text}</shout>"
-            ));
-            Some(response(
-                id,
-                "shout",
                 serde_json::json!({ "disposition": "queued" }),
             ))
         }
