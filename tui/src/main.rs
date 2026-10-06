@@ -1282,12 +1282,25 @@ fn main() -> std::io::Result<()> {
                                 app.input = format!("/{field} ");
                                 app.sel = 0;
                             } else if app.overlay == Overlay::None && !app.input.contains(' ') {
-                                // A bare command submits (pi opens the selector).
-                                let text = app.input.trim().to_string();
-                                app.input.clear();
-                                app.sel = 0;
-                                if !text.is_empty() && run_command(&mut app, &mut stdin, &text) {
-                                    break 'outer;
+                                // No args typed yet: a fully typed command runs,
+                                // otherwise accept the highlighted option.
+                                let typed = app.input.trim().to_string();
+                                let exact = app
+                                    .commands
+                                    .iter()
+                                    .any(|(name, _, _)| format!("/{name}") == typed);
+                                let chosen = if exact { typed } else { fill.clone() };
+                                if chosen.ends_with(' ') {
+                                    app.input = chosen;
+                                    app.sel = 0;
+                                } else {
+                                    app.input.clear();
+                                    app.sel = 0;
+                                    if !chosen.is_empty()
+                                        && run_command(&mut app, &mut stdin, &chosen)
+                                    {
+                                        break 'outer;
+                                    }
                                 }
                             } else if fill.ends_with(' ') {
                                 app.input = fill;
@@ -1526,6 +1539,10 @@ fn run_command(app: &mut App, stdin: &mut ChildStdin, text: &str) -> bool {
         Some((n, a)) => (n, a.trim()),
         None => (body, ""),
     };
+    if name.is_empty() {
+        // A bare `/` opens the palette; it is not a command to run.
+        return false;
+    }
     let send = |_app: &mut App, stdin: &mut ChildStdin, line: serde_json::Value, _label: &str| {
         let _ = writeln!(stdin, "{line}");
         let _ = stdin.flush();
@@ -1666,9 +1683,7 @@ fn run_command(app: &mut App, stdin: &mut ChildStdin, text: &str) -> bool {
                 );
             }
         }
-        _ => app.set_notice(Entry::Notice(format!(
-            "\u{b7} /{name} is not supported by pipelets-tui yet"
-        ))),
+        _ => app.set_notice(Entry::Notice(format!("unknown command: /{name}"))),
     }
     false
 }
