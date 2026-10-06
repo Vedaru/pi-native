@@ -30,6 +30,8 @@ use ratatui::Terminal;
 use serde_json::Value;
 
 const POLL: Duration = Duration::from_millis(40);
+/// Code lines kept in memory per block; the rest are counted, not stored.
+const MAX_CODE: usize = 12;
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 /// pi's `dark.json`, resolved to sRGB via pi's own OKHSL math.
@@ -153,6 +155,8 @@ struct App {
     layout: RefCell<LineIndex>,
     /// Set when a cached (non-tail) entry changed and the cache must rebuild.
     dirty: std::cell::Cell<bool>,
+    /// Ctrl+O: expand tool output and long code blocks.
+    expanded: std::cell::Cell<bool>,
     /// entry index owning each rendered transcript line (for click hit-testing)
     row_owner: Rc<RefCell<Vec<usize>>>,
 }
@@ -178,6 +182,7 @@ impl App {
             scroll: 0,
             layout: RefCell::new(LineIndex::default()),
             dirty: std::cell::Cell::new(false),
+            expanded: std::cell::Cell::new(false),
             row_owner: Rc::new(RefCell::new(Vec::new())),
         }
     }
@@ -406,7 +411,9 @@ fn main() -> std::io::Result<()> {
                     }
                     // pi: app.tools.expand (ctrl+o), app.thinking.toggle (ctrl+t).
                     KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        toggle_tools(&mut app)
+                        app.expanded.set(!app.expanded.get());
+                        toggle_tools(&mut app);
+                        app.dirty.set(true);
                     }
                     KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         toggle_thinking(&mut app)
@@ -493,7 +500,7 @@ fn build_window(app: &App, width: usize, height: usize) -> (Vec<Line<'static>>, 
     let mut idx = l.start.partition_point(|s| *s <= start).saturating_sub(1);
     let mut li = l.start[idx];
     while idx < app.entries.len() && li < end {
-        let (lines, entry_owners) = render_entry(&app.entries[idx], idx, width);
+        let (lines, entry_owners) = render_entry(&app.entries[idx], idx, width, app.expanded.get());
         for (j, line) in lines.into_iter().enumerate() {
             let n = li + j;
             if n >= start && n < end {
@@ -539,7 +546,7 @@ fn ensure_layout(app: &App, width: usize) {
         l.count.clear();
         l.total = 0;
         for (i, e) in app.entries.iter().enumerate() {
-            let c = render_entry(e, i, width).0.len();
+            let c = render_entry(e, i, width, app.expanded.get()).0.len();
             let at = l.total;
             l.start.push(at);
             l.count.push(c);
@@ -549,7 +556,9 @@ fn ensure_layout(app: &App, width: usize) {
         return;
     }
     if let Some(e) = app.entries.last() {
-        let c = render_entry(e, app.entries.len() - 1, width).0.len();
+        let c = render_entry(e, app.entries.len() - 1, width, app.expanded.get())
+            .0
+            .len();
         let last = l.count.len() - 1;
         if c != l.count[last] {
             l.total = l.total - l.count[last] + c;
@@ -670,11 +679,16 @@ fn draw_editor(frame: &mut ratatui::Frame, area: Rect, app: &App) {
     frame.set_cursor_position((inner.x + 2 + app.input.chars().count() as u16, inner.y));
 }
 
-fn render_entry(entry: &Entry, index: usize, width: usize) -> (Vec<Line<'static>>, Vec<usize>) {
+fn render_entry(
+    entry: &Entry,
+    index: usize,
+    width: usize,
+    expanded: bool,
+) -> (Vec<Line<'static>>, Vec<usize>) {
     let mut lines = Vec::new();
     match entry {
         Entry::User(text) => block_msg(&mut lines, text, width, Theme::USER_BG, Theme::TEXT),
-        Entry::Assistant(text) => render_assistant(&mut lines, text, width),
+        Entry::Assistant(text) => render_assistant(&mut lines, text, width, expanded),
         Entry::Thinking { text, expanded } => render_thinking(&mut lines, text, *expanded, width),
         Entry::Tool(card) => render_tool(&mut lines, card, width),
         Entry::Error(text) => block_msg(&mut lines, text, width, Theme::TOOL_ERROR_BG, Theme::TEXT),
@@ -795,17 +809,20 @@ fn render_tool(out: &mut Vec<Line<'static>>, card: &ToolCard, width: usize) {
     }
 }
 
-fn render_assistant(out: &mut Vec<Line<'static>>, text: &str, width: usize) {
+fn render_assistant(out: &mut Vec<Line<'static>>, text: &str, width: usize, expanded: bool) {
     let mut in_code = false;
     let mut lang = String::new();
     let mut code: Vec<String> = Vec::new();
+    let mut code_total = 0usize;
+    let store = if expanded { usize::MAX } else { MAX_CODE };
     let mut last_blank = false;
     for raw in text.split('\n') {
         let trimmed = raw.trim_start();
         if trimmed.starts_with("```") {
             if in_code {
-                render_code_block(out, &code, &lang, width);
+                render_code_block(out, &code, code_total, &lang, width, expanded);
                 code.clear();
+                code_total = 0;
                 in_code = false;
             } else {
                 in_code = true;
@@ -814,7 +831,10 @@ fn render_assistant(out: &mut Vec<Line<'static>>, text: &str, width: usize) {
             continue;
         }
         if in_code {
-            code.push(raw.to_string());
+            code_total += 1;
+            if code.len() < store {
+                code.push(raw.to_string());
+            }
             continue;
         }
         let (style, body, marker) = markdown_line(raw);
@@ -848,13 +868,20 @@ fn render_assistant(out: &mut Vec<Line<'static>>, text: &str, width: usize) {
         }
     }
     if in_code {
-        render_code_block(out, &code, &lang, width);
+        render_code_block(out, &code, code_total, &lang, width, expanded);
     }
 }
 
 /// pi renders a ```lang border, the highlighted body, then a ``` border
 /// (`components/markdown.ts`).
-fn render_code_block(out: &mut Vec<Line<'static>>, code: &[String], lang: &str, width: usize) {
+fn render_code_block(
+    out: &mut Vec<Line<'static>>,
+    code: &[String],
+    total: usize,
+    lang: &str,
+    width: usize,
+    _expanded: bool,
+) {
     let border = Style::default().fg(Theme::MD_CODE_BLOCK_BORDER);
     out.push(Line::from(Span::styled(format!("  ```{lang}"), border)));
     for line in code {
@@ -863,6 +890,15 @@ fn render_code_block(out: &mut Vec<Line<'static>>, code: &[String], lang: &str, 
             spans.extend(highlight(&chunk, lang));
             out.push(Line::from(spans));
         }
+    }
+    if code.len() < total {
+        out.push(Line::from(Span::styled(
+            format!(
+                "  \u{2938} {} more line(s) \u{b7} ctrl+o to expand",
+                total - code.len()
+            ),
+            Style::default().fg(Theme::MUTED),
+        )));
     }
     out.push(Line::from(Span::styled("  ```", border)));
 }
@@ -1258,7 +1294,7 @@ mod tests {
     fn a_code_block_has_no_extra_blank_lines() {
         let src = "```rust\nstruct C {\n    x: u32,\n}\n\nimpl C {\n}\n```";
         let mut out = Vec::new();
-        render_assistant(&mut out, src, 80);
+        render_assistant(&mut out, src, 80, false);
         let rendered: Vec<String> = out.iter().map(text_of).collect();
         for l in &rendered {
             eprintln!("[{l}]");
@@ -1274,7 +1310,7 @@ mod tests {
             "```rust\nstruct C {\n}\n\nimpl C {\n}\n```".into(),
         ));
         let last = app.entries.len() - 1;
-        let (lines, _) = render_entry(&app.entries[last], last, 80);
+        let (lines, _) = render_entry(&app.entries[last], last, 80, false);
         for l in &lines {
             eprintln!("[{}]", text_of(l));
         }
@@ -1300,7 +1336,7 @@ mod tests {
         for _ in 0..30 {
             let mut total = 0;
             for (i, e) in app.entries.iter().enumerate() {
-                let (lines, _) = render_entry(e, i, 100);
+                let (lines, _) = render_entry(e, i, 100, false);
                 total += lines.len();
             }
             assert!(total > 1000);
@@ -1397,5 +1433,29 @@ mod tests {
             text / 1024,
             meta / 1024
         );
+    }
+
+    #[test]
+    fn huge_code_blocks_scroll_cheap() {
+        let mut app = App::new("m".into(), "p".into(), "off".into(), 65536);
+        for i in 0..20 {
+            let mut block = String::from("```python\n");
+            for j in 0..1000 {
+                block.push_str(&format!(
+                    "value_{j} = compute({j}, {i})  # a line of code here\n"
+                ));
+            }
+            block.push_str("```");
+            app.entries.push(Entry::Assistant(block));
+        }
+        let _ = build_window(&app, 100, 30);
+        let start = std::time::Instant::now();
+        for k in 0..200u32 {
+            app.scroll = (k * 7) as u16;
+            let _ = build_window(&app, 100, 30);
+        }
+        let e = start.elapsed();
+        eprintln!("200 scrolled frames over 20x1000-line blocks: {e:?}");
+        assert!(e.as_millis() < 500, "{e:?}");
     }
 }
