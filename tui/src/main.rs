@@ -34,6 +34,149 @@ const POLL: Duration = Duration::from_millis(16);
 const MAX_CODE: usize = 12;
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
+/// pi's built-in slash commands (`core/slash-commands.ts`).
+struct Cmd {
+    name: &'static str,
+    desc: &'static str,
+    args: Option<&'static str>,
+}
+const COMMANDS: &[Cmd] = &[
+    Cmd {
+        name: "settings",
+        desc: "Open settings menu",
+        args: None,
+    },
+    Cmd {
+        name: "model",
+        desc: "Select model",
+        args: Some("<provider/model>"),
+    },
+    Cmd {
+        name: "tree",
+        desc: "Navigate the session tree",
+        args: None,
+    },
+    Cmd {
+        name: "thinking",
+        desc: "Set thinking level",
+        args: Some("<level>"),
+    },
+    Cmd {
+        name: "scoped-models",
+        desc: "Enable/disable models for cycling",
+        args: None,
+    },
+    Cmd {
+        name: "export",
+        desc: "Export the session",
+        args: Some("[path]"),
+    },
+    Cmd {
+        name: "import",
+        desc: "Import a session from JSONL",
+        args: Some("<path>"),
+    },
+    Cmd {
+        name: "share",
+        desc: "Share the session",
+        args: None,
+    },
+    Cmd {
+        name: "bug",
+        desc: "Report a bug",
+        args: Some("<description>"),
+    },
+    Cmd {
+        name: "copy",
+        desc: "Copy the last agent message",
+        args: None,
+    },
+    Cmd {
+        name: "name",
+        desc: "Set the session display name",
+        args: Some("<name>"),
+    },
+    Cmd {
+        name: "session",
+        desc: "Show session info and stats",
+        args: None,
+    },
+    Cmd {
+        name: "changelog",
+        desc: "Show changelog entries",
+        args: None,
+    },
+    Cmd {
+        name: "hotkeys",
+        desc: "Show keyboard shortcuts",
+        args: None,
+    },
+    Cmd {
+        name: "fork",
+        desc: "Fork from a previous message",
+        args: None,
+    },
+    Cmd {
+        name: "clone",
+        desc: "Duplicate the session",
+        args: None,
+    },
+    Cmd {
+        name: "trust",
+        desc: "Save a project trust decision",
+        args: None,
+    },
+    Cmd {
+        name: "login",
+        desc: "Configure provider auth",
+        args: Some("<provider>"),
+    },
+    Cmd {
+        name: "logout",
+        desc: "Remove provider auth",
+        args: Some("<provider>"),
+    },
+    Cmd {
+        name: "new",
+        desc: "Start a new session",
+        args: None,
+    },
+    Cmd {
+        name: "compact",
+        desc: "Compact the session context",
+        args: None,
+    },
+    Cmd {
+        name: "resume",
+        desc: "Resume a different session",
+        args: Some("<path>"),
+    },
+    Cmd {
+        name: "reload",
+        desc: "Reload config, skills, themes",
+        args: None,
+    },
+    Cmd {
+        name: "quit",
+        desc: "Quit",
+        args: None,
+    },
+];
+
+/// Indices of commands whose name starts with the current `/` query.
+fn palette_matches(input: &str) -> Vec<usize> {
+    let q = input.trim_start_matches('/');
+    if q.contains(' ') {
+        return Vec::new();
+    }
+    COMMANDS
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.name.starts_with(q))
+        .map(|(i, _)| i)
+        .collect()
+}
+
 /// pi's `dark.json`, resolved to sRGB via pi's own OKHSL math.
 struct Theme;
 impl Theme {
@@ -160,6 +303,7 @@ struct App {
     last_len: std::cell::Cell<usize>,
     /// Transcript height from the last frame, for PageUp/PageDown.
     page: std::cell::Cell<usize>,
+    sel: usize,
     /// entry index owning each rendered transcript line (for click hit-testing)
     row_owner: Rc<RefCell<Vec<usize>>>,
 }
@@ -188,6 +332,7 @@ impl App {
             expanded: std::cell::Cell::new(false),
             last_len: std::cell::Cell::new(0),
             page: std::cell::Cell::new(20),
+            sel: 0,
             row_owner: Rc::new(RefCell::new(Vec::new())),
         }
     }
@@ -198,7 +343,10 @@ impl App {
         };
         let text = |k: &str| v.get(k).and_then(Value::as_str).unwrap_or("");
         match v.get("type").and_then(Value::as_str).unwrap_or("") {
-            "ready" => self.status = "ready".into(),
+            "ready" => {
+                self.status = "ready".into();
+                self.running = false;
+            }
             "assistant_delta" => {
                 self.flush_thinking();
                 self.streaming.push_str(text("text"));
@@ -250,6 +398,21 @@ impl App {
                 self.flush_stream();
                 self.running = false;
                 self.status = "ready".into();
+            }
+            "response" => {
+                let ok = v.get("success").and_then(Value::as_bool).unwrap_or(false);
+                let data = v.get("data").cloned().unwrap_or(Value::Null);
+                let detail = compact(&data);
+                self.entries.push(Entry::Notice(format!(
+                    "{} {}{}",
+                    if ok { "✓" } else { "✗" },
+                    text("command"),
+                    if detail.is_empty() || detail == "null" {
+                        String::new()
+                    } else {
+                        format!(" {detail}")
+                    }
+                )));
             }
             "error" => {
                 self.flush_thinking();
@@ -414,49 +577,102 @@ fn main() -> std::io::Result<()> {
             }
             had = true;
             match event::read()? {
-                CEvent::Key(key) => match key.code {
-                    KeyCode::Esc => break 'outer,
-                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        break 'outer
-                    }
-                    // pi: app.tools.expand (ctrl+o), app.thinking.toggle (ctrl+t).
-                    KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        app.expanded.set(!app.expanded.get());
-                        toggle_tools(&mut app);
-                        app.dirty.set(true);
-                    }
-                    KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        toggle_thinking(&mut app)
-                    }
-                    KeyCode::Enter => {
-                        let text = app.input.trim().to_string();
-                        if !text.is_empty() {
-                            app.entries.push(Entry::User(text.clone()));
+                CEvent::Key(key) => {
+                    let palette = palette_matches(&app.input);
+                    let palette_active =
+                        app.input.starts_with('/') && !app.input[1..].contains(' ');
+                    let sel = if palette.is_empty() {
+                        0
+                    } else {
+                        app.sel.min(palette.len() - 1)
+                    };
+                    match key.code {
+                        KeyCode::Esc if palette_active => {
                             app.input.clear();
-                            app.scroll = 0;
-                            app.running = true;
-                            app.status = "working".into();
-                            let req = serde_json::json!({ "type": "prompt", "text": text });
-                            let _ = writeln!(stdin, "{req}");
-                            let _ = stdin.flush();
+                            app.sel = 0;
                         }
+                        KeyCode::Esc => break 'outer,
+                        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            break 'outer
+                        }
+                        KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            app.expanded.set(!app.expanded.get());
+                            toggle_tools(&mut app);
+                            app.dirty.set(true);
+                        }
+                        KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            toggle_thinking(&mut app)
+                        }
+                        KeyCode::Up if palette_active => app.sel = app.sel.saturating_sub(1),
+                        KeyCode::Down if palette_active => app.sel = app.sel.saturating_add(1),
+                        KeyCode::Tab if palette_active => {
+                            let c = &COMMANDS[palette[sel]];
+                            app.input = format!("/{} ", c.name);
+                            app.sel = 0;
+                        }
+                        KeyCode::Enter if palette_active => {
+                            let c = &COMMANDS[palette[sel]];
+                            let typed = app.input.trim_start_matches('/').trim();
+                            if typed == c.name && c.args.is_some() {
+                                app.input = format!("/{} ", c.name);
+                            } else {
+                                let text = app.input.clone();
+                                app.input.clear();
+                                app.sel = 0;
+                                if run_command(&mut app, &mut stdin, &text) {
+                                    break 'outer;
+                                }
+                            }
+                        }
+                        KeyCode::Enter => {
+                            let text = app.input.trim().to_string();
+                            if !text.is_empty() {
+                                if text.starts_with('/') {
+                                    app.input.clear();
+                                    if run_command(&mut app, &mut stdin, &text) {
+                                        break 'outer;
+                                    }
+                                } else {
+                                    app.entries.push(Entry::User(text.clone()));
+                                    app.input.clear();
+                                    app.scroll = 0;
+                                    app.running = true;
+                                    app.status = "working".into();
+                                    let req = serde_json::json!({ "type": "prompt", "text": text });
+                                    let _ = writeln!(stdin, "{req}");
+                                    let _ = stdin.flush();
+                                }
+                            }
+                        }
+                        KeyCode::Up => app.scroll = app.scroll.saturating_add(1),
+                        KeyCode::Down => app.scroll = app.scroll.saturating_sub(1),
+                        KeyCode::PageUp => {
+                            app.scroll = app.scroll.saturating_add(app.page.get() as u16)
+                        }
+                        KeyCode::PageDown => {
+                            app.scroll = app.scroll.saturating_sub(app.page.get() as u16)
+                        }
+                        KeyCode::Home => app.scroll = u16::MAX,
+                        KeyCode::End => app.scroll = 0,
+                        KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            app.input.clear();
+                            app.sel = 0;
+                        }
+                        KeyCode::Backspace => {
+                            app.input.pop();
+                            app.sel = 0;
+                        }
+                        // Ignore control/alt chords so they never type a letter.
+                        KeyCode::Char(c)
+                            if !key.modifiers.contains(KeyModifiers::CONTROL)
+                                && !key.modifiers.contains(KeyModifiers::ALT) =>
+                        {
+                            app.input.push(c);
+                            app.sel = 0;
+                        }
+                        _ => {}
                     }
-                    KeyCode::Up => app.scroll = app.scroll.saturating_add(1),
-                    KeyCode::Down => app.scroll = app.scroll.saturating_sub(1),
-                    KeyCode::PageUp => {
-                        app.scroll = app.scroll.saturating_add(app.page.get() as u16)
-                    }
-                    KeyCode::PageDown => {
-                        app.scroll = app.scroll.saturating_sub(app.page.get() as u16)
-                    }
-                    KeyCode::Home => app.scroll = u16::MAX,
-                    KeyCode::End => app.scroll = 0,
-                    KeyCode::Backspace => {
-                        app.input.pop();
-                    }
-                    KeyCode::Char(c) => app.input.push(c),
-                    _ => {}
-                },
+                }
                 CEvent::Mouse(m) => match m.kind {
                     MouseEventKind::ScrollUp => app.scroll = app.scroll.saturating_add(3),
                     MouseEventKind::ScrollDown => app.scroll = app.scroll.saturating_sub(3),
@@ -582,12 +798,105 @@ fn ensure_layout(app: &App, width: usize) {
     }
 }
 
+/// Run a `/command`. Returns true to quit.
+fn run_command(app: &mut App, stdin: &mut ChildStdin, text: &str) -> bool {
+    let body = text.trim_start_matches('/').trim();
+    let (name, args) = match body.split_once(|c: char| c.is_whitespace()) {
+        Some((n, a)) => (n, a.trim()),
+        None => (body, ""),
+    };
+    let send = |app: &mut App, stdin: &mut ChildStdin, line: serde_json::Value, label: &str| {
+        let _ = writeln!(stdin, "{line}");
+        let _ = stdin.flush();
+        app.entries.push(Entry::Notice(format!("· /{label}")));
+    };
+    match name {
+        "quit" => return true,
+        "new" => send(
+            app,
+            stdin,
+            serde_json::json!({ "type": "new_session" }),
+            "new",
+        ),
+        "compact" => send(
+            app,
+            stdin,
+            serde_json::json!({ "type": "compact" }),
+            "compact",
+        ),
+        "session" => send(
+            app,
+            stdin,
+            serde_json::json!({ "type": "get_session_stats" }),
+            "session",
+        ),
+        "thinking" if !args.is_empty() => send(
+            app,
+            stdin,
+            serde_json::json!({ "type": "set_thinking_level", "level": args }),
+            "thinking",
+        ),
+        "model" if !args.is_empty() => send(
+            app,
+            stdin,
+            serde_json::json!({ "type": "set_model", "provider": "", "modelId": args }),
+            "model",
+        ),
+        "name" if !args.is_empty() => send(
+            app,
+            stdin,
+            serde_json::json!({ "type": "set_session_name", "name": args }),
+            "name",
+        ),
+        "resume" if !args.is_empty() => send(
+            app,
+            stdin,
+            serde_json::json!({ "type": "switch_session", "sessionPath": args }),
+            "resume",
+        ),
+        _ => app.entries.push(Entry::Notice(format!(
+            "· /{name} is not supported by pipelets-tui yet"
+        ))),
+    }
+    false
+}
+
+fn draw_palette(frame: &mut ratatui::Frame, area: Rect, app: &App, matches: &[usize]) {
+    let sel = app.sel.min(matches.len().saturating_sub(1));
+    let mut lines = Vec::new();
+    for (i, &ci) in matches.iter().enumerate().take(8) {
+        let c = &COMMANDS[ci];
+        let selected = i == sel;
+        let name_style = if selected {
+            Style::default().fg(Theme::ACCENT)
+        } else {
+            Style::default().fg(Theme::TEXT)
+        };
+        let hint = c.args.map(|a| format!(" {a}")).unwrap_or_default();
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!(" {} /{}{hint}", if selected { "❯" } else { " " }, c.name),
+                name_style,
+            ),
+            Span::styled(format!("   {}", c.desc), Style::default().fg(Theme::MUTED)),
+        ]));
+    }
+    frame.render_widget(Paragraph::new(lines), area);
+}
+
 fn draw(frame: &mut ratatui::Frame, app: &App) {
     let area = frame.area();
+    let palette: Vec<usize> = if app.input.starts_with('/') && !app.input[1..].contains(' ') {
+        palette_matches(&app.input)
+    } else {
+        Vec::new()
+    };
+    let pal_rows = palette.len().min(8) as u16;
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(3),
+            Constraint::Length(pal_rows),
             Constraint::Length(3),
             Constraint::Length(1),
         ])
@@ -607,8 +916,11 @@ fn draw(frame: &mut ratatui::Frame, app: &App) {
         }
     }
 
-    draw_editor(frame, rows[1], app);
-    draw_footer(frame, rows[2], app);
+    if pal_rows > 0 {
+        draw_palette(frame, rows[1], app, &palette);
+    }
+    draw_editor(frame, rows[2], app);
+    draw_footer(frame, rows[3], app);
 }
 
 /// Left: usage + context. Right: provider/model/thinking.
