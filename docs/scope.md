@@ -6,10 +6,12 @@ of the reference Rust project's extended feature set. pi describes itself as "a
 minimal, extensible agent harness"; this document is the canonical in/out list
 and the guard for new work.
 
-The binary is the **bare core** a single unit needs. Swarm orchestration — a
+The binary is the **bare core** a single unit needs. It ships one peer-awareness
+primitive — the fire-and-forget **shout bus** ([swarm](swarm.md): inlets and
+outlets, off unless `PIPELETS_SWARM_DIR` is set). Swarm *orchestration* — a
 conductor, role units, a Linear board — lives in a separate repo
-(`pipelets-swarm`), driving the core over the single-unit serve. It is never
-part of the shipped binary, so an idle unit stays at ~4–5 MB.
+(`pipelets-swarm`), driving the core over the single-unit serve. It is never part
+of the shipped binary, so an idle unit stays at ~4–5 MB.
 
 The reference port (`Dicklesworthstone/pi_agent_rust`) is used for
 **architecture** (QuickJS + Rust-backed Node shims, crate choices), never for
@@ -35,8 +37,10 @@ Core primitives a swarm host drives:
 | Unit host: one addressable agent, attach/detach, event fan-out, idle suspend | `pi-host` |
 | HTTP + SSE serve (one unit) | `pi-gateway` |
 
-Coordination between units (handoff, ack, ownership) lives in rig, not in the
-unit: pipelets ships no mailbox and no `/units/*` route (VED-421).
+Coordination between units (handoff, ack, ownership) lives in the orchestrator,
+not in the unit: pipelets ships no addressed mailbox, no ownership, and no
+`/units/*` route (VED-421). The shout bus is awareness only — one shared
+bulletin, no addressees.
 
 ## Out of scope (reference-port bloat)
 

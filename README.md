@@ -15,6 +15,9 @@ the HTTP+SSE gateway; a conductor drives many of them at once.
   bounded buffers and a 20k-call tool run stays under a second of CPU.
 - **Swarm friendly.** 32 idle units ≈ 4.4 MB each (~142 MB total); the dynamic
   build shares libc pages, so a swarm costs less than the per-unit sum.
+- **Peer-aware.** With `PIPELETS_SWARM_DIR`, units broadcast their actions and
+  hear each other as mid-turn `<shouts>` ([swarm](docs/swarm.md)); off by
+  default, so a lone unit is byte-identical to pi.
 - **pi-compatible.** Outbound request bytes and prompt-cache behavior match pi.
 
 Linear project: *pi native runtime: Rust memory-heavy rewrite, drop Node*
@@ -132,6 +135,7 @@ example extensions load through the host (84/87).
 | [session-store.md](docs/session-store.md) | JSONL format, context building, compaction |
 | [images.md](docs/images.md) | native image pipeline (read attachments) |
 | [rpc-protocol.md](docs/rpc-protocol.md) | JSON-lines unit protocol |
+| [swarm.md](docs/swarm.md) | inlets/outlets: peer awareness over a shout bus |
 | [plugin-conformance.md](docs/plugin-conformance.md) | extension compatibility |
 | [scope.md](docs/scope.md) | in/out of scope and hard constraints |
 | [adr/](docs/adr/) | architecture decision records |

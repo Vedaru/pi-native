@@ -57,6 +57,9 @@ threshold compaction, `set_auto_retry` gates the transport retry loop, and
 queued messages or one at a time (`steer` before the model call, `follow_up`
 after the turn). An unsupported mode returns `success:false` with an `error`.
 
+Peer shouts are **not** an RPC command: the swarm inlet delivers them as user
+messages before each model call. See [swarm](swarm.md).
+
 `reset` clears the transcript **in place**: the session file keeps its id and
 header (so the unit stays addressable), only its message entries are dropped.
 With `rerun: true` (the default) the unit then re-runs the task — the `text`

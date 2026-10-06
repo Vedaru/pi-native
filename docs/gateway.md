@@ -32,7 +32,8 @@ attach, and an idle unit releases its in-memory agent until the next command.
 | `POST` | `/sessions/:id/ui_response` | Answer a `ui_request` |
 
 Coordination (handoff, ack, ownership) lives in rig, not in pipelets: there is
-no mailbox and no `/units/*` route. See
+no mailbox and no `/units/*` route. Peer *awareness* is a file-based shout bus
+([swarm](swarm.md)), not an HTTP surface. See
 [the web integration](../integrations/pi-web/README.md) for where a fleet points
 pi-web (rig).
 
