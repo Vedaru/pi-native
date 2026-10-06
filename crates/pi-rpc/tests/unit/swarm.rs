@@ -1,11 +1,27 @@
 use super::*;
 use crate::Event;
 
-fn scratch(tag: &str) -> PathBuf {
+/// A scratch swarm directory that removes itself on drop, so a test run does
+/// not litter `/tmp` with `pi-swarm-*` directories.
+struct Scratch(PathBuf);
+
+impl Scratch {
+    fn path(&self) -> PathBuf {
+        self.0.clone()
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn scratch(tag: &str) -> Scratch {
     let dir = std::env::temp_dir().join(format!("pi-swarm-{}-{tag}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    dir
+    Scratch(dir)
 }
 
 fn tool(name: &str, input: serde_json::Value) -> Event {
@@ -19,8 +35,8 @@ fn tool(name: &str, input: serde_json::Value) -> Event {
 #[test]
 fn a_peer_outlet_becomes_one_short_block_and_is_read_once() {
     let dir = scratch("roundtrip");
-    let mut a = Swarm::join(dir.clone(), "a".into()).unwrap();
-    let mut b = Swarm::join(dir, "b".into()).unwrap();
+    let mut a = Swarm::join(dir.path(), "a".into()).unwrap();
+    let mut b = Swarm::join(dir.path(), "b".into()).unwrap();
     a.emit(&Event::AssistantText {
         text: "hello   world".into(),
     });
@@ -34,7 +50,7 @@ fn a_peer_outlet_becomes_one_short_block_and_is_read_once() {
 #[test]
 fn a_unit_never_reads_its_own_outlet() {
     let dir = scratch("own");
-    let mut a = Swarm::join(dir, "a".into()).unwrap();
+    let mut a = Swarm::join(dir.path(), "a".into()).unwrap();
     a.emit(&Event::AssistantText {
         text: "self".into(),
     });
@@ -44,8 +60,8 @@ fn a_unit_never_reads_its_own_outlet() {
 #[test]
 fn reads_are_noise_and_tool_args_are_summarised() {
     let dir = scratch("summary");
-    let mut a = Swarm::join(dir.clone(), "a".into()).unwrap();
-    let mut b = Swarm::join(dir, "b".into()).unwrap();
+    let mut a = Swarm::join(dir.path(), "a".into()).unwrap();
+    let mut b = Swarm::join(dir.path(), "b".into()).unwrap();
     a.emit(&tool("read", serde_json::json!({ "path": "x" })));
     assert_eq!(b.poll(), None, "a read is not worth shouting");
     a.emit(&tool(
