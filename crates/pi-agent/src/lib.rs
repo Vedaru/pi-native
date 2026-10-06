@@ -584,7 +584,7 @@ impl Agent {
         loop {
             // A peer action that arrived since the last model call is visible
             // to this one; no extra turn is needed.
-            for message in steering() {
+            if let Some(message) = steering() {
                 self.push_user(message);
             }
             on_event(&AgentEvent::TurnStart);

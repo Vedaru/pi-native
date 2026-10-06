@@ -127,10 +127,19 @@ impl Swarm {
                 continue;
             }
             let mut consumed = offset;
-            for line in BufReader::new(&mut file).lines().map_while(Result::ok) {
-                consumed += line.len() as u64 + 1;
-                if let Some(line) = heard_line(&line) {
-                    lines.push(line);
+            let mut reader = BufReader::new(&mut file);
+            let mut line = String::new();
+            loop {
+                line.clear();
+                match reader.read_line(&mut line) {
+                    Ok(0) => break,
+                    Ok(bytes) => {
+                        consumed += bytes as u64;
+                        if let Some(heard) = heard_line(line.trim_end()) {
+                            lines.push(heard);
+                        }
+                    }
+                    Err(_) => break,
                 }
             }
             self.read.insert(path, consumed);
