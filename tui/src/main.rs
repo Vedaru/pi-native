@@ -211,7 +211,11 @@ fn thinking_items(app: &App) -> Vec<Sugg> {
         .map(|(level, desc)| Sugg {
             label: format!(
                 "{} {level}",
-                if *level == app.thinking_level { "\u{2713}" } else { " " }
+                if *level == app.thinking_level {
+                    "\u{2713}"
+                } else {
+                    " "
+                }
             ),
             fill: format!("!thinking:{level}"),
             detail: desc.to_string(),
@@ -241,7 +245,11 @@ fn scoped_items(app: &App) -> Vec<Sugg> {
         .iter()
         .map(|(provider, id)| {
             let key = format!("{provider}/{id}");
-            let mark = if app.scoped.contains(&key) { "[x]" } else { "[ ]" };
+            let mark = if app.scoped.contains(&key) {
+                "[x]"
+            } else {
+                "[ ]"
+            };
             Sugg {
                 label: format!("{mark} {id} [{provider}]"),
                 fill: format!("!scope:{key}"),
@@ -318,8 +326,8 @@ const HOTKEYS: &str = "**Navigation**
 
 | Key | Action |
 |-----|--------|
-| `Up` / `Down` | Scroll the transcript |
-| `PageUp` / `PageDown` | Scroll by a page |
+| `Up` / `Down` | Browse prompt history |
+| `PageUp` / `PageDown` | Scroll the transcript |
 | `Home` / `End` | Jump to start / end |
 
 **Editing**
@@ -360,6 +368,47 @@ fn collect_sessions(app: &mut App) {
             .to_string();
         app.sessions.push((path.display().to_string(), name));
     }
+}
+
+impl App {
+    /// Record a submission, skipping an immediate repeat (pi's editor history).
+    fn push_history(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        if self.history.last().map(String::as_str) != Some(text) {
+            self.history.push(text.to_string());
+        }
+        self.history_pos = self.history.len();
+        self.draft.clear();
+    }
+}
+
+/// Up: older prompt. The live text is kept as a draft for the way back.
+fn history_prev(app: &mut App) {
+    if app.history.is_empty() {
+        return;
+    }
+    if app.history_pos == app.history.len() {
+        app.draft = app.input.clone();
+    }
+    if app.history_pos > 0 {
+        app.history_pos -= 1;
+        app.input = app.history[app.history_pos].clone();
+    }
+}
+
+/// Down: newer prompt, then the draft that was being typed.
+fn history_next(app: &mut App) {
+    if app.history_pos >= app.history.len() {
+        return;
+    }
+    app.history_pos += 1;
+    app.input = if app.history_pos == app.history.len() {
+        app.draft.clone()
+    } else {
+        app.history[app.history_pos].clone()
+    };
 }
 
 /// A short, human label for a command response (never the raw payload).
@@ -411,7 +460,11 @@ fn apply_setting(app: &mut App, stdin: &mut std::process::ChildStdin, action: &s
             } else {
                 &app.follow_up_mode
             };
-            let next_mode = if current == "all" { "one-at-a-time" } else { "all" };
+            let next_mode = if current == "all" {
+                "one-at-a-time"
+            } else {
+                "all"
+            };
             (
                 serde_json::json!({ "type": format!("set_{action}"), "mode": next_mode }),
                 next_mode == "all",
@@ -457,7 +510,11 @@ fn suggestions(app: &App) -> Vec<Sugg> {
                 })
                 .map(|(p, id)| {
                     let mark = if *id == app.model { "\u{2713}" } else { " " };
-                    let provider = if p.is_empty() { String::new() } else { format!(" [{p}]") };
+                    let provider = if p.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" [{p}]")
+                    };
                     Sugg {
                         label: format!("{mark} {id}{provider}"),
                         fill: if p.is_empty() {
@@ -547,6 +604,10 @@ struct Usage {
     cache_read: u64,
     cache_write: u64,
     context: u64,
+    /// Latest request only, for the cache-hit rate (pi uses the latest prompt).
+    last_input: u64,
+    last_cache_read: u64,
+    last_cache_write: u64,
 }
 
 impl Usage {
@@ -556,15 +617,19 @@ impl Usage {
         self.output += n("output");
         self.cache_read += n("cache_read");
         self.cache_write += n("cache_write");
-        let prompt = n("input") + n("cache_read") + n("cache_write");
+        let (input, cache_read, cache_write) = (n("input"), n("cache_read"), n("cache_write"));
+        let prompt = input + cache_read + cache_write;
         if prompt > 0 {
             self.context = prompt;
+            self.last_input = input;
+            self.last_cache_read = cache_read;
+            self.last_cache_write = cache_write;
         }
     }
     fn cache_hit(&self) -> Option<f64> {
-        let prompt = self.input + self.cache_read + self.cache_write;
-        (self.cache_read + self.cache_write > 0 && self.context > 0)
-            .then(|| self.cache_read as f64 / prompt.max(1) as f64 * 100.0)
+        let prompt = self.last_input + self.last_cache_read + self.last_cache_write;
+        (self.last_cache_read + self.last_cache_write > 0)
+            .then(|| self.last_cache_read as f64 / prompt.max(1) as f64 * 100.0)
     }
 }
 
@@ -585,13 +650,22 @@ struct ToolCard {
 
 enum Entry {
     User(String),
-    Assistant { text: String, expanded: bool },
-    Thinking { text: String, expanded: bool },
+    Assistant {
+        text: String,
+        expanded: bool,
+    },
+    Thinking {
+        text: String,
+        expanded: bool,
+    },
     Tool(ToolCard),
     Error(String),
     Notice(String),
     /// A bordered block, like pi's `/session`, `/hotkeys`, `/changelog`.
-    Panel { title: String, body: String },
+    Panel {
+        title: String,
+        body: String,
+    },
 }
 
 impl Entry {
@@ -654,6 +728,11 @@ struct App {
     /// Highest useful scroll offset, from the last frame.
     max_scroll: std::cell::Cell<u16>,
     sel: usize,
+    /// Submitted prompts and commands, oldest first (pi's editor history).
+    history: Vec<String>,
+    /// Cursor into `history`; `history.len()` means the live draft.
+    history_pos: usize,
+    draft: String,
     /// (provider, id) advertised by the unit.
     models: Vec<(String, String)>,
     model_names: std::collections::HashMap<String, String>,
@@ -700,6 +779,9 @@ impl App {
             page: std::cell::Cell::new(20),
             max_scroll: std::cell::Cell::new(0),
             sel: 0,
+            history: Vec::new(),
+            history_pos: 0,
+            draft: String::new(),
             models: Vec::new(),
             model_names: std::collections::HashMap::new(),
             commands: COMMANDS
@@ -832,9 +914,14 @@ impl App {
                             let mut out = std::io::stdout();
                             let _ = write!(out, "\u{1b}]52;c;{}\u{7}", base64(text.as_bytes()));
                             let _ = out.flush();
-                            self.set_notice(Entry::Notice(format!("\u{b7} copied {} bytes", text.len())));
+                            self.set_notice(Entry::Notice(format!(
+                                "\u{b7} copied {} bytes",
+                                text.len()
+                            )));
                         } else {
-                            self.set_notice(Entry::Notice("\u{b7} no assistant message yet".into()));
+                            self.set_notice(Entry::Notice(
+                                "\u{b7} no assistant message yet".into(),
+                            ));
                         }
                     }
                     "export_html" => self.set_notice(Entry::Notice(format!(
@@ -887,8 +974,10 @@ impl App {
                             text("messageCount"),
                             text("entryCount"),
                         );
-                        self.entries
-                            .push(Entry::Panel { title: "Session Info".into(), body });
+                        self.entries.push(Entry::Panel {
+                            title: "Session Info".into(),
+                            body,
+                        });
                     }
                     "get_commands" => {
                         if let Some(list) = data.get("commands").and_then(Value::as_array) {
@@ -1221,6 +1310,7 @@ fn main() -> std::io::Result<()> {
                                     }
                                 } else {
                                     app.entries.push(Entry::User(text.clone()));
+                                    app.push_history(&text);
                                     app.input.clear();
                                     app.scroll.set(0);
                                     app.running = true;
@@ -1231,10 +1321,8 @@ fn main() -> std::io::Result<()> {
                                 }
                             }
                         }
-                        KeyCode::Up => app
-                            .scroll
-                            .set(app.scroll.get().saturating_add(1).min(app.max_scroll.get())),
-                        KeyCode::Down => app.scroll.set(app.scroll.get().saturating_sub(1)),
+                        KeyCode::Up => history_prev(&mut app),
+                        KeyCode::Down => history_next(&mut app),
                         KeyCode::PageUp => app.scroll.set(
                             app.scroll
                                 .get()
@@ -1444,15 +1532,30 @@ fn run_command(app: &mut App, stdin: &mut ChildStdin, text: &str) -> bool {
     };
     match name {
         "quit" => return true,
-        "new" => send(app, stdin, serde_json::json!({ "type": "new_session" }), "new"),
-        "compact" => send(app, stdin, serde_json::json!({ "type": "compact" }), "compact"),
+        "new" => send(
+            app,
+            stdin,
+            serde_json::json!({ "type": "new_session" }),
+            "new",
+        ),
+        "compact" => send(
+            app,
+            stdin,
+            serde_json::json!({ "type": "compact" }),
+            "compact",
+        ),
         "session" => send(
             app,
             stdin,
             serde_json::json!({ "type": "get_session_stats" }),
             "session",
         ),
-        "reload" => send(app, stdin, serde_json::json!({ "type": "get_state" }), "reload"),
+        "reload" => send(
+            app,
+            stdin,
+            serde_json::json!({ "type": "get_state" }),
+            "reload",
+        ),
         "export" => send(
             app,
             stdin,
@@ -1485,7 +1588,12 @@ fn run_command(app: &mut App, stdin: &mut ChildStdin, text: &str) -> bool {
             app.sel = 0;
         }
         "tree" => {
-            send(app, stdin, serde_json::json!({ "type": "get_tree" }), "tree");
+            send(
+                app,
+                stdin,
+                serde_json::json!({ "type": "get_tree" }),
+                "tree",
+            );
             app.overlay = Overlay::Tree;
             app.sel = 0;
         }
@@ -1594,8 +1702,14 @@ fn draw_palette(frame: &mut ratatui::Frame, area: Rect, app: &App, matches: &[Su
             Style::default().fg(Theme::TEXT)
         };
         lines.push(Line::from(vec![
-            Span::styled(format!(" {} {}", if selected { "\u{276f}" } else { " " }, s.label), style),
-            Span::styled(format!("   {}", s.detail), Style::default().fg(Theme::MUTED)),
+            Span::styled(
+                format!(" {} {}", if selected { "\u{276f}" } else { " " }, s.label),
+                style,
+            ),
+            Span::styled(
+                format!("   {}", s.detail),
+                Style::default().fg(Theme::MUTED),
+            ),
         ]));
     }
     if let Some(s) = matches.get(sel) {
@@ -2397,6 +2511,34 @@ mod tests {
     }
 
     #[test]
+    #[test]
+    fn cache_hit_uses_the_latest_prompt() {
+        let mut usage = Usage::default();
+        usage.absorb(&serde_json::json!({ "input": 1000, "cache_read": 0, "cache_write": 0 }));
+        usage.absorb(&serde_json::json!({ "input": 100, "cache_read": 900, "cache_write": 0 }));
+        // Latest prompt is 100 + 900 = 1000 with 900 cached -> 90%, not the
+        // session average (900 / 2000 = 45%).
+        assert!((usage.cache_hit().unwrap() - 90.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn history_browses_previous_prompts() {
+        let mut app = App::new("m".into(), "p".into(), "off".into(), 65536);
+        app.push_history("first");
+        app.push_history("second");
+        app.input = "draft".into();
+        history_prev(&mut app);
+        assert_eq!(app.input, "second");
+        history_prev(&mut app);
+        assert_eq!(app.input, "first");
+        history_prev(&mut app);
+        assert_eq!(app.input, "first");
+        history_next(&mut app);
+        assert_eq!(app.input, "second");
+        history_next(&mut app);
+        assert_eq!(app.input, "draft");
+    }
+
     fn long_transcript_render_cost() {
         let mut app = App::new("m".into(), "p".into(), "off".into(), 65536);
         for i in 0..2000 {
