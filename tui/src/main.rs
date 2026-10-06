@@ -79,16 +79,6 @@ const COMMANDS: &[Cmd] = &[
         args: Some("<path>"),
     },
     Cmd {
-        name: "share",
-        desc: "Share the session",
-        args: None,
-    },
-    Cmd {
-        name: "bug",
-        desc: "Report a bug",
-        args: Some("<description>"),
-    },
-    Cmd {
         name: "copy",
         desc: "Copy the last agent message",
         args: None,
@@ -122,21 +112,6 @@ const COMMANDS: &[Cmd] = &[
         name: "clone",
         desc: "Duplicate the session",
         args: None,
-    },
-    Cmd {
-        name: "trust",
-        desc: "Save a project trust decision",
-        args: None,
-    },
-    Cmd {
-        name: "login",
-        desc: "Configure provider auth",
-        args: Some("<provider>"),
-    },
-    Cmd {
-        name: "logout",
-        desc: "Remove provider auth",
-        args: Some("<provider>"),
     },
     Cmd {
         name: "new",
@@ -1541,21 +1516,6 @@ fn run_command(app: &mut App, stdin: &mut ChildStdin, text: &str) -> bool {
             title: "Keyboard Shortcuts".into(),
             body: HOTKEYS.into(),
         }),
-        "trust" => app.set_notice(Entry::Notice(
-            "pipelets runs with the operator's env; no project trust".into(),
-        )),
-        "login" => app.set_notice(Entry::Notice(
-            "credentials come from the daemon env (PIPELETS_*/OPENAI_*)".into(),
-        )),
-        "logout" => app.set_notice(Entry::Notice(
-            "credentials come from the daemon env; unset them to log out".into(),
-        )),
-        "share" => app.set_notice(Entry::Notice(
-            "share is not available in pipelets-tui".into(),
-        )),
-        "bug" => app.set_notice(Entry::Notice(
-            "file issues against Vedaru/pipelets".into(),
-        )),
         "thinking" => {
             if args.is_empty() {
                 app.overlay = Overlay::Thinking;
