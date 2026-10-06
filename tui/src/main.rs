@@ -295,7 +295,10 @@ struct App {
     running: bool,
     auto_compact: bool,
     tick: usize,
-    scroll: u16,
+    scroll: std::cell::Cell<u16>,
+    last_total: std::cell::Cell<usize>,
+    /// Anchor the view top for the next frame (set on expand/collapse).
+    anchor: std::cell::Cell<bool>,
     layout: RefCell<LineIndex>,
     /// Set when a cached (non-tail) entry changed and the cache must rebuild.
     dirty: std::cell::Cell<bool>,
@@ -327,7 +330,9 @@ impl App {
             running: true,
             auto_compact: true,
             tick: 0,
-            scroll: 0,
+            scroll: std::cell::Cell::new(0),
+            last_total: std::cell::Cell::new(0),
+            anchor: std::cell::Cell::new(false),
             layout: RefCell::new(LineIndex::default()),
             dirty: std::cell::Cell::new(false),
             last_len: std::cell::Cell::new(0),
@@ -602,6 +607,7 @@ fn main() -> std::io::Result<()> {
                         KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                             toggle_all(&mut app);
                             app.dirty.set(true);
+                            app.anchor.set(true);
                         }
                         KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                             toggle_thinking(&mut app)
@@ -638,7 +644,7 @@ fn main() -> std::io::Result<()> {
                                 } else {
                                     app.entries.push(Entry::User(text.clone()));
                                     app.input.clear();
-                                    app.scroll = 0;
+                                    app.scroll.set(0);
                                     app.running = true;
                                     app.status = "working".into();
                                     let req = serde_json::json!({ "type": "prompt", "text": text });
@@ -647,21 +653,21 @@ fn main() -> std::io::Result<()> {
                                 }
                             }
                         }
-                        KeyCode::Up => {
-                            app.scroll = app.scroll.saturating_add(1).min(app.max_scroll.get())
-                        }
-                        KeyCode::Down => app.scroll = app.scroll.saturating_sub(1),
-                        KeyCode::PageUp => {
-                            app.scroll = app
-                                .scroll
+                        KeyCode::Up => app
+                            .scroll
+                            .set(app.scroll.get().saturating_add(1).min(app.max_scroll.get())),
+                        KeyCode::Down => app.scroll.set(app.scroll.get().saturating_sub(1)),
+                        KeyCode::PageUp => app.scroll.set(
+                            app.scroll
+                                .get()
                                 .saturating_add(app.page.get() as u16)
-                                .min(app.max_scroll.get())
-                        }
-                        KeyCode::PageDown => {
-                            app.scroll = app.scroll.saturating_sub(app.page.get() as u16)
-                        }
-                        KeyCode::Home => app.scroll = u16::MAX,
-                        KeyCode::End => app.scroll = 0,
+                                .min(app.max_scroll.get()),
+                        ),
+                        KeyCode::PageDown => app
+                            .scroll
+                            .set(app.scroll.get().saturating_sub(app.page.get() as u16)),
+                        KeyCode::Home => app.scroll.set(u16::MAX),
+                        KeyCode::End => app.scroll.set(0),
                         KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                             app.input.clear();
                             app.sel = 0;
@@ -682,16 +688,19 @@ fn main() -> std::io::Result<()> {
                     }
                 }
                 CEvent::Mouse(m) => match m.kind {
-                    MouseEventKind::ScrollUp => {
-                        app.scroll = app.scroll.saturating_add(3).min(app.max_scroll.get())
+                    MouseEventKind::ScrollUp => app
+                        .scroll
+                        .set(app.scroll.get().saturating_add(3).min(app.max_scroll.get())),
+                    MouseEventKind::ScrollDown => {
+                        app.scroll.set(app.scroll.get().saturating_sub(3))
                     }
-                    MouseEventKind::ScrollDown => app.scroll = app.scroll.saturating_sub(3),
                     MouseEventKind::Down(MouseButton::Left) => {
                         let owner = app.row_owner.borrow().get(m.row as usize).copied();
                         if let Some(index) = owner {
                             if let Some(entry) = app.entries.get_mut(index) {
                                 entry.hit();
                                 app.dirty.set(true);
+                                app.anchor.set(true);
                             }
                         }
                     }
@@ -732,9 +741,20 @@ fn build_window(app: &App, width: usize, height: usize) -> (Vec<Line<'static>>, 
     let live_len = live.len();
     let spinner = app.running;
     let total = l.total + live_len + usize::from(spinner);
+    // Keep the viewport anchored when the transcript grows/shrinks while
+    // scrolled up, so expanding a block does not scroll it out from under you.
+    if app.anchor.get() || app.scroll.get() > 0 {
+        let delta = total as isize - app.last_total.get() as isize;
+        if delta != 0 {
+            app.scroll
+                .set((app.scroll.get() as isize + delta).max(0) as u16);
+        }
+    }
+    app.anchor.set(false);
+    app.last_total.set(total);
     let max_scroll = total.saturating_sub(height);
     app.max_scroll.set(max_scroll as u16);
-    let scroll = (app.scroll as usize).min(max_scroll);
+    let scroll = (app.scroll.get() as usize).min(max_scroll);
     let start = max_scroll - scroll;
     let end = (start + height).min(total);
 
@@ -1755,7 +1775,7 @@ mod tests {
         let _ = build_window(&app, 100, 30);
         let start = std::time::Instant::now();
         for k in 0..200u32 {
-            app.scroll = (k * 37) as u16;
+            app.scroll.set((k * 37) as u16);
             let (v, _) = build_window(&app, 100, 30);
             assert_eq!(v.len(), 30);
         }
@@ -1803,11 +1823,32 @@ mod tests {
         let _ = build_window(&app, 100, 30);
         let start = std::time::Instant::now();
         for k in 0..200u32 {
-            app.scroll = (k * 7) as u16;
+            app.scroll.set((k * 7) as u16);
             let _ = build_window(&app, 100, 30);
         }
         let e = start.elapsed();
         eprintln!("200 scrolled frames over 20x1000-line blocks: {e:?}");
         assert!(e.as_millis() < 500, "{e:?}");
+    }
+
+    #[test]
+    fn clicking_a_code_block_expands_it() {
+        let mut app = App::new("m".into(), "p".into(), "off".into(), 65536);
+        let mut block = String::from("```rust\n");
+        for i in 0..40 {
+            block.push_str(&format!("let x{i} = {i};\n"));
+        }
+        block.push_str("```");
+        app.entries.push(Entry::Assistant {
+            text: block,
+            expanded: false,
+        });
+        let last = app.entries.len() - 1;
+        let compact = render_entry(&app.entries[last], last, 100).0.len();
+        app.entries[last].hit();
+        let expanded = render_entry(&app.entries[last], last, 100).0.len();
+        eprintln!("compact={compact} expanded={expanded}");
+        assert!(compact < expanded, "compact={compact} expanded={expanded}");
+        assert!(expanded >= 40, "expanded={expanded}");
     }
 }
