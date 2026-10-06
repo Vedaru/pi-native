@@ -50,6 +50,14 @@ impl Theme {
     const MD_HEADING: Color = Color::Rgb(205, 154, 34);
     const MD_CODE: Color = Color::Rgb(167, 152, 215);
     const MD_CODE_BLOCK: Color = Color::Rgb(104, 183, 141);
+    const MD_CODE_BLOCK_BORDER: Color = Color::Rgb(157, 165, 169);
+    const SYNTAX_KEYWORD: Color = Color::Rgb(105, 173, 208);
+    const SYNTAX_FUNCTION: Color = Color::Rgb(205, 154, 34);
+    const SYNTAX_STRING: Color = Color::Rgb(222, 141, 90);
+    const SYNTAX_NUMBER: Color = Color::Rgb(104, 183, 141);
+    const SYNTAX_TYPE: Color = Color::Rgb(167, 152, 215);
+    const SYNTAX_COMMENT: Color = Color::Rgb(157, 165, 169);
+    const SYNTAX_OPERATOR: Color = Color::Rgb(118, 129, 134);
     const MD_BULLET: Color = Color::Rgb(167, 152, 215);
     const DIFF_ADDED: Color = Color::Rgb(104, 183, 141);
     const DIFF_REMOVED: Color = Color::Rgb(234, 127, 129);
@@ -385,6 +393,13 @@ fn main() -> std::io::Result<()> {
                     KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         break 'outer
                     }
+                    // pi: app.tools.expand (ctrl+o), app.thinking.toggle (ctrl+t).
+                    KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        toggle_tools(&mut app)
+                    }
+                    KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        toggle_thinking(&mut app)
+                    }
                     KeyCode::Enter => {
                         let text = app.input.trim().to_string();
                         if !text.is_empty() {
@@ -691,18 +706,23 @@ fn render_tool(out: &mut Vec<Line<'static>>, card: &ToolCard, width: usize) {
 
 fn render_assistant(out: &mut Vec<Line<'static>>, text: &str, width: usize) {
     let mut in_code = false;
+    let mut lang = String::new();
+    let mut code: Vec<String> = Vec::new();
     for raw in text.split('\n') {
-        if raw.trim_start().starts_with("```") {
-            in_code = !in_code;
+        let trimmed = raw.trim_start();
+        if trimmed.starts_with("```") {
+            if in_code {
+                render_code_block(out, &code, &lang, width);
+                code.clear();
+                in_code = false;
+            } else {
+                in_code = true;
+                lang = trimmed.trim_start_matches('`').trim().to_string();
+            }
             continue;
         }
         if in_code {
-            for chunk in wrap(raw, width.saturating_sub(4)) {
-                out.push(Line::from(Span::styled(
-                    format!("   {chunk}"),
-                    Style::default().fg(Theme::MD_CODE_BLOCK),
-                )));
-            }
+            code.push(raw.to_string());
             continue;
         }
         let (style, body, marker) = markdown_line(raw);
@@ -725,6 +745,260 @@ fn render_assistant(out: &mut Vec<Line<'static>>, text: &str, width: usize) {
             }
             spans.extend(inline_spans(&chunk, style));
             out.push(Line::from(spans));
+        }
+    }
+    if in_code {
+        render_code_block(out, &code, &lang, width);
+    }
+}
+
+/// pi renders a ```lang border, the highlighted body, then a ``` border
+/// (`components/markdown.ts`).
+fn render_code_block(out: &mut Vec<Line<'static>>, code: &[String], lang: &str, width: usize) {
+    let _ = width;
+    let border = Style::default().fg(Theme::MD_CODE_BLOCK_BORDER);
+    out.push(Line::from(Span::styled(format!("  ```{lang}"), border)));
+    for line in code {
+        let mut spans = vec![Span::raw("  ")];
+        spans.extend(highlight(line, lang));
+        out.push(Line::from(spans));
+    }
+    out.push(Line::from(Span::styled("  ```", border)));
+}
+
+/// A small highlighter over pi's `syntax*` tokens. pi delegates to cli-highlight
+/// (highlight.js); this covers the common languages without the dependency, and
+/// uses the same token colours pi maps its highlight scopes to.
+fn highlight(line: &str, lang: &str) -> Vec<Span<'static>> {
+    let kw = keywords(lang);
+    let ty = types(lang);
+    let hash_comment = matches!(
+        lang,
+        "python" | "py" | "bash" | "sh" | "shell" | "yaml" | "yml" | "ruby" | "rb" | "toml"
+    );
+    let chars: Vec<char> = line.chars().collect();
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut buf = String::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if (c == '/' && chars.get(i + 1) == Some(&'/')) || (hash_comment && c == '#') {
+            flush_buf(&mut buf, &mut spans);
+            spans.push(Span::styled(
+                chars[i..].iter().collect::<String>(),
+                Style::default().fg(Theme::SYNTAX_COMMENT),
+            ));
+            return spans;
+        }
+        if c == '"' || c == '\'' || c == '`' {
+            flush_buf(&mut buf, &mut spans);
+            let quote = c;
+            let mut s = String::from(c);
+            i += 1;
+            while i < chars.len() {
+                let ch = chars[i];
+                s.push(ch);
+                i += 1;
+                if ch == '\\' && i < chars.len() {
+                    s.push(chars[i]);
+                    i += 1;
+                    continue;
+                }
+                if ch == quote {
+                    break;
+                }
+            }
+            spans.push(Span::styled(s, Style::default().fg(Theme::SYNTAX_STRING)));
+            continue;
+        }
+        if c.is_ascii_digit() {
+            flush_buf(&mut buf, &mut spans);
+            let mut n = String::new();
+            while i < chars.len()
+                && (chars[i].is_ascii_alphanumeric() || chars[i] == '.' || chars[i] == '_')
+            {
+                n.push(chars[i]);
+                i += 1;
+            }
+            spans.push(Span::styled(n, Style::default().fg(Theme::SYNTAX_NUMBER)));
+            continue;
+        }
+        if c.is_alphabetic() || c == '_' {
+            flush_buf(&mut buf, &mut spans);
+            let mut w = String::new();
+            while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_') {
+                w.push(chars[i]);
+                i += 1;
+            }
+            let mut j = i;
+            while j < chars.len() && chars[j] == ' ' {
+                j += 1;
+            }
+            let color = if kw.contains(&w.as_str()) {
+                Theme::SYNTAX_KEYWORD
+            } else if ty.contains(&w.as_str()) {
+                Theme::SYNTAX_TYPE
+            } else if chars.get(j) == Some(&'(') {
+                Theme::SYNTAX_FUNCTION
+            } else {
+                Theme::TEXT
+            };
+            spans.push(Span::styled(w, Style::default().fg(color)));
+            continue;
+        }
+        if "(){}[]<>=+-*/%!&|^~?:;,.".contains(c) {
+            flush_buf(&mut buf, &mut spans);
+            spans.push(Span::styled(
+                c.to_string(),
+                Style::default().fg(Theme::SYNTAX_OPERATOR),
+            ));
+            i += 1;
+            continue;
+        }
+        buf.push(c);
+        i += 1;
+    }
+    flush_buf(&mut buf, &mut spans);
+    spans
+}
+
+fn flush_buf(buf: &mut String, spans: &mut Vec<Span<'static>>) {
+    if !buf.is_empty() {
+        spans.push(Span::styled(
+            std::mem::take(buf),
+            Style::default().fg(Theme::TEXT),
+        ));
+    }
+}
+
+fn keywords(lang: &str) -> &'static [&'static str] {
+    match lang {
+        "rust" | "rs" => &[
+            "fn", "let", "mut", "pub", "use", "mod", "struct", "enum", "impl", "trait", "for",
+            "while", "loop", "if", "else", "match", "return", "self", "Self", "async", "await",
+            "move", "ref", "where", "const", "static", "type", "as", "in", "crate", "super", "dyn",
+            "unsafe", "extern", "box", "true", "false",
+        ],
+        "python" | "py" => &[
+            "def", "class", "import", "from", "as", "if", "elif", "else", "for", "while", "return",
+            "yield", "with", "try", "except", "finally", "raise", "lambda", "pass", "break",
+            "continue", "and", "or", "not", "in", "is", "None", "True", "False", "self", "async",
+            "await", "global", "nonlocal", "assert", "del",
+        ],
+        "javascript" | "js" | "typescript" | "ts" | "tsx" | "jsx" => &[
+            "function",
+            "const",
+            "let",
+            "var",
+            "return",
+            "if",
+            "else",
+            "for",
+            "while",
+            "class",
+            "extends",
+            "new",
+            "import",
+            "export",
+            "from",
+            "default",
+            "async",
+            "await",
+            "try",
+            "catch",
+            "finally",
+            "throw",
+            "typeof",
+            "instanceof",
+            "this",
+            "null",
+            "undefined",
+            "true",
+            "false",
+            "interface",
+            "type",
+            "enum",
+            "public",
+            "private",
+            "readonly",
+            "static",
+        ],
+        "bash" | "sh" | "shell" => &[
+            "if", "then", "else", "fi", "for", "do", "done", "while", "case", "esac", "function",
+            "return", "echo", "export", "local", "in", "set", "source",
+        ],
+        "go" => &[
+            "func",
+            "package",
+            "import",
+            "var",
+            "const",
+            "type",
+            "struct",
+            "interface",
+            "map",
+            "chan",
+            "go",
+            "defer",
+            "return",
+            "if",
+            "else",
+            "for",
+            "range",
+            "switch",
+            "case",
+            "default",
+            "break",
+            "continue",
+            "nil",
+            "true",
+            "false",
+        ],
+        "json" => &["true", "false", "null"],
+        _ => &[
+            "true", "false", "null", "if", "else", "return", "function", "class", "import", "from",
+            "def",
+        ],
+    }
+}
+
+fn types(lang: &str) -> &'static [&'static str] {
+    match lang {
+        "rust" | "rs" => &[
+            "String", "Vec", "Option", "Result", "Box", "Arc", "Rc", "HashMap", "HashSet",
+            "BTreeMap", "Cow", "str", "bool", "char", "u8", "u16", "u32", "u64", "usize", "i8",
+            "i16", "i32", "i64", "isize", "f32", "f64", "Self",
+        ],
+        "python" | "py" => &[
+            "str", "int", "float", "bool", "list", "dict", "set", "tuple", "bytes", "Any",
+        ],
+        "go" => &[
+            "string", "int", "int64", "float64", "bool", "error", "byte", "rune", "any",
+        ],
+        _ => &["string", "number", "boolean", "object", "any", "void"],
+    }
+}
+
+fn toggle_tools(app: &mut App) {
+    let any_collapsed = app
+        .entries
+        .iter()
+        .any(|e| matches!(e, Entry::Tool(c) if !c.expanded));
+    for e in app.entries.iter_mut() {
+        if let Entry::Tool(c) = e {
+            c.expanded = any_collapsed;
+        }
+    }
+}
+
+fn toggle_thinking(app: &mut App) {
+    let any_expanded = app
+        .entries
+        .iter()
+        .any(|e| matches!(e, Entry::Thinking { expanded, .. } if *expanded));
+    for e in app.entries.iter_mut() {
+        if let Entry::Thinking { expanded, .. } = e {
+            *expanded = !any_expanded;
         }
     }
 }
