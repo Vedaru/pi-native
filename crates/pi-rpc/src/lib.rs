@@ -807,23 +807,55 @@ struct SessionState {
 /// pi's thinking levels, in order.
 /// Slash commands this core serves over RPC, in pi's built-in shape.
 const BUILTIN_COMMANDS: &[(&str, &str, Option<&str>)] = &[
-    ("settings", "Open settings", None),
-    ("model", "Select or set the model", Some("<provider/model>")),
-    ("tree", "Show the session tree", None),
-    ("thinking", "Set the thinking level", Some("<level>")),
-    ("scoped-models", "Models to cycle with ctrl+p", None),
-    ("export", "Export the session", None),
-    ("import", "Resume a session from a file", Some("<path>")),
-    ("share", "Share the session", None),
-    ("bug", "Report a bug", Some("<description>")),
-    ("copy", "Copy the last agent message", None),
-    ("name", "Set the session display name", Some("<name>")),
+    ("settings", "Open settings menu", None),
+    (
+        "model",
+        "Select model (opens selector UI)",
+        Some("<provider/model>"),
+    ),
+    ("tree", "Navigate session tree (switch branches)", None),
+    ("thinking", "Set thinking level", Some("<level>")),
+    (
+        "scoped-models",
+        "Enable/disable models for Ctrl+P cycling",
+        None,
+    ),
+    (
+        "export",
+        "Export session (HTML default, or specify path: .html/.jsonl)",
+        None,
+    ),
+    (
+        "import",
+        "Import and resume a session from a JSONL file",
+        None,
+    ),
+    ("share", "Share session as a secret GitHub gist", None),
+    (
+        "bug",
+        "Report a bug to the Pi developers",
+        Some("<description>"),
+    ),
+    ("copy", "Copy last agent message to clipboard", None),
+    ("name", "Set session display name", None),
     ("session", "Show session info and stats", None),
-    ("changelog", "Show the changelog", None),
-    ("hotkeys", "Show keyboard shortcuts", None),
-    ("fork", "Fork from a previous message", None),
-    ("clone", "Duplicate the session", None),
-    ("trust", "Save the project trust decision", None),
+    ("changelog", "Show changelog entries", None),
+    ("hotkeys", "Show all keyboard shortcuts", None),
+    (
+        "fork",
+        "Create a new fork from a previous user message",
+        None,
+    ),
+    (
+        "clone",
+        "Duplicate the current session at the current position",
+        None,
+    ),
+    (
+        "trust",
+        "Save project trust decision for future sessions",
+        None,
+    ),
     (
         "login",
         "Configure provider authentication",
@@ -831,9 +863,13 @@ const BUILTIN_COMMANDS: &[(&str, &str, Option<&str>)] = &[
     ),
     ("logout", "Remove provider authentication", None),
     ("new", "Start a new session", None),
-    ("compact", "Compact the session context", None),
-    ("resume", "Resume a different session", Some("<path>")),
-    ("reload", "Reload configuration", None),
+    ("compact", "Manually compact the session context", None),
+    ("resume", "Resume a different session", None),
+    (
+        "reload",
+        "Reload keybindings, extensions, skills, prompts, themes, and context files",
+        None,
+    ),
     ("quit", "Quit", None),
 ];
 

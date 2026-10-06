@@ -210,6 +210,102 @@ fn toggle_row(label: &str, on: bool, action: &str) -> Sugg {
     }
 }
 
+/// pi's `LEVEL_DESCRIPTIONS` from `thinking-selector.ts`.
+const THINKING_DESCS: &[(&str, &str)] = &[
+    ("off", "No reasoning"),
+    ("minimal", "Very brief reasoning (~1k tokens)"),
+    ("low", "Light reasoning (~2k tokens)"),
+    ("medium", "Moderate reasoning (~8k tokens)"),
+    ("high", "Deep reasoning (~16k tokens)"),
+    ("xhigh", "Extra-high reasoning (~32k tokens)"),
+    ("max", "Maximum reasoning"),
+];
+
+/// Shorten on a char boundary, ellipsizing.
+fn shorten(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let head: String = text.chars().take(max.saturating_sub(1)).collect();
+    format!("{head}\u{2026}")
+}
+
+fn thinking_items(app: &App) -> Vec<Sugg> {
+    THINKING_DESCS
+        .iter()
+        .map(|(level, desc)| Sugg {
+            label: format!(
+                "{} {level}",
+                if *level == app.thinking_level { "\u{2713}" } else { " " }
+            ),
+            fill: format!("!thinking:{level}"),
+            detail: desc.to_string(),
+        })
+        .collect()
+}
+
+fn fork_items(app: &App) -> Vec<Sugg> {
+    let total = app.fork_messages.len();
+    app.fork_messages
+        .iter()
+        .enumerate()
+        .map(|(i, message)| {
+            let id = message.get("id").and_then(Value::as_str).unwrap_or("");
+            let raw = message.get("text").and_then(Value::as_str).unwrap_or("");
+            Sugg {
+                label: shorten(&raw.replace('\n', " "), 68),
+                fill: format!("!fork:{id}"),
+                detail: format!("Message {} of {total}", i + 1),
+            }
+        })
+        .collect()
+}
+
+fn scoped_items(app: &App) -> Vec<Sugg> {
+    app.models
+        .iter()
+        .map(|(provider, id)| {
+            let key = format!("{provider}/{id}");
+            let mark = if app.scoped.contains(&key) { "[x]" } else { "[ ]" };
+            Sugg {
+                label: format!("{mark} {id} [{provider}]"),
+                fill: format!("!scope:{key}"),
+                detail: app.model_names.get(id).cloned().unwrap_or_default(),
+            }
+        })
+        .collect()
+}
+
+fn resume_items(app: &App) -> Vec<Sugg> {
+    app.sessions
+        .iter()
+        .map(|(path, name)| Sugg {
+            label: name.clone(),
+            fill: format!("!resume:{path}"),
+            detail: path.clone(),
+        })
+        .collect()
+}
+
+fn tree_items(app: &App) -> Vec<Sugg> {
+    app.tree
+        .iter()
+        .map(|node| {
+            let id = node.get("id").and_then(Value::as_str).unwrap_or("");
+            let text = node.get("text").and_then(Value::as_str).unwrap_or("");
+            Sugg {
+                label: if text.is_empty() {
+                    id.to_string()
+                } else {
+                    shorten(text, 68)
+                },
+                fill: String::new(),
+                detail: id.to_string(),
+            }
+        })
+        .collect()
+}
+
 fn settings_items(app: &App) -> Vec<Sugg> {
     vec![
         Sugg {
@@ -240,6 +336,55 @@ fn settings_items(app: &App) -> Vec<Sugg> {
             detail: "rename the session".into(),
         },
     ]
+}
+
+/// pi's keyboard-shortcuts block (`/hotkeys`), limited to this TUI's keys.
+const HOTKEYS: &str = "**Navigation**
+
+| Key | Action |
+|-----|--------|
+| `Up` / `Down` | Scroll the transcript |
+| `PageUp` / `PageDown` | Scroll by a page |
+| `Home` / `End` | Jump to start / end |
+
+**Editing**
+
+| Key | Action |
+|-----|--------|
+| `Enter` | Send message |
+| `Ctrl+U` | Clear editor |
+| `Ctrl+O` | Toggle tool output expansion |
+| `Ctrl+T` | Toggle thinking block visibility |
+
+**Other**
+
+| Key | Action |
+|-----|--------|
+| `Esc` | Close a menu; quit when idle |
+| `/` | Slash commands |
+
+";
+
+/// List session files next to the current one, newest first (pi's resume picker).
+fn collect_sessions(app: &mut App) {
+    app.sessions.clear();
+    let Ok(entries) = std::fs::read_dir(&app.session_dir) else {
+        return;
+    };
+    let mut files: Vec<std::path::PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|e| e == "jsonl"))
+        .collect();
+    files.sort();
+    for path in files.into_iter().rev().take(50) {
+        let name = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_string();
+        app.sessions.push((path.display().to_string(), name));
+    }
 }
 
 /// A short, human label for a command response (never the raw payload).
@@ -311,8 +456,14 @@ fn apply_setting(app: &mut App, stdin: &mut std::process::ChildStdin, action: &s
 }
 
 fn suggestions(app: &App) -> Vec<Sugg> {
-    if app.settings_open {
-        return settings_items(app);
+    match app.overlay {
+        Overlay::Settings => return settings_items(app),
+        Overlay::Thinking => return thinking_items(app),
+        Overlay::Fork => return fork_items(app),
+        Overlay::ScopedModels => return scoped_items(app),
+        Overlay::Resume => return resume_items(app),
+        Overlay::Tree => return tree_items(app),
+        Overlay::None => {}
     }
     let input = app.input.as_str();
     if let Some(rest) = input.strip_prefix("/model ") {
@@ -464,6 +615,8 @@ enum Entry {
     Tool(ToolCard),
     Error(String),
     Notice(String),
+    /// A bordered block, like pi's `/session`, `/hotkeys`, `/changelog`.
+    Panel { title: String, body: String },
 }
 
 impl Entry {
@@ -485,6 +638,18 @@ struct LineIndex {
     start: Vec<usize>,
     count: Vec<usize>,
     total: usize,
+}
+
+/// Which modal list is open, if any. Selectors mirror pi's components.
+#[derive(Clone, Copy, PartialEq)]
+enum Overlay {
+    None,
+    Settings,
+    Thinking,
+    Fork,
+    Tree,
+    ScopedModels,
+    Resume,
 }
 
 struct App {
@@ -518,7 +683,12 @@ struct App {
     models: Vec<(String, String)>,
     model_names: std::collections::HashMap<String, String>,
     commands: Vec<(String, String, Option<String>)>,
-    settings_open: bool,
+    overlay: Overlay,
+    fork_messages: Vec<Value>,
+    tree: Vec<Value>,
+    sessions: Vec<(String, String)>,
+    scoped: std::collections::HashSet<String>,
+    session_dir: std::path::PathBuf,
     notice: Option<(String, std::time::Instant)>,
     auto_compaction: bool,
     auto_retry: bool,
@@ -561,7 +731,12 @@ impl App {
                 .iter()
                 .map(|c| (c.name.into(), c.desc.into(), c.args.map(String::from)))
                 .collect(),
-            settings_open: false,
+            overlay: Overlay::None,
+            fork_messages: Vec::new(),
+            tree: Vec::new(),
+            sessions: Vec::new(),
+            scoped: std::collections::HashSet::new(),
+            session_dir: std::path::PathBuf::new(),
             notice: None,
             auto_compaction: true,
             auto_retry: true,
@@ -698,20 +873,47 @@ impl App {
                         .entries
                         .push(Entry::Notice(format!("\u{b7} cloned: {detail}"))),
                     "get_tree" => {
-                        let n = data
+                        self.tree = data
                             .get("tree")
                             .and_then(Value::as_array)
-                            .map(|a| a.len())
-                            .unwrap_or(0);
-                        self.set_notice(Entry::Notice(format!("\u{b7} session tree: {n} entries")));
+                            .cloned()
+                            .unwrap_or_default();
                     }
                     "get_fork_messages" => {
-                        let n = data
+                        self.fork_messages = data
                             .get("messages")
                             .and_then(Value::as_array)
-                            .map(|a| a.len())
-                            .unwrap_or(0);
-                        self.set_notice(Entry::Notice(format!("\u{b7} {n} forkable message(s)")));
+                            .cloned()
+                            .unwrap_or_default();
+                    }
+                    "get_session_stats" => {
+                        let text = |k: &str| {
+                            data.get(k)
+                                .map(|v| match v {
+                                    Value::String(s) => s.clone(),
+                                    other => other.to_string(),
+                                })
+                                .unwrap_or_default()
+                        };
+                        let name = text("sessionName");
+                        let label = if name.is_empty() || name == "null" {
+                            String::new()
+                        } else {
+                            format!("**Name:** {name}\n\n")
+                        };
+                        let file = text("sessionFile");
+                        let file = if file.is_empty() {
+                            "In-memory".to_string()
+                        } else {
+                            file
+                        };
+                        let body = format!(
+                            "{label}**File:** {file}\n\n**Messages:** {}\n\n**Entries:** {}",
+                            text("messageCount"),
+                            text("entryCount"),
+                        );
+                        self.entries
+                            .push(Entry::Panel { title: "Session Info".into(), body });
                     }
                     "get_commands" => {
                         if let Some(list) = data.get("commands").and_then(Value::as_array) {
@@ -762,6 +964,7 @@ impl App {
                     text("command"),
                     "get_tree"
                         | "get_fork_messages"
+                        | "get_session_stats"
                         | "get_commands"
                         | "export_html"
                         | "get_last_assistant_text"
@@ -922,6 +1125,10 @@ fn main() -> std::io::Result<()> {
     let mut terminal = Terminal::new(CrosstermBackend::new(out))?;
 
     let mut app = App::new(model, provider, thinking_level, context_window);
+    app.session_dir = std::path::Path::new(&session)
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_default();
     'outer: loop {
         loop {
             match rx.try_recv() {
@@ -952,8 +1159,8 @@ fn main() -> std::io::Result<()> {
                     };
                     match key.code {
                         KeyCode::Esc if palette_active => {
-                            if app.settings_open {
-                                app.settings_open = false;
+                            if app.overlay != Overlay::None {
+                                app.overlay = Overlay::None;
                             } else {
                                 app.input.clear();
                             }
@@ -983,14 +1190,41 @@ fn main() -> std::io::Result<()> {
                             let fill = sugg[sel].fill.clone();
                             if let Some(action) = fill.strip_prefix("!toggle:") {
                                 apply_setting(&mut app, &mut stdin, action);
+                            } else if let Some(level) = fill.strip_prefix("!thinking:") {
+                                app.overlay = Overlay::None;
+                                let req = serde_json::json!({ "type": "set_thinking_level", "level": level });
+                                let _ = writeln!(stdin, "{req}");
+                                let _ = stdin.flush();
+                            } else if let Some(entry) = fill.strip_prefix("!fork:") {
+                                app.overlay = Overlay::None;
+                                let req = serde_json::json!({ "type": "fork", "entryId": entry });
+                                let _ = writeln!(stdin, "{req}");
+                                let _ = stdin.flush();
+                            } else if let Some(key) = fill.strip_prefix("!scope:") {
+                                if !app.scoped.remove(key) {
+                                    app.scoped.insert(key.to_string());
+                                }
+                            } else if let Some(path) = fill.strip_prefix("!resume:") {
+                                app.overlay = Overlay::None;
+                                let req = serde_json::json!({ "type": "switch_session", "sessionPath": path });
+                                let _ = writeln!(stdin, "{req}");
+                                let _ = stdin.flush();
                             } else if let Some(target) = fill.strip_prefix("!palette:") {
-                                app.settings_open = false;
+                                app.overlay = Overlay::None;
                                 app.input = target.to_string();
                                 app.sel = 0;
                             } else if let Some(field) = fill.strip_prefix("!input:") {
-                                app.settings_open = false;
+                                app.overlay = Overlay::None;
                                 app.input = format!("/{field} ");
                                 app.sel = 0;
+                            } else if app.overlay == Overlay::None && !app.input.contains(' ') {
+                                // A bare command submits (pi opens the selector).
+                                let text = app.input.trim().to_string();
+                                app.input.clear();
+                                app.sel = 0;
+                                if !text.is_empty() && run_command(&mut app, &mut stdin, &text) {
+                                    break 'outer;
+                                }
                             } else if fill.ends_with(' ') {
                                 app.input = fill;
                                 app.sel = 0;
@@ -1229,13 +1463,9 @@ fn run_command(app: &mut App, stdin: &mut ChildStdin, text: &str) -> bool {
         Some((n, a)) => (n, a.trim()),
         None => (body, ""),
     };
-    let send = |app: &mut App, stdin: &mut ChildStdin, line: serde_json::Value, label: &str| {
+    let send = |_app: &mut App, stdin: &mut ChildStdin, line: serde_json::Value, _label: &str| {
         let _ = writeln!(stdin, "{line}");
         let _ = stdin.flush();
-        app.set_notice(Entry::Notice(format!("· /{label}")));
-    };
-    let usage = |app: &mut App, spec: &str| {
-        app.set_notice(Entry::Notice(format!("usage: {spec}")));
     };
     match name {
         "quit" => return true,
@@ -1247,9 +1477,7 @@ fn run_command(app: &mut App, stdin: &mut ChildStdin, text: &str) -> bool {
             serde_json::json!({ "type": "get_session_stats" }),
             "session",
         ),
-        "reload" => app
-            .entries
-            .push(Entry::Notice("\u{b7} reload is not needed (pipelets)".into())),
+        "reload" => send(app, stdin, serde_json::json!({ "type": "get_state" }), "reload"),
         "export" => send(
             app,
             stdin,
@@ -1258,7 +1486,9 @@ fn run_command(app: &mut App, stdin: &mut ChildStdin, text: &str) -> bool {
         ),
         "import" => {
             if args.is_empty() {
-                usage(app, "/import <path>");
+                collect_sessions(app);
+                app.overlay = Overlay::Resume;
+                app.sel = 0;
             } else {
                 send(
                     app,
@@ -1269,13 +1499,26 @@ fn run_command(app: &mut App, stdin: &mut ChildStdin, text: &str) -> bool {
             }
         }
         "clone" => send(app, stdin, serde_json::json!({ "type": "clone" }), "clone"),
-        "fork" => send(
-            app,
-            stdin,
-            serde_json::json!({ "type": "get_fork_messages" }),
-            "fork",
-        ),
-        "tree" => send(app, stdin, serde_json::json!({ "type": "get_tree" }), "tree"),
+        "fork" => {
+            send(
+                app,
+                stdin,
+                serde_json::json!({ "type": "get_fork_messages" }),
+                "fork",
+            );
+            app.overlay = Overlay::Fork;
+            app.sel = 0;
+        }
+        "tree" => {
+            send(app, stdin, serde_json::json!({ "type": "get_tree" }), "tree");
+            app.overlay = Overlay::Tree;
+            app.sel = 0;
+        }
+        "resume" => {
+            collect_sessions(app);
+            app.overlay = Overlay::Resume;
+            app.sel = 0;
+        }
         "copy" => send(
             app,
             stdin,
@@ -1283,32 +1526,40 @@ fn run_command(app: &mut App, stdin: &mut ChildStdin, text: &str) -> bool {
             "copy",
         ),
         "settings" => {
-            app.settings_open = true;
+            app.overlay = Overlay::Settings;
             app.sel = 0;
         }
-        "scoped-models" => app.input = "/model ".to_string(),
-        "changelog" => app
-            .entries
-            .push(Entry::Notice("\u{b7} no changelog bundled".into())),
-        "trust" => app
-            .entries
-            .push(Entry::Notice("\u{b7} pipelets runs with the operator's env; no project trust".into())),
-        "login" | "logout" => app.set_notice(Entry::Notice(
-            "\u{b7} credentials come from the daemon env (PIPELETS_*/OPENAI_*)".into(),
+        "scoped-models" => {
+            app.overlay = Overlay::ScopedModels;
+            app.sel = 0;
+        }
+        "changelog" => app.entries.push(Entry::Panel {
+            title: "What's New".into(),
+            body: "No changelog entries found.".into(),
+        }),
+        "hotkeys" => app.entries.push(Entry::Panel {
+            title: "Keyboard Shortcuts".into(),
+            body: HOTKEYS.into(),
+        }),
+        "trust" => app.set_notice(Entry::Notice(
+            "pipelets runs with the operator's env; no project trust".into(),
         )),
-        "share" => app
-            .entries
-            .push(Entry::Notice("\u{b7} share is not available in pipelets-tui".into())),
-        "bug" => app
-            .entries
-            .push(Entry::Notice("\u{b7} file issues against Vedaru/pipelets".into())),
-        "hotkeys" => app.set_notice(Entry::Notice(
-            "enter send \u{b7} esc quit \u{b7} ctrl+o tools \u{b7} ctrl+t thinking \u{b7} / commands"
-                .into(),
+        "login" => app.set_notice(Entry::Notice(
+            "credentials come from the daemon env (PIPELETS_*/OPENAI_*)".into(),
+        )),
+        "logout" => app.set_notice(Entry::Notice(
+            "credentials come from the daemon env; unset them to log out".into(),
+        )),
+        "share" => app.set_notice(Entry::Notice(
+            "share is not available in pipelets-tui".into(),
+        )),
+        "bug" => app.set_notice(Entry::Notice(
+            "file issues against Vedaru/pipelets".into(),
         )),
         "thinking" => {
             if args.is_empty() {
-                usage(app, "/thinking <off|minimal|low|medium|high|xhigh|max>");
+                app.overlay = Overlay::Thinking;
+                app.sel = 0;
             } else {
                 send(
                     app,
@@ -1320,7 +1571,8 @@ fn run_command(app: &mut App, stdin: &mut ChildStdin, text: &str) -> bool {
         }
         "model" => {
             if args.is_empty() {
-                usage(app, "/model <provider/model>");
+                app.input = "/model ".to_string();
+                app.sel = 0;
             } else {
                 let (provider, model) = match args.split_once('/') {
                     Some((p, m)) => (p.to_string(), m.to_string()),
@@ -1336,25 +1588,13 @@ fn run_command(app: &mut App, stdin: &mut ChildStdin, text: &str) -> bool {
         }
         "name" => {
             if args.is_empty() {
-                usage(app, "/name <name>");
+                app.set_notice(Entry::Notice("usage: /name <name>".into()));
             } else {
                 send(
                     app,
                     stdin,
                     serde_json::json!({ "type": "set_session_name", "name": args }),
                     "name",
-                );
-            }
-        }
-        "resume" => {
-            if args.is_empty() {
-                usage(app, "/resume <path>");
-            } else {
-                send(
-                    app,
-                    stdin,
-                    serde_json::json!({ "type": "switch_session", "sessionPath": args }),
-                    "resume",
                 );
             }
         }
@@ -1369,12 +1609,15 @@ fn draw_palette(frame: &mut ratatui::Frame, area: Rect, app: &App, matches: &[Su
     let sel = app.sel.min(matches.len().saturating_sub(1));
     const WIN: usize = 8;
     let start = if sel < WIN { 0 } else { sel + 1 - WIN };
-    let title = if app.settings_open {
-        " settings "
-    } else if app.input.starts_with("/model ") {
-        " models "
-    } else {
-        " commands "
+    let title = match app.overlay {
+        Overlay::Settings => " settings ",
+        Overlay::Thinking => " thinking ",
+        Overlay::Fork => " fork ",
+        Overlay::ScopedModels => " scoped models ",
+        Overlay::Resume => " resume ",
+        Overlay::Tree => " session tree ",
+        Overlay::None if app.input.starts_with("/model ") => " models ",
+        Overlay::None => " commands ",
     };
     let block = Block::default()
         .borders(Borders::ALL)
@@ -1538,6 +1781,21 @@ fn draw_editor(frame: &mut ratatui::Frame, area: Rect, app: &App) {
     frame.set_cursor_position((inner.x + 2 + app.input.chars().count() as u16, inner.y));
 }
 
+/// pi's `/session`, `/hotkeys`, `/changelog`: a bordered block in the transcript.
+fn render_panel(lines: &mut Vec<Line<'static>>, title: &str, body: &str, width: usize) {
+    let rule = "\u{2500}".repeat(width.clamp(8, 80));
+    let border = Style::default().fg(Theme::BORDER_MUTED);
+    lines.push(Line::from(Span::styled(rule.clone(), border)));
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        title.to_string(),
+        Style::default().fg(Theme::ACCENT),
+    )));
+    lines.push(Line::from(""));
+    render_assistant(lines, body, width, false);
+    lines.push(Line::from(Span::styled(rule, border)));
+}
+
 fn render_entry(entry: &Entry, index: usize, width: usize) -> (Vec<Line<'static>>, Vec<usize>) {
     let mut lines = Vec::new();
     match entry {
@@ -1553,6 +1811,7 @@ fn render_entry(entry: &Entry, index: usize, width: usize) -> (Vec<Line<'static>
             Theme::TOOL_PENDING_BG,
             Theme::MUTED,
         ),
+        Entry::Panel { title, body } => render_panel(&mut lines, title, body, width),
     }
     let mut owners = vec![index; lines.len()];
     lines.push(Line::from(""));

@@ -755,6 +755,11 @@ fn resolve_agent(
             .with_compaction(context_window, DEFAULT_RESERVE_TOKENS)
             .with_summarizer(Arc::new(ProviderSummarizer::new(make_provider(config))));
     }
+    if let Ok(level) = std::env::var("PIPELETS_THINKING") {
+        if !level.trim().is_empty() {
+            agent.set_thinking_level(level.trim());
+        }
+    }
     agent
 }
 
