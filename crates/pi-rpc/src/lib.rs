@@ -19,7 +19,10 @@ use pi_session::SessionFile;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+use swarm::Swarm;
+
 pub mod pi_events;
+mod swarm;
 
 pub use pi_events::{translate_all, PiEventAdapter};
 
@@ -85,6 +88,14 @@ pub enum Request {
     /// Queue a follow-up message (delivered with the next prompt).
     FollowUp {
         #[serde(alias = "message")]
+        text: String,
+    },
+    /// A peer unit's action, delivered to this unit's context (the swarm
+    /// inlet). Framed so the model reads it as peer context, not an instruction.
+    Shout {
+        from: String,
+        #[serde(default)]
+        kind: String,
         text: String,
     },
     /// Abort the current operation (a unit runs one turn at a time).
@@ -396,6 +407,16 @@ fn apply_command(
             Some(response(
                 id,
                 "follow_up",
+                serde_json::json!({ "disposition": "queued" }),
+            ))
+        }
+        Request::Shout { from, kind, text } => {
+            session.follow_up.push(format!(
+                "<shout from=\"{from}\" kind=\"{kind}\">{text}</shout>"
+            ));
+            Some(response(
+                id,
+                "shout",
                 serde_json::json!({ "disposition": "queued" }),
             ))
         }
@@ -1070,10 +1091,21 @@ fn build_tree(entries: &[serde_json::Value]) -> (Vec<serde_json::Value>, Option<
     (tree, leaf_id)
 }
 
-/// A reader/writer pair for the serve loop.
+/// A reader/writer pair plus the swarm inlet/outlet for the serve loop.
 struct SharedIo<R, W> {
     reader: std::cell::RefCell<R>,
     writer: std::cell::RefCell<W>,
+    swarm: std::cell::RefCell<Option<Swarm>>,
+}
+
+impl<R: std::io::BufRead, W: std::io::Write> SharedIo<R, W> {
+    fn new(reader: R, writer: W, unit_id: String) -> Self {
+        SharedIo {
+            reader: std::cell::RefCell::new(reader),
+            writer: std::cell::RefCell::new(writer),
+            swarm: std::cell::RefCell::new(Swarm::from_env(unit_id)),
+        }
+    }
 }
 
 impl<R: std::io::BufRead, W: std::io::Write> SharedIo<R, W> {
@@ -1083,6 +1115,18 @@ impl<R: std::io::BufRead, W: std::io::Write> SharedIo<R, W> {
             let _ = writeln!(writer, "{line}");
             let _ = writer.flush();
         }
+        if let Some(swarm) = self.swarm.borrow_mut().as_mut() {
+            swarm.emit(event);
+        }
+    }
+
+    /// Peer actions since the last poll, framed as shouts (the inlet).
+    fn take_shouts(&self) -> Vec<String> {
+        self.swarm
+            .borrow_mut()
+            .as_mut()
+            .map(Swarm::poll)
+            .unwrap_or_default()
     }
 
     /// The next valid request with its optional correlation id, or `None` at end
@@ -1170,6 +1214,9 @@ fn drive<R: std::io::BufRead, W: std::io::Write, F: FnMut(&Agent)>(
         version: PROTOCOL_VERSION,
     });
     while let Some((id, request)) = io.next_request() {
+        // Inlet: peer actions since the last turn join the follow-up queue, so
+        // they ride the same delivery as the unit's own follow-ups.
+        session.follow_up.extend(io.take_shouts());
         // A prompt to run after the request is applied. `reset` sets this too,
         // so a clear-and-re-run shares the streaming turn below.
         let mut run: Option<String> = None;
@@ -1283,10 +1330,11 @@ pub fn serve_with<R: std::io::BufRead, W: std::io::Write, F: FnMut(&Agent)>(
     writer: W,
     after_turn: F,
 ) -> Result<(), AgentError> {
-    let io = std::rc::Rc::new(SharedIo {
-        reader: std::cell::RefCell::new(reader),
-        writer: std::cell::RefCell::new(writer),
-    });
+    let io = std::rc::Rc::new(SharedIo::new(
+        reader,
+        writer,
+        format!("unit-{}", std::process::id()),
+    ));
     let mut session = SessionState::empty();
     drive(agent, &io, &mut session, ".", after_turn);
     Ok(())
@@ -1308,10 +1356,15 @@ pub fn serve_session<
     writer: W,
     after_turn: F,
 ) -> Result<(), AgentError> {
-    let io = std::rc::Rc::new(SharedIo {
-        reader: std::cell::RefCell::new(reader),
-        writer: std::cell::RefCell::new(writer),
-    });
+    let unit_id = session_path
+        .as_ref()
+        .and_then(|path| {
+            path.file_stem()
+                .and_then(|s| s.to_str())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| format!("unit-{}", std::process::id()));
+    let io = std::rc::Rc::new(SharedIo::new(reader, writer, unit_id));
     let mut session = SessionState::from_path(session_path, cwd, agent);
     drive(agent, &io, &mut session, cwd, after_turn);
     Ok(())

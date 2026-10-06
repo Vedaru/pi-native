@@ -617,6 +617,8 @@ fn system_prompt_for(cwd: &std::path::Path) -> String {
         package_dir: pi_package_dir(),
         cwd: cwd.to_string_lossy().into_owned(),
         context_files: load_project_context_files(cwd, &agent_dir()),
+        // A swarm citizen is told so; a standalone unit is byte-identical to pi.
+        swarm: std::env::var_os("PIPELETS_SWARM").is_some(),
         ..Default::default()
     };
     build_system_prompt(&options)

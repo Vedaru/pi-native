@@ -21,6 +21,15 @@ fn default_prompt_matches_pi() {
 }
 
 #[test]
+fn the_swarm_section_is_added_only_for_a_swarm_unit() {
+    let mut options = default_options();
+    assert!(!build_system_prompt(&options).contains("<swarm>"));
+    options.swarm = true;
+    let prompt = build_system_prompt(&options);
+    assert!(prompt.contains("<swarm>\nYou are one unit in a swarm"));
+}
+
+#[test]
 fn append_and_context_files_add_sections() {
     let mut options = default_options();
     options.append = Some("Extra instructions.".to_string());
