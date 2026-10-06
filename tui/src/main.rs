@@ -157,6 +157,7 @@ struct App {
     dirty: std::cell::Cell<bool>,
     /// Ctrl+O: expand tool output and long code blocks.
     expanded: std::cell::Cell<bool>,
+    last_len: std::cell::Cell<usize>,
     /// entry index owning each rendered transcript line (for click hit-testing)
     row_owner: Rc<RefCell<Vec<usize>>>,
 }
@@ -183,6 +184,7 @@ impl App {
             layout: RefCell::new(LineIndex::default()),
             dirty: std::cell::Cell::new(false),
             expanded: std::cell::Cell::new(false),
+            last_len: std::cell::Cell::new(0),
             row_owner: Rc::new(RefCell::new(Vec::new())),
         }
     }
@@ -224,7 +226,6 @@ impl App {
                 }));
             }
             "tool_end" => {
-                self.dirty.set(true);
                 let failed = v.get("is_error").and_then(Value::as_bool).unwrap_or(false);
                 let content = text("content");
                 for e in self.entries.iter_mut().rev() {
@@ -553,6 +554,7 @@ fn ensure_layout(app: &App, width: usize) {
             l.total += c;
         }
         app.dirty.set(false);
+        app.last_len.set(0);
         return;
     }
     if let Some(e) = app.entries.last() {
@@ -882,11 +884,11 @@ fn render_code_block(
     width: usize,
     _expanded: bool,
 ) {
-    let border = Style::default().fg(Theme::MD_CODE_BLOCK_BORDER);
-    out.push(Line::from(Span::styled(format!("  ```{lang}"), border)));
+    let _ = lang;
+    let bar = Style::default().fg(Theme::MD_CODE_BLOCK_BORDER);
     for line in code {
         for chunk in wrap_code(line, width.saturating_sub(4)) {
-            let mut spans = vec![Span::raw("  ")];
+            let mut spans = vec![Span::styled("  \u{2502} ", bar)];
             spans.extend(highlight(&chunk, lang));
             out.push(Line::from(spans));
         }
@@ -894,13 +896,12 @@ fn render_code_block(
     if code.len() < total {
         out.push(Line::from(Span::styled(
             format!(
-                "  \u{2938} {} more line(s) \u{b7} ctrl+o to expand",
+                "  \u{2502} ... ({} more lines, ctrl+o to expand)",
                 total - code.len()
             ),
             Style::default().fg(Theme::MUTED),
         )));
     }
-    out.push(Line::from(Span::styled("  ```", border)));
 }
 
 /// A small highlighter over pi's `syntax*` tokens. pi delegates to cli-highlight
@@ -1299,8 +1300,7 @@ mod tests {
         for l in &rendered {
             eprintln!("[{l}]");
         }
-        assert_eq!(rendered.len(), 8, "{rendered:#?}");
-        assert_eq!(rendered.iter().filter(|l| l.trim().is_empty()).count(), 1);
+        assert_eq!(rendered.len(), 6, "{rendered:#?}");
     }
 
     #[test]
@@ -1314,7 +1314,7 @@ mod tests {
         for l in &lines {
             eprintln!("[{}]", text_of(l));
         }
-        assert_eq!(lines.len(), 8, "fence+5code+fence+trailing");
+        assert_eq!(lines.len(), 6, "5code+trailing");
     }
 
     #[test]
