@@ -480,25 +480,93 @@ fn render_assistant(out: &mut Vec<Line<'static>>, text: &str, width: usize) {
             }
             continue;
         }
-        let (style, body) = markdown_line(raw);
-        for chunk in wrap(&body, width.saturating_sub(2)) {
-            out.push(Line::from(Span::styled(format!(" {chunk}"), style)));
+        let (style, body, marker) = markdown_line(raw);
+        let indent = if marker.is_some() { 4 } else { 1 };
+        for (i, chunk) in wrap(&body, width.saturating_sub(indent))
+            .into_iter()
+            .enumerate()
+        {
+            let mut spans: Vec<Span<'static>> = Vec::new();
+            if i == 0 {
+                match &marker {
+                    Some(m) => spans.push(Span::styled(
+                        format!(" {m} "),
+                        Style::default().fg(Theme::MD_BULLET),
+                    )),
+                    None => spans.push(Span::raw(" ")),
+                }
+            } else {
+                spans.push(Span::raw(" ".repeat(indent)));
+            }
+            spans.extend(inline_spans(&chunk, style));
+            out.push(Line::from(spans));
         }
     }
 }
 
-fn markdown_line(raw: &str) -> (Style, String) {
+/// Style inline `` `code` `` and `**bold**` within a wrapped chunk.
+fn inline_spans(text: &str, base: Style) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    let mut rest = text;
+    while !rest.is_empty() {
+        let code = rest
+            .find('`')
+            .and_then(|i| rest[i + 1..].find('`').map(|j| (i, j)));
+        let bold = rest
+            .find("**")
+            .and_then(|i| rest[i + 2..].find("**").map(|j| (i, j)));
+        let next = match (code, bold) {
+            (Some(c), Some(b)) => Some(if c.0 <= b.0 { (true, c) } else { (false, b) }),
+            (Some(c), None) => Some((true, c)),
+            (None, Some(b)) => Some((false, b)),
+            (None, None) => None,
+        };
+        let Some((is_code, (i, j))) = next else {
+            spans.push(Span::styled(rest.to_string(), base));
+            break;
+        };
+        if i > 0 {
+            spans.push(Span::styled(rest[..i].to_string(), base));
+        }
+        if is_code {
+            spans.push(Span::styled(
+                rest[i + 1..i + 1 + j].to_string(),
+                Style::default().fg(Theme::MD_CODE),
+            ));
+            rest = &rest[i + 2 + j..];
+        } else {
+            spans.push(Span::styled(
+                rest[i + 2..i + 2 + j].to_string(),
+                base.add_modifier(Modifier::BOLD),
+            ));
+            rest = &rest[i + 4 + j..];
+        }
+    }
+    spans
+}
+
+fn markdown_line(raw: &str) -> (Style, String, Option<String>) {
     let t = raw.trim_start();
-    if let Some(rest) = t.strip_prefix("#") {
+    let body = Style::default().fg(Theme::TEXT);
+    if let Some(rest) = t.strip_prefix('#') {
         return (
             Style::default()
                 .fg(Theme::MD_HEADING)
                 .add_modifier(Modifier::BOLD),
             rest.trim_start_matches('#').trim().to_string(),
+            None,
         );
     }
     if let Some(rest) = t.strip_prefix("- ").or_else(|| t.strip_prefix("* ")) {
-        return (Style::default().fg(Theme::TEXT), format!("{} {rest}", "•"));
+        return (body, rest.to_string(), Some("•".into()));
+    }
+    let digits: String = t.chars().take_while(|c| c.is_ascii_digit()).collect();
+    if !digits.is_empty() && t[digits.len()..].starts_with(". ") {
+        return (
+            body,
+            t[digits.len() + 2..].to_string(),
+            Some(format!("{digits}.")),
+        );
     }
     if t.starts_with('>') {
         return (
@@ -506,9 +574,10 @@ fn markdown_line(raw: &str) -> (Style, String) {
                 .fg(Theme::MUTED)
                 .add_modifier(Modifier::ITALIC),
             t.trim_start_matches('>').trim().to_string(),
+            None,
         );
     }
-    (Style::default().fg(Theme::TEXT), raw.to_string())
+    (body, raw.to_string(), None)
 }
 
 /// Pad a line's spans to `width` and apply a background across the whole row.
