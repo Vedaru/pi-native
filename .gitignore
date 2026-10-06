@@ -9,3 +9,5 @@ dist/
 
 # runtime trigger state (VED-372), not source
 .pipelets/
+
+tui/target/
