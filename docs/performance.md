@@ -2,7 +2,7 @@
 
 pipelets is built to be a **low-memory, low-CPU bare core** so a swarm of units
 is cheap to run. Every figure below was measured on the host with the release
-build on 2026-10-05 (`x86_64-unknown-linux-gnu`, `lto="fat"`, `opt-level=2`,
+build on 2026-10-06 (`x86_64-unknown-linux-gnu`, `lto="fat"`, `opt-level=2`,
 `panic="abort"`, stripped).
 
 Reproduce:
@@ -52,7 +52,7 @@ memory and CPU. 20,000 calls each:
 | `read` (40 KB each, 819 MB total) | 0.38 s | 5.2 MB | 0.38 s |
 
 Tools stream with bounded buffers: a 200 MB file read peaks at ~5 MB. Without
-the window, 50,000 `ls` turns: **0.07 s / 5.1 MB**.
+the window, 50,000 `ls` turns: **0.07 s / 5.6 MB**.
 
 ## Long sessions (compaction)
 
@@ -85,13 +85,17 @@ per-unit RSS (release build):
 
 | Swarm | Per unit | Total |
 | --- | --- | --- |
-| 8 idle (`--rpc`) | 4.4 MB | 35.2 MB |
-| 32 idle (`--rpc`) | 4.4 MB | 141.7 MB |
-| 8 busy (`read` sessions, 5k turns) | 6.2 MB | 49.3 MB |
+| 8 idle (`--rpc`) | 4.5 MB | 36 MB |
+| 32 idle (`--rpc`) | 4.5 MB | 142.7 MB |
+| 8 busy (`read` sessions, 5k turns) | 6.6 MB | 52.7 MB |
 
 Because the dynamic build shares libc pages, a swarm costs less than the
-per-unit sum suggests. An idle unit is ~4.4 MB, so a 32-agent swarm fits in
+per-unit sum suggests. An idle unit is ~4.5 MB, so a 32-agent swarm fits in
 ~143 MB — the same order as **one** pi-node process.
+
+Swarm inlets/outlets cost nothing at idle: each unit polls its peers' `.outlet`
+files once per model call, and a unit with no `PIPELETS_SWARM_DIR` returns
+`None` without allocating.
 
 ## Images (`read` attachments)
 

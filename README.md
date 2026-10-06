@@ -23,7 +23,7 @@ Linear project: *pi native runtime: Rust memory-heavy rewrite, drop Node*
 ## Why pipelets
 
 One small self-contained binary per unit, no Node/V8, provider-identical to pi.
-Measured 2026-10-05 (release build, x86_64; see [performance](docs/performance.md)):
+Measured 2026-10-06 (release build, x86_64; see [performance](docs/performance.md)):
 
 | | pipelets | pi-node |
 | --- | --- | --- |

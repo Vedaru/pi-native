@@ -1158,27 +1158,30 @@ fn run_turn<R: std::io::BufRead, W: std::io::Write>(
     io: &std::rc::Rc<SharedIo<R, W>>,
     session: &SessionState,
 ) -> Result<(), AgentError> {
-    agent.run_with(|event| {
-        let event = match event {
-            AgentEvent::Compacted { dropped, .. } => {
-                let mut translated = from_agent_event(event.clone());
-                if let Event::Compacted {
-                    first_kept_entry_id,
-                    ..
-                } = &mut translated
-                {
-                    *first_kept_entry_id = session
-                        .journal
-                        .as_ref()
-                        .and_then(|journal| journal.entry_id_for_message(*dropped))
-                        .map(str::to_string);
+    agent.run_with_steering(
+        |event| {
+            let event = match event {
+                AgentEvent::Compacted { dropped, .. } => {
+                    let mut translated = from_agent_event(event.clone());
+                    if let Event::Compacted {
+                        first_kept_entry_id,
+                        ..
+                    } = &mut translated
+                    {
+                        *first_kept_entry_id = session
+                            .journal
+                            .as_ref()
+                            .and_then(|journal| journal.entry_id_for_message(*dropped))
+                            .map(str::to_string);
+                    }
+                    translated
                 }
-                translated
-            }
-            _ => from_agent_event(event.clone()),
-        };
-        io.write(&event)
-    })
+                _ => from_agent_event(event.clone()),
+            };
+            io.write(&event)
+        },
+        || io.take_shouts(),
+    )
 }
 
 fn drive<R: std::io::BufRead, W: std::io::Write, F: FnMut(&Agent)>(
@@ -1192,12 +1195,6 @@ fn drive<R: std::io::BufRead, W: std::io::Write, F: FnMut(&Agent)>(
         version: PROTOCOL_VERSION,
     });
     while let Some((id, request)) = io.next_request() {
-        // Inlet: peer actions since the last turn join the follow-up queue as
-        // one short block, so they ride the same delivery as the unit's own
-        // follow-ups.
-        if let Some(shouts) = io.take_shouts() {
-            session.follow_up.push(shouts);
-        }
         // A prompt to run after the request is applied. `reset` sets this too,
         // so a clear-and-re-run shares the streaming turn below.
         let mut run: Option<String> = None;

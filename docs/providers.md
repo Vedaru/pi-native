@@ -42,7 +42,11 @@ cargo run -q -p pipelets -- prompt-cache-key --session-id sess-123 --responses
 
 Because outbound requests are byte-identical to pi, the prompt cache behaves the
 same: on DeepSeek the system+tools prefix (1,408 tokens) is cached and a
-multi-turn session runs at ~86% hit per turn — pi's numbers.
+multi-turn session runs at ~86% hit per turn — pi's numbers. Measured
+2026-10-06: 86.6 / 86.0 / 85.3% over three warm turns. A swarm unit measures the
+same (85.8 / 92.2 / 89.7%): the `<swarm>` prompt section is a stable prefix,
+cached like the rest of system+tools, and a peer shout only extends the
+uncached suffix of the current turn.
 
 ## Wire-parity harness
 

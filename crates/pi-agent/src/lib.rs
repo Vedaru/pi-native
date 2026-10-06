@@ -561,10 +561,32 @@ impl Agent {
     /// without tool calls (or aborts), so a long tool-driven task is never cut
     /// off mid-run by a turn count.
     pub fn run_with<F: FnMut(&AgentEvent)>(&mut self, mut on_event: F) -> Result<(), AgentError> {
+        self.run_with_steering(&mut on_event, || None)
+    }
+
+    /// Like [`Agent::run_with`], but before **every** model call, drain
+    /// `steering` into the conversation. A swarm inlet uses this to land a
+    /// peer's action mid-turn — at the agent's next reasoning step — instead of
+    /// waiting for the turn to end. `None` costs nothing, so a lone unit pays
+    /// no allocation for a queue it never uses.
+    pub fn run_with_steering<F, S>(
+        &mut self,
+        mut on_event: F,
+        mut steering: S,
+    ) -> Result<(), AgentError>
+    where
+        F: FnMut(&AgentEvent),
+        S: FnMut() -> Option<String>,
+    {
         let tools: Vec<ToolSpec> = self.tools.iter().map(|tool| tool.spec()).collect();
         on_event(&AgentEvent::AgentStart);
 
         loop {
+            // A peer action that arrived since the last model call is visible
+            // to this one; no extra turn is needed.
+            for message in steering() {
+                self.push_user(message);
+            }
             on_event(&AgentEvent::TurnStart);
             let request = CompletionRequest {
                 system: &self.system,
