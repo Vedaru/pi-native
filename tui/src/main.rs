@@ -270,55 +270,6 @@ fn resume_items(app: &App) -> Vec<Sugg> {
         .collect()
 }
 
-fn tree_items(app: &App) -> Vec<Sugg> {
-    let mut out = Vec::new();
-    for node in &app.tree {
-        flatten_tree(node, 0, &mut out);
-    }
-    out
-}
-
-/// Depth-first over pi's `SessionTreeNode { entry, children }`.
-fn flatten_tree(node: &Value, depth: usize, out: &mut Vec<Sugg>) {
-    let entry = node.get("entry");
-    let id = entry
-        .and_then(|e| e.get("id"))
-        .and_then(Value::as_str)
-        .unwrap_or("");
-    let role = entry
-        .and_then(|e| e.get("message"))
-        .and_then(|m| m.get("role"))
-        .and_then(Value::as_str)
-        .or_else(|| entry.and_then(|e| e.get("type")).and_then(Value::as_str))
-        .unwrap_or("");
-    let text = entry
-        .and_then(|e| e.get("message"))
-        .and_then(|m| m.get("content"))
-        .and_then(Value::as_array)
-        .map(|parts| {
-            parts
-                .iter()
-                .filter_map(|part| part.get("text").and_then(Value::as_str))
-                .collect::<Vec<_>>()
-                .join(" ")
-        })
-        .unwrap_or_default();
-    out.push(Sugg {
-        label: format!(
-            "{}{}",
-            "  ".repeat(depth),
-            shorten(&text.replace('\n', " "), 64)
-        ),
-        fill: String::new(),
-        detail: format!("{role} · {id}"),
-    });
-    if let Some(children) = node.get("children").and_then(Value::as_array) {
-        for child in children {
-            flatten_tree(child, depth + 1, out);
-        }
-    }
-}
-
 fn settings_items(app: &App) -> Vec<Sugg> {
     vec![
         Sugg {
@@ -349,6 +300,132 @@ fn settings_items(app: &App) -> Vec<Sugg> {
             detail: "rename the session".into(),
         },
     ]
+}
+
+fn tree_items(app: &App) -> Vec<Sugg> {
+    let mut out = Vec::new();
+    let roots = app.tree.len();
+    for (i, node) in app.tree.iter().enumerate() {
+        let mut gutters = Vec::new();
+        flatten_tree(node, 0, roots > 1 && i + 1 == roots, &mut gutters, &mut out);
+    }
+    if !out.is_empty() {
+        out.push(Sugg {
+            label: format!("  ({}/{})", (app.sel + 1).min(out.len()), out.len()),
+            fill: String::new(),
+            detail: String::new(),
+        });
+    }
+    out
+}
+
+/// Depth-first over pi's `SessionTreeNode { entry, children }`, reproducing the
+/// connector/gutter prefix from `tree-selector.ts`.
+fn flatten_tree(
+    node: &Value,
+    depth: usize,
+    is_last: bool,
+    gutters: &mut Vec<bool>,
+    out: &mut Vec<Sugg>,
+) {
+    let mut prefix = String::new();
+    for &show in gutters.iter() {
+        prefix.push_str(if show { "\u{2502}  " } else { "   " });
+    }
+    if depth > 0 {
+        prefix.push_str(if is_last { "\u{2514}\u{2500} " } else { "\u{251c}\u{2500} " });
+    }
+    out.push(Sugg {
+        label: format!("{prefix}{}", entry_display(node)),
+        fill: String::new(),
+        detail: String::new(),
+    });
+    if let Some(children) = node.get("children").and_then(Value::as_array) {
+        for (i, child) in children.iter().enumerate() {
+            let last = i + 1 == children.len();
+            // The root is not a branch point, so it contributes no gutter.
+            if depth > 0 {
+                gutters.push(!is_last);
+            }
+            flatten_tree(child, depth + 1, last, gutters, out);
+            if depth > 0 {
+                gutters.pop();
+            }
+        }
+    }
+}
+
+/// pi's `getEntryDisplayText`, trimmed to the entry types pipelets writes.
+fn entry_display(node: &Value) -> String {
+    let entry = node.get("entry");
+    let kind = entry
+        .and_then(|e| e.get("type"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let message = entry.and_then(|e| e.get("message"));
+    let field = |k: &str| {
+        entry
+            .and_then(|e| e.get(k))
+            .and_then(Value::as_str)
+            .unwrap_or("")
+    };
+    let normalized = |text: &str| shorten(&text.replace(['\n', '\t'], " "), 60);
+    match kind {
+        "message" => match message
+            .and_then(|m| m.get("role"))
+            .and_then(Value::as_str)
+            .unwrap_or("")
+        {
+            "user" => format!("user: {}", normalized(&content_text(message))),
+            "assistant" => format!("assistant: {}", normalized(&content_text(message))),
+            "toolResult" => format!(
+                "[{}]",
+                message
+                    .and_then(|m| m.get("toolName"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("tool")
+            ),
+            "bashExecution" => format!(
+                "[bash]: {}",
+                normalized(
+                    message
+                        .and_then(|m| m.get("command"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                )
+            ),
+            other => format!("[{other}]"),
+        },
+        "compaction" => format!(
+            "[compaction: {}k tokens]",
+            entry
+                .and_then(|e| e.get("tokensBefore"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0)
+                / 1000
+        ),
+        "model_change" => format!("[model: {}]", field("modelId")),
+        "thinking_level_change" => format!("[thinking: {}]", field("thinkingLevel")),
+        "branch_summary" => format!("[branch summary]: {}", normalized(field("summary"))),
+        "session_info" => format!("[title: {}]", field("name")),
+        "" => String::new(),
+        other => format!("[{other}]"),
+    }
+}
+
+/// Join an entry's text content parts.
+fn content_text(message: Option<&Value>) -> String {
+    message
+        .and_then(|m| m.get("content"))
+        .and_then(Value::as_array)
+        .map(|parts| {
+            parts
+                .iter()
+                .filter_map(|part| part.get("text").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .unwrap_or_default()
 }
 
 /// pi's keyboard-shortcuts block (`/hotkeys`), limited to this TUI's keys.
