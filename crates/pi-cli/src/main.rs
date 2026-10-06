@@ -606,63 +606,6 @@ fn agent_dir() -> PathBuf {
     }
 }
 
-/// Provider defaults from pi's own config, so a machine already signed in to
-/// pi runs `pipelets --serve` with no provider flags.
-struct PiDefaults {
-    provider: String,
-    model: String,
-    base_url: String,
-    api_key: String,
-    thinking_format: Option<String>,
-    max_tokens: Option<i64>,
-}
-
-fn pi_defaults() -> Option<PiDefaults> {
-    pi_defaults_in(&agent_dir().join("agent"))
-}
-
-/// Read `settings.json` (default provider/model), the matching entry in
-/// `models-store.json` (`api`, `baseUrl`, `compat.thinkingFormat`, `maxTokens`),
-/// and `auth.json` (the provider key), all relative to `dir`.
-fn pi_defaults_in(dir: &std::path::Path) -> Option<PiDefaults> {
-    let read = |name: &str| std::fs::read_to_string(dir.join(name)).ok();
-    let settings: serde_json::Value = serde_json::from_str(&read("settings.json")?).ok()?;
-    let vendor = settings.get("defaultProvider")?.as_str()?.to_string();
-    let model = settings.get("defaultModel")?.as_str()?.to_string();
-
-    let store: serde_json::Value = serde_json::from_str(&read("models-store.json")?).ok()?;
-    let entry = store
-        .get(&vendor)?
-        .get("models")?
-        .as_array()?
-        .iter()
-        .find(|entry| entry.get("id").and_then(serde_json::Value::as_str) == Some(model.as_str()))?;
-    let provider = entry
-        .get("api")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("openai-completions")
-        .to_string();
-    let base_url = entry.get("baseUrl")?.as_str()?.to_string();
-    let thinking_format = entry
-        .get("compat")
-        .and_then(|compat| compat.get("thinkingFormat"))
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_string);
-    let max_tokens = entry.get("maxTokens").and_then(serde_json::Value::as_i64);
-
-    let auth: serde_json::Value = serde_json::from_str(&read("auth.json")?).ok()?;
-    let api_key = auth.get(&vendor)?.get("key")?.as_str()?.to_string();
-
-    Some(PiDefaults {
-        provider,
-        model,
-        base_url,
-        api_key,
-        thinking_format,
-        max_tokens,
-    })
-}
-
 /// Build pi's system prompt for the current environment (parity with pi's default).
 fn system_prompt_for(cwd: &std::path::Path) -> String {
     let selected_tools = default_tools()
@@ -701,42 +644,33 @@ fn missing(what: &str) -> ! {
 
 impl Cli {
     fn provider_config(&self) -> ProviderConfig {
-        // Explicit flag, then env, then pi's own config: a machine signed in to
-        // pi needs no flags at all.
-        let pi = pi_defaults();
+        // Explicit flag, then environment. Unconfigured fails loudly rather
+        // than guessing a provider.
         let provider = self
             .provider
             .clone()
             .or_else(|| std::env::var("PIPELETS_PROVIDER").ok())
-            .or_else(|| pi.as_ref().map(|pi| pi.provider.clone()))
             .unwrap_or_else(|| {
-                missing("--provider (openai-completions or openai-responses), or a pi default")
+                missing("--provider (openai-completions or openai-responses) or PIPELETS_PROVIDER")
             });
         let model = self
             .model
             .clone()
             .or_else(|| std::env::var("PIPELETS_MODEL").ok())
-            .or_else(|| pi.as_ref().map(|pi| pi.model.clone()))
-            .unwrap_or_else(|| missing("--model, or a pi default"));
+            .unwrap_or_else(|| missing("--model or PIPELETS_MODEL"));
         let base_url = self
             .base_url
             .clone()
             .or_else(|| std::env::var("OPENAI_BASE_URL").ok())
             .or_else(|| std::env::var("PIPELETS_BASE_URL").ok())
-            .or_else(|| pi.as_ref().map(|pi| pi.base_url.clone()))
-            .unwrap_or_else(|| missing("--base-url, OPENAI_BASE_URL, or a pi default"));
+            .unwrap_or_else(|| missing("--base-url or OPENAI_BASE_URL"));
         let api_key = self
             .api_key
             .clone()
             .or_else(|| std::env::var("OPENAI_API_KEY").ok())
             .or_else(|| std::env::var("PIPELETS_API_KEY").ok())
-            .or_else(|| pi.as_ref().map(|pi| pi.api_key.clone()))
-            .unwrap_or_else(|| missing("--api-key, OPENAI_API_KEY, or a pi default"));
-        let thinking_format = self
-            .thinking_format
-            .clone()
-            .or_else(|| pi.as_ref().and_then(|pi| pi.thinking_format.clone()));
-        let thinking_format = match thinking_format.as_deref() {
+            .unwrap_or_else(|| missing("--api-key or OPENAI_API_KEY"));
+        let thinking_format = match self.thinking_format.as_deref() {
             Some("deepseek") => ThinkingFormat::Deepseek,
             Some("none") | None => ThinkingFormat::None,
             Some(other) => {
@@ -749,9 +683,7 @@ impl Cli {
             model,
             base_url,
             api_key,
-            max_tokens: self
-                .max_tokens
-                .or_else(|| pi.as_ref().and_then(|pi| pi.max_tokens)),
+            max_tokens: self.max_tokens,
             thinking_format,
             reasoning_effort: self.reasoning_effort.clone(),
         }
