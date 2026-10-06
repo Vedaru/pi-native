@@ -253,7 +253,7 @@ struct ToolCard {
 
 enum Entry {
     User(String),
-    Assistant(String),
+    Assistant { text: String, expanded: bool },
     Thinking { text: String, expanded: bool },
     Tool(ToolCard),
     Error(String),
@@ -265,6 +265,7 @@ impl Entry {
         match self {
             Entry::Thinking { expanded, .. } => *expanded = !*expanded,
             Entry::Tool(card) => card.expanded = !card.expanded,
+            Entry::Assistant { expanded, .. } => *expanded = !*expanded,
             _ => {}
         }
     }
@@ -298,11 +299,11 @@ struct App {
     layout: RefCell<LineIndex>,
     /// Set when a cached (non-tail) entry changed and the cache must rebuild.
     dirty: std::cell::Cell<bool>,
-    /// Ctrl+O: expand tool output and long code blocks.
-    expanded: std::cell::Cell<bool>,
     last_len: std::cell::Cell<usize>,
     /// Transcript height from the last frame, for PageUp/PageDown.
     page: std::cell::Cell<usize>,
+    /// Highest useful scroll offset, from the last frame.
+    max_scroll: std::cell::Cell<u16>,
     sel: usize,
     /// entry index owning each rendered transcript line (for click hit-testing)
     row_owner: Rc<RefCell<Vec<usize>>>,
@@ -329,9 +330,9 @@ impl App {
             scroll: 0,
             layout: RefCell::new(LineIndex::default()),
             dirty: std::cell::Cell::new(false),
-            expanded: std::cell::Cell::new(false),
             last_len: std::cell::Cell::new(0),
             page: std::cell::Cell::new(20),
+            max_scroll: std::cell::Cell::new(0),
             sel: 0,
             row_owner: Rc::new(RefCell::new(Vec::new())),
         }
@@ -399,7 +400,7 @@ impl App {
                 self.running = false;
                 self.status = "ready".into();
             }
-            "response" => {
+            "response" if !matches!(text("command"), "prompt" | "steer" | "follow_up") => {
                 let ok = v.get("success").and_then(Value::as_bool).unwrap_or(false);
                 let data = v.get("data").cloned().unwrap_or(Value::Null);
                 let detail = compact(&data);
@@ -444,11 +445,14 @@ impl App {
     }
 
     fn push_assistant(&mut self, text: String) {
-        if let Some(Entry::Assistant(prev)) = self.entries.last_mut() {
+        if let Some(Entry::Assistant { text: prev, .. }) = self.entries.last_mut() {
             prev.push('\n');
             prev.push_str(&text);
         } else {
-            self.entries.push(Entry::Assistant(text));
+            self.entries.push(Entry::Assistant {
+                text,
+                expanded: false,
+            });
         }
     }
 
@@ -596,8 +600,7 @@ fn main() -> std::io::Result<()> {
                             break 'outer
                         }
                         KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                            app.expanded.set(!app.expanded.get());
-                            toggle_tools(&mut app);
+                            toggle_all(&mut app);
                             app.dirty.set(true);
                         }
                         KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -644,10 +647,15 @@ fn main() -> std::io::Result<()> {
                                 }
                             }
                         }
-                        KeyCode::Up => app.scroll = app.scroll.saturating_add(1),
+                        KeyCode::Up => {
+                            app.scroll = app.scroll.saturating_add(1).min(app.max_scroll.get())
+                        }
                         KeyCode::Down => app.scroll = app.scroll.saturating_sub(1),
                         KeyCode::PageUp => {
-                            app.scroll = app.scroll.saturating_add(app.page.get() as u16)
+                            app.scroll = app
+                                .scroll
+                                .saturating_add(app.page.get() as u16)
+                                .min(app.max_scroll.get())
                         }
                         KeyCode::PageDown => {
                             app.scroll = app.scroll.saturating_sub(app.page.get() as u16)
@@ -674,7 +682,9 @@ fn main() -> std::io::Result<()> {
                     }
                 }
                 CEvent::Mouse(m) => match m.kind {
-                    MouseEventKind::ScrollUp => app.scroll = app.scroll.saturating_add(3),
+                    MouseEventKind::ScrollUp => {
+                        app.scroll = app.scroll.saturating_add(3).min(app.max_scroll.get())
+                    }
                     MouseEventKind::ScrollDown => app.scroll = app.scroll.saturating_sub(3),
                     MouseEventKind::Down(MouseButton::Left) => {
                         let owner = app.row_owner.borrow().get(m.row as usize).copied();
@@ -711,37 +721,49 @@ fn main() -> std::io::Result<()> {
 fn build_window(app: &App, width: usize, height: usize) -> (Vec<Line<'static>>, Vec<usize>) {
     ensure_layout(app, width);
     let l = app.layout.borrow();
+    // Live, not-yet-committed content streams at the tail: thinking, then text.
+    let mut live: Vec<Line<'static>> = Vec::new();
+    if !app.thinking.trim().is_empty() {
+        render_thinking(&mut live, &app.thinking, true, width);
+    }
+    if !app.streaming.is_empty() {
+        render_assistant(&mut live, &app.streaming, width, true);
+    }
+    let live_len = live.len();
     let spinner = app.running;
-    let total = l.total + usize::from(spinner);
+    let total = l.total + live_len + usize::from(spinner);
     let max_scroll = total.saturating_sub(height);
+    app.max_scroll.set(max_scroll as u16);
     let scroll = (app.scroll as usize).min(max_scroll);
     let start = max_scroll - scroll;
     let end = (start + height).min(total);
 
     let mut visible = Vec::with_capacity(end - start);
     let mut owners = Vec::with_capacity(end - start);
-    if app.entries.is_empty() {
-        if spinner && end > start {
-            visible.push(spinner_line(app));
+    if !app.entries.is_empty() {
+        let mut idx = l.start.partition_point(|s| *s <= start).saturating_sub(1);
+        let mut li = l.start[idx];
+        while idx < app.entries.len() && li < end {
+            let (lines, entry_owners) = render_entry(&app.entries[idx], idx, width);
+            for (j, line) in lines.into_iter().enumerate() {
+                let n = li + j;
+                if n >= start && n < end {
+                    visible.push(line);
+                    owners.push(entry_owners[j]);
+                }
+            }
+            li += l.count[idx];
+            idx += 1;
+        }
+    }
+    for (j, line) in live.into_iter().enumerate() {
+        let n = l.total + j;
+        if n >= start && n < end {
+            visible.push(line);
             owners.push(usize::MAX);
         }
-        return (visible, owners);
     }
-    let mut idx = l.start.partition_point(|s| *s <= start).saturating_sub(1);
-    let mut li = l.start[idx];
-    while idx < app.entries.len() && li < end {
-        let (lines, entry_owners) = render_entry(&app.entries[idx], idx, width, app.expanded.get());
-        for (j, line) in lines.into_iter().enumerate() {
-            let n = li + j;
-            if n >= start && n < end {
-                visible.push(line);
-                owners.push(entry_owners[j]);
-            }
-        }
-        li += l.count[idx];
-        idx += 1;
-    }
-    if spinner && l.total >= start && l.total < end {
+    if spinner && l.total + live_len >= start && l.total + live_len < end {
         visible.push(spinner_line(app));
         owners.push(usize::MAX);
     }
@@ -776,7 +798,7 @@ fn ensure_layout(app: &App, width: usize) {
         l.count.clear();
         l.total = 0;
         for (i, e) in app.entries.iter().enumerate() {
-            let c = render_entry(e, i, width, app.expanded.get()).0.len();
+            let c = render_entry(e, i, width).0.len();
             let at = l.total;
             l.start.push(at);
             l.count.push(c);
@@ -787,9 +809,7 @@ fn ensure_layout(app: &App, width: usize) {
         return;
     }
     if let Some(e) = app.entries.last() {
-        let c = render_entry(e, app.entries.len() - 1, width, app.expanded.get())
-            .0
-            .len();
+        let c = render_entry(e, app.entries.len() - 1, width).0.len();
         let last = l.count.len() - 1;
         if c != l.count[last] {
             l.total = l.total - l.count[last] + c;
@@ -1006,16 +1026,11 @@ fn draw_editor(frame: &mut ratatui::Frame, area: Rect, app: &App) {
     frame.set_cursor_position((inner.x + 2 + app.input.chars().count() as u16, inner.y));
 }
 
-fn render_entry(
-    entry: &Entry,
-    index: usize,
-    width: usize,
-    expanded: bool,
-) -> (Vec<Line<'static>>, Vec<usize>) {
+fn render_entry(entry: &Entry, index: usize, width: usize) -> (Vec<Line<'static>>, Vec<usize>) {
     let mut lines = Vec::new();
     match entry {
         Entry::User(text) => block_msg(&mut lines, text, width, Theme::USER_BG, Theme::TEXT),
-        Entry::Assistant(text) => render_assistant(&mut lines, text, width, expanded),
+        Entry::Assistant { text, expanded } => render_assistant(&mut lines, text, width, *expanded),
         Entry::Thinking { text, expanded } => render_thinking(&mut lines, text, *expanded, width),
         Entry::Tool(card) => render_tool(&mut lines, card, width),
         Entry::Error(text) => block_msg(&mut lines, text, width, Theme::TOOL_ERROR_BG, Theme::TEXT),
@@ -1476,14 +1491,20 @@ fn types(lang: &str) -> &'static [&'static str] {
     }
 }
 
-fn toggle_tools(app: &mut App) {
-    let any_collapsed = app
-        .entries
-        .iter()
-        .any(|e| matches!(e, Entry::Tool(c) if !c.expanded));
+/// Ctrl+O: if anything is collapsed, expand everything; else collapse everything.
+fn toggle_all(app: &mut App) {
+    let any_collapsed = app.entries.iter().any(|e| match e {
+        Entry::Tool(c) => !c.expanded,
+        Entry::Assistant { expanded, .. } => !*expanded,
+        Entry::Thinking { expanded, .. } => !*expanded,
+        _ => false,
+    });
     for e in app.entries.iter_mut() {
-        if let Entry::Tool(c) = e {
-            c.expanded = any_collapsed;
+        match e {
+            Entry::Tool(c) => c.expanded = any_collapsed,
+            Entry::Assistant { expanded, .. } => *expanded = any_collapsed,
+            Entry::Thinking { expanded, .. } => *expanded = any_collapsed,
+            _ => {}
         }
     }
 }
@@ -1612,6 +1633,13 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
 mod tests {
     use super::*;
 
+    fn assistant(text: impl Into<String>) -> Entry {
+        Entry::Assistant {
+            text: text.into(),
+            expanded: false,
+        }
+    }
+
     fn text_of(line: &Line) -> String {
         line.spans.iter().map(|s| s.content.as_ref()).collect()
     }
@@ -1631,11 +1659,10 @@ mod tests {
     #[test]
     fn an_assistant_entry_renders_code_tightly() {
         let mut app = App::new("m".into(), "p".into(), "off".into(), 65536);
-        app.entries.push(Entry::Assistant(
-            "```rust\nstruct C {\n}\n\nimpl C {\n}\n```".into(),
-        ));
+        app.entries
+            .push(assistant("```rust\nstruct C {\n}\n\nimpl C {\n}\n```"));
         let last = app.entries.len() - 1;
-        let (lines, _) = render_entry(&app.entries[last], last, 80, false);
+        let (lines, _) = render_entry(&app.entries[last], last, 80);
         for l in &lines {
             eprintln!("[{}]", text_of(l));
         }
@@ -1646,7 +1673,7 @@ mod tests {
     fn long_transcript_render_cost() {
         let mut app = App::new("m".into(), "p".into(), "off".into(), 65536);
         for i in 0..2000 {
-            app.entries.push(Entry::Assistant(format!(
+            app.entries.push(assistant(format!(
                 "line {i}: some assistant text with `code` and **bold** and a - bullet"
             )));
             app.entries.push(Entry::Tool(ToolCard {
@@ -1661,7 +1688,7 @@ mod tests {
         for _ in 0..30 {
             let mut total = 0;
             for (i, e) in app.entries.iter().enumerate() {
-                let (lines, _) = render_entry(e, i, 100, false);
+                let (lines, _) = render_entry(e, i, 100);
                 total += lines.len();
             }
             assert!(total > 1000);
@@ -1679,7 +1706,7 @@ mod tests {
     fn long_context_frames_stay_cheap() {
         let mut app = App::new("m".into(), "p".into(), "off".into(), 65536);
         for i in 0..3000 {
-            app.entries.push(Entry::Assistant(format!(
+            app.entries.push(assistant(format!(
                 "line {i}: assistant text with `code` and **bold** and a - bullet"
             )));
             app.entries.push(Entry::Tool(ToolCard {
@@ -1708,7 +1735,7 @@ mod tests {
     fn big_app(n: usize) -> App {
         let mut app = App::new("m".into(), "p".into(), "off".into(), 65536);
         for i in 0..n {
-            app.entries.push(Entry::Assistant(format!(
+            app.entries.push(assistant(format!(
                 "line {i}: assistant text with `code`, **bold**, and a - bullet that is fairly long"
             )));
             app.entries.push(Entry::Tool(ToolCard {
@@ -1746,7 +1773,7 @@ mod tests {
             .entries
             .iter()
             .map(|e| match e {
-                Entry::Assistant(s) => s.len(),
+                Entry::Assistant { text, .. } => text.len(),
                 Entry::Tool(t) => t.name.len() + t.summary.len() + t.output.len(),
                 _ => 0,
             })
@@ -1771,7 +1798,7 @@ mod tests {
                 ));
             }
             block.push_str("```");
-            app.entries.push(Entry::Assistant(block));
+            app.entries.push(assistant(block));
         }
         let _ = build_window(&app, 100, 30);
         let start = std::time::Instant::now();
